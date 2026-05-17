@@ -2707,6 +2707,20 @@ def get_btc_context() -> dict:
 
     trend = tf_4h.get("structure", {}).get("trend", "UNKNOWN")
     price = tf_4h.get("price", 0)
+
+    # ── Fallback: kalau klines gagal, fetch price dari ticker ──
+    if price == 0 or tf_4h.get("error"):
+        try:
+            r = requests.get(
+                f"{BINANCE_BASE}/ticker/price",
+                params={"symbol": "BTCUSDT"}, timeout=8
+            )
+            if r.status_code == 200:
+                price = float(r.json().get("price", 0))
+                log.info(f"BTC price fallback (ticker): ${price:,.2f}")
+        except Exception as e:
+            log.warning(f"BTC ticker fallback error: {e}")
+
     env   = "BULLISH" if trend == "BULLISH" else "BEARISH" if trend == "BEARISH" else \
             "TRANSITIONING" if tf_4h.get("structure", {}).get("choch") else "NEUTRAL"
 
@@ -3626,9 +3640,26 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
         lines.append(f"💰 <code>{fmt_num(coin['price'])}</code>  📊 {coin['change_24h']:+.2f}%  📈 Vol +{coin['volume_increase_pct']:.1f}%")
 
         if not binance_sym:
-            lines.append("⚠️ SMC analysis: symbol not in map")
-            lines.append("─────────────────────")
-            continue
+            # ── Auto-resolve: coba cari di Binance pakai symbol langsung ──
+            candidate = f"{sym}USDT"
+            try:
+                r = requests.get(
+                    f"{BINANCE_BASE}/ticker/price",
+                    params={"symbol": candidate}, timeout=5
+                )
+                if r.status_code == 200:
+                    binance_sym = candidate
+                    SYMBOL_MAP[coin["id"]] = candidate  # cache untuk scan berikutnya
+                    TICKER_TO_BINANCE[sym] = candidate
+                    log.info(f"Auto-resolved {sym} → {candidate}")
+                else:
+                    lines.append(f"⚠️ {sym} tidak tersedia di Binance Futures — skip SMC")
+                    lines.append("─────────────────────")
+                    continue
+            except Exception:
+                lines.append(f"⚠️ {sym} tidak tersedia di Binance Futures — skip SMC")
+                lines.append("─────────────────────")
+                continue
 
         tf_4h  = analyze_timeframe(binance_sym, "4h")
         tf_1h  = analyze_timeframe(binance_sym, "1h")
