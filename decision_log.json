@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1778684080830,
+    "ts": "2026-05-13T14:54:40.830789+00:00",
+    "actor": "PREPUMP",
+    "symbol": "INJUSDT",
+    "decision": "ALERT",
+    "summary": "score=80, label=\ud83d\udd25 HOT PRE-PUMP",
+    "score": 80,
+    "confluence_level": "\ud83d\udd25 HOT PRE-PUMP",
+    "direction": "LONG",
+    "top_reasons": [
+      "\ud83d\udd25 FUNDING EXTREME: -0.120% \u2014 short squeeze imminent",
+      "\ud83d\udcc8 RSI Momentum: 1H=73 | 4H=76 \u2014 bullish momentum",
+      "\u2705 Trend aligned: 4H=BULLISH + 1H=BULLISH \u2014 strong momentum"
+    ],
+    "trade_plan": {},
+    "metadata": {}
+  },
+  {
+    "id": 1778684381326,
+    "ts": "2026-05-13T14:59:41.326199+00:00",
+    "actor": "PREPUMP",
+    "symbol": "INJUSDT",
+    "decision": "ALERT",
+    "summary": "score=80, label=\ud83d\udd25 HOT PRE-PUMP",
+    "score": 80,
+    "confluence_level": "\ud83d\udd25 HOT PRE-PUMP",
+    "direction": "LONG",
+    "top_reasons": [
+      "\ud83d\udd25 FUNDING EXTREME: -0.120% \u2014 short squeeze imminent",
+      "\ud83d\udcc8 RSI Momentum: 1H=73 | 4H=76 \u2014 bullish momentum",
+      "\u2705 Trend aligned: 4H=BULLISH + 1H=BULLISH \u2014 strong momentum"
+    ],
+    "trade_plan": {},
+    "metadata": {}
+  }
+]

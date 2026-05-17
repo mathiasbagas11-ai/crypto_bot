@@ -1,0 +1,4371 @@
+[
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T22:16:06.518534+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "SOFT_BLOCK",
+    "total_score": 59,
+    "adjustment": -15,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-13T22:16:07.499917+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 60,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T22:26:22.486924+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 59,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-13T22:26:23.828181+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T22:26:28.014512+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-13T22:36:29.960034+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 59,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T22:56:16.762186+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T23:06:21.829918+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-13T23:06:22.823011+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "NEARUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T23:06:23.859381+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 5,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "FLOKIUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T23:16:15.337929+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-13T23:36:19.660546+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-13T23:36:20.816019+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-13T23:46:16.318908+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "PASS",
+    "total_score": 61,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T00:06:17.333761+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T00:16:19.427267+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 54,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T00:16:20.333161+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 60,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 55,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T00:26:16.342410+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T00:26:17.324963+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 55,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T00:56:16.075783+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "TAOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 46,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T01:06:14.737847+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 60,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 55,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T02:06:17.565269+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 60,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SHIBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T02:06:21.592676+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 20,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BONKUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T02:16:33.976375+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T02:56:19.617616+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BONKUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 59,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T02:56:20.561111+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 85,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T03:26:17.402742+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 59,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T03:26:18.310846+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T03:36:17.606839+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 65
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T03:36:18.490480+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "LTCUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 48,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T03:46:19.740162+00:00",
+    "layer_scores": {
+      "htf_trend": 70,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 10,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T03:56:15.239902+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SUIUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T04:06:14.437423+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T04:16:19.629412+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SHIBUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 57,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T04:16:20.588989+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T04:16:24.849292+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 57,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T04:26:14.571968+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T04:56:19.605008+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "INJUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T04:56:20.561507+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 30,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 75,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 65
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T04:56:21.472745+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 45,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T05:06:14.785360+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "APTUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 59,
+    "adjustment": -15,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T05:16:15.587088+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T05:26:16.877291+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T05:36:20.495458+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 60,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T05:36:21.397896+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T05:46:26.529999+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T06:06:13.936204+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 10,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "PASS",
+    "total_score": 68,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T06:16:15.832315+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 45,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T06:16:19.813121+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T06:26:18.507170+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 10,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 59,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T06:56:14.642486+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T07:26:16.452911+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 51,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T07:26:17.344672+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T07:36:15.995696+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T07:36:16.917619+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T07:56:15.611475+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "FLOKIUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T08:06:16.210184+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T08:26:18.366926+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 47,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T08:26:19.278050+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 48,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T08:36:14.554485+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "APTUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T08:46:16.432314+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 42,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T08:56:16.931762+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BONKUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 46,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T09:16:15.249146+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T09:36:15.405589+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 46,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T10:06:18.246607+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T10:16:16.484760+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 53,
+    "adjustment": -15,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T10:26:14.457900+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "PASS",
+    "total_score": 63,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T10:36:16.720655+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 75,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T10:46:18.701036+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ADAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T10:46:19.610030+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 44,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T11:16:18.646027+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SEIUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 57,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T11:16:19.471642+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 46,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T11:26:16.003420+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "WLDUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 70,
+    "adjustment": 5,
+    "passed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T11:26:16.949607+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 100,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BONKUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 48,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T11:36:14.981612+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T12:06:18.486472+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "TIAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T12:06:19.480101+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T12:36:17.683570+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 63,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T12:36:19.012575+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 51,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T12:46:17.998599+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 65
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-14T12:56:21.104355+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "CRVUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 47,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "btc_alignment",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T12:56:22.057610+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 10,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 51,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T13:16:21.378284+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-14T13:16:22.333631+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T13:16:23.270624+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "FLOKIUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T13:46:17.031658+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 62,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-14T14:16:18.058021+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T14:26:14.866825+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T14:46:19.506619+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 10,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T14:46:20.651049+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 57,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-14T14:56:28.241523+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T14:56:29.283146+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 10,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T14:56:30.334760+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T14:56:31.279820+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 5,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T15:06:27.553793+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T15:16:49.416445+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 58,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-14T15:26:45.984889+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "XRPUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T15:37:07.153968+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BONKUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 45,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T15:47:01.869530+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 20,
+      "oi_sanity": 70,
+      "mtf_depth": 5,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T15:56:43.544457+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 5,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 55,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-14T16:06:42.904206+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-14T22:26:41.776306+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T01:09:01.224219+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 100,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-15T01:09:02.513501+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "INJUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "btc_alignment",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T07:57:36.137247+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 20,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "btc_alignment"
+    ],
+    "timestamp": "2026-05-15T10:45:39.547265+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "LTCUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "btc_alignment",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T10:45:41.149026+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 0,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T13:15:48.162394+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "LTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 44,
+    "adjustment": 0,
+    "passed_layers": [
+      "btc_alignment",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend",
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T13:45:50.039964+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 60,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 20,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "RENDERUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 58,
+    "adjustment": -15,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-15T15:16:13.107836+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 59,
+    "adjustment": -15,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-15T16:15:49.658401+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 100,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 63,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-15T19:45:51.283438+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "RENDERUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T19:45:55.281974+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 35,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "BNBUSDT",
+    "direction": "LONG",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "htf_trend",
+      "volatility"
+    ],
+    "failed_layers": [
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T20:15:48.190847+00:00",
+    "layer_scores": {
+      "htf_trend": 100,
+      "btc_alignment": 50,
+      "cb_premium": 30,
+      "ecosystem": 50,
+      "oi_sanity": 55,
+      "mtf_depth": 0,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 58,
+    "adjustment": -15,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-15T20:45:51.290973+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SEIUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 61,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-15T20:45:55.313417+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 47,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T21:45:58.716618+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "LTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T22:15:53.021561+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T22:15:54.249195+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "LTCUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T22:45:48.535398+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 60,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "RENDERUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 50,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-15T23:15:53.341640+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 20,
+      "liquidity": 20,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 52,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-15T23:15:54.302440+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 58,
+    "adjustment": -15,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-16T00:15:48.344414+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 53,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-16T00:45:48.437003+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 80,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SUIUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 55,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-16T01:15:48.372282+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 58,
+    "adjustment": -15,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-16T02:45:48.248593+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "NEARUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 56,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "ecosystem",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-16T03:45:54.119620+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 80,
+      "oi_sanity": 80,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 54,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-16T04:15:48.402372+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "SOLUSDT",
+    "direction": "SHORT",
+    "gate": "PASS",
+    "total_score": 60,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-16T05:15:51.882168+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "RENDERUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 57,
+    "adjustment": -15,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-16T06:07:15.303868+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 70,
+      "mtf_depth": 75,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ONDOUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 55,
+    "adjustment": 0,
+    "passed_layers": [
+      "cb_premium",
+      "oi_sanity",
+      "mtf_depth",
+      "liquidity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "ecosystem"
+    ],
+    "hard_blocked": [
+      "htf_trend"
+    ],
+    "timestamp": "2026-05-16T06:07:18.103404+00:00",
+    "layer_scores": {
+      "htf_trend": 0,
+      "btc_alignment": 50,
+      "cb_premium": 72,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 100,
+      "liquidity": 75,
+      "volatility": 90
+    }
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "SHORT",
+    "gate": "SOFT_BLOCK",
+    "total_score": 51,
+    "adjustment": -15,
+    "passed_layers": [
+      "oi_sanity",
+      "mtf_depth",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "liquidity"
+    ],
+    "hard_blocked": [],
+    "timestamp": "2026-05-17T11:16:13.700153+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 60,
+      "liquidity": 45,
+      "volatility": 65
+    }
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "gate": "HARD_BLOCK",
+    "total_score": 49,
+    "adjustment": 0,
+    "passed_layers": [
+      "oi_sanity",
+      "volatility"
+    ],
+    "failed_layers": [
+      "htf_trend",
+      "btc_alignment",
+      "cb_premium",
+      "ecosystem",
+      "mtf_depth",
+      "liquidity"
+    ],
+    "hard_blocked": [
+      "mtf_depth"
+    ],
+    "timestamp": "2026-05-17T11:16:19.020721+00:00",
+    "layer_scores": {
+      "htf_trend": 30,
+      "btc_alignment": 50,
+      "cb_premium": 50,
+      "ecosystem": 50,
+      "oi_sanity": 80,
+      "mtf_depth": 35,
+      "liquidity": 45,
+      "volatility": 90
+    }
+  }
+]
