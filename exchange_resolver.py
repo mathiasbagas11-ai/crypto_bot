@@ -480,7 +480,7 @@ def get_ticker(symbol: str, exchange: str) -> Optional[dict]:
     fn = _TICKERS.get(exchange)
     if not fn:
         return None
-    return fn(symbol, exchange)
+    return fn(symbol)  # semua _ticker_* hanya terima 1 arg (symbol)
 
 
 def resolve_and_get_ohlcv(user_input: str, interval: str, limit: int = 101) -> Optional[dict]:
