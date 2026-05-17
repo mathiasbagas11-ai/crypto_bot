@@ -2735,37 +2735,39 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
 # ─────────────────────────────────────────────
 
 def get_btc_context() -> dict:
+    # ── Coba Binance Futures klines dulu ──
     tf_4h = analyze_timeframe("BTCUSDT", "4h")
     tf_1h = analyze_timeframe("BTCUSDT", "1h")
+
+    # ── Fallback ke exchange_resolver (OKX/Bybit) kalau Binance diblok ──
+    if (tf_4h.get("error") or tf_4h.get("price", 0) == 0) and EXCHANGE_RESOLVER:
+        log.info("BTC klines Binance gagal — fallback ke exchange_resolver")
+        resolved = resolve_symbol_full("BTC")
+        if resolved:
+            exc   = resolved["exchange"]
+            sym   = resolved["symbol"]
+            tf_4h = analyze_timeframe_exc(sym, "4h", exc)
+            tf_1h = analyze_timeframe_exc(sym, "1h", exc)
+            log.info(f"BTC context via {exc}: price={tf_4h.get('price', 0)}")
 
     trend = tf_4h.get("structure", {}).get("trend", "UNKNOWN")
     price = tf_4h.get("price", 0)
 
-    # ── Fallback: kalau klines gagal, fetch price dari ticker ──
-    if price == 0 or tf_4h.get("error"):
+    # ── Last resort: ticker langsung dari Futures ──
+    if price == 0:
         try:
-            # Coba futures dulu
             r = requests.get(
                 f"{BINANCE_FUTURES}/fapi/v1/ticker/price",
                 params={"symbol": "BTCUSDT"}, timeout=8
             )
             if r.status_code == 200:
                 price = float(r.json().get("price", 0))
-                log.info(f"BTC price fallback (futures ticker): ${price:,.2f}")
-            else:
-                # Fallback spot
-                r = requests.get(
-                    f"{BINANCE_BASE}/ticker/price",
-                    params={"symbol": "BTCUSDT"}, timeout=8
-                )
-                if r.status_code == 200:
-                    price = float(r.json().get("price", 0))
-                    log.info(f"BTC price fallback (spot ticker): ${price:,.2f}")
+                log.info(f"BTC price last-resort (futures ticker): ${price:,.2f}")
         except Exception as e:
             log.warning(f"BTC ticker fallback error: {e}")
 
-    env   = "BULLISH" if trend == "BULLISH" else "BEARISH" if trend == "BEARISH" else \
-            "TRANSITIONING" if tf_4h.get("structure", {}).get("choch") else "NEUTRAL"
+    env = "BULLISH" if trend == "BULLISH" else "BEARISH" if trend == "BEARISH" else \
+          "TRANSITIONING" if tf_4h.get("structure", {}).get("choch") else "NEUTRAL"
 
     return {
         "price": price, "trend": trend, "environment": env,
