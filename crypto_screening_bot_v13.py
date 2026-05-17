@@ -3683,8 +3683,8 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
         lines.append(f"\n{rank_emoji} <b>{sym}</b>  (Q: {coin['quality_score']}/10)")
         lines.append(f"💰 <code>{fmt_num(coin['price'])}</code>  📊 {coin['change_24h']:+.2f}%  📈 Vol +{coin['volume_increase_pct']:.1f}%")
 
+        # ── Step 1: Cari symbol di Binance Futures ──
         if not binance_sym:
-            # ── Auto-resolve: coba cari di Binance Futures pakai symbol langsung ──
             candidate = f"{sym}USDT"
             try:
                 r = requests.get(
@@ -3693,38 +3693,55 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
                 )
                 if r.status_code == 200:
                     binance_sym = candidate
-                    SYMBOL_MAP[coin["id"]] = candidate  # cache untuk scan berikutnya
+                    SYMBOL_MAP[coin["id"]] = candidate
                     TICKER_TO_BINANCE[sym] = candidate
-                    log.info(f"Auto-resolved {sym} → {candidate}")
-                else:
-                    lines.append(f"⚠️ {sym} tidak tersedia di Binance Futures — skip SMC")
-                    lines.append("─────────────────────")
-                    continue
+                    log.info(f"Auto-resolved {sym} → {candidate} (futures)")
             except Exception:
-                lines.append(f"⚠️ {sym} tidak tersedia di Binance Futures — skip SMC")
-                lines.append("─────────────────────")
-                continue
+                pass
 
-        tf_4h  = analyze_timeframe(binance_sym, "4h")
-        tf_1h  = analyze_timeframe(binance_sym, "1h")
-        tf_15m = analyze_timeframe(binance_sym, "15m")
-        oi     = get_open_interest(binance_sym)
+        # ── Step 2: Fetch klines Binance (Futures → Spot) ──
+        exchange_used = "binance_futures"
+        if binance_sym:
+            tf_4h  = analyze_timeframe(binance_sym, "4h")
+            tf_1h  = analyze_timeframe(binance_sym, "1h")
+            tf_15m = analyze_timeframe(binance_sym, "15m")
+            oi     = get_open_interest(binance_sym)
+        else:
+            tf_4h = tf_1h = tf_15m = {"error": True}
+            oi = {}
 
+        # ── Step 3: Fallback ke exchange_resolver (OKX/Bybit/Gate) ──
+        if (tf_4h.get("error") or tf_1h.get("error")) and EXCHANGE_RESOLVER:
+            log.info(f"Binance miss for {sym} — trying exchange_resolver fallback")
+            resolved = resolve_symbol_full(sym)
+            if resolved and resolved.get("exchange") != "binance_futures":
+                exc      = resolved["exchange"]
+                exc_sym  = resolved["symbol"]
+                exc_lbl  = resolved.get("exchange_label", exc)
+                tf_4h    = analyze_timeframe_exc(exc_sym, "4h",  exc)
+                tf_1h    = analyze_timeframe_exc(exc_sym, "1h",  exc)
+                tf_15m   = analyze_timeframe_exc(exc_sym, "15m", exc)
+                oi       = get_open_interest(exc_sym) if binance_sym else {}
+                exchange_used = exc
+                if not tf_4h.get("error"):
+                    lines.append(f"📡 Data via <b>{exc_lbl}</b>")
+                    log.info(f"Fallback success: {sym} → {exc_sym} on {exc}")
+
+        # ── Step 4: Kalau masih error setelah semua fallback ──
         if tf_4h.get("error") or tf_1h.get("error"):
-            lines.append("⚠️ Chart data unavailable (not on Binance futures)")
+            lines.append(f"⚠️ {sym} — data tidak tersedia di semua exchange")
             lines.append("─────────────────────")
             continue
 
-        confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
+        # Pakai binance_sym untuk OI/internal tracking, exc_sym untuk analysis
+        analysis_sym = binance_sym or sym + "USDT"
 
-        # Run pre-pump detection untuk setiap coin
-        prepump = detect_prepump(binance_sym, tf_1h, tf_4h, oi)
-        # Run pre-dump detection untuk setiap coin
-        predump = detect_predump(binance_sym, tf_1h, tf_4h, oi)
-        # v8: scalp + swing detection
-        eqh_eql = tf_1h.get("liquidity", {})
-        scalp   = detect_scalp_setup(binance_sym, tf_15m, tf_1h, tf_4h, oi)
-        swing   = detect_swing_setup(binance_sym, tf_4h, tf_1h, tf_15m, oi, eqh_eql)
+        confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
+        prepump    = detect_prepump(analysis_sym, tf_1h, tf_4h, oi)
+        predump    = detect_predump(analysis_sym, tf_1h, tf_4h, oi)
+        eqh_eql    = tf_1h.get("liquidity", {})
+        scalp      = detect_scalp_setup(analysis_sym, tf_15m, tf_1h, tf_4h, oi)
+        swing      = detect_swing_setup(analysis_sym, tf_4h, tf_1h, tf_15m, oi, eqh_eql)
 
         coin_lines = build_coin_analysis_block(
             sym, coin["price"], confluence, tf_4h, tf_1h, tf_15m, oi,
@@ -3737,7 +3754,7 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
 
         # ── v12: Kumpul enriched data untuk confirmed signal engine ──
         enriched_coins.append({
-            "symbol":     binance_sym,
+            "symbol":     analysis_sym,
             "price":      coin["price"],
             "confluence": confluence,
             "prepump":    prepump,
