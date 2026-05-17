@@ -770,25 +770,58 @@ PENTING:
 # ─────────────────────────────────────────────
 
 def get_binance_klines(symbol: str, interval: str, limit: int = 100) -> list | None:
+    """
+    Fetch klines — priority: Futures (fapi) → Spot (api) fallback.
+    fapi lebih reliable dari server luar (Railway/VPS).
+    """
+    def _parse(raw):
+        return [{
+            "open": float(c[1]), "high": float(c[2]),
+            "low": float(c[3]),  "close": float(c[4]),
+            "volume": float(c[5]), "time": c[0]
+        } for c in raw]
+
+    # 1. Coba Futures endpoint dulu
+    try:
+        r = requests.get(
+            f"{BINANCE_FUTURES}/fapi/v1/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10
+        )
+        if r.status_code == 200:
+            return _parse(r.json())
+    except Exception as e:
+        log.debug(f"Futures klines error {symbol} {interval}: {e}")
+
+    # 2. Fallback ke Spot
     try:
         r = requests.get(
             f"{BINANCE_BASE}/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=10
         )
-        if r.status_code != 200:
-            return None
-        return [{
-            "open": float(c[1]), "high": float(c[2]),
-            "low": float(c[3]),  "close": float(c[4]),
-            "volume": float(c[5]), "time": c[0]
-        } for c in r.json()]
+        if r.status_code == 200:
+            return _parse(r.json())
     except Exception as e:
-        log.warning(f"Binance klines error {symbol} {interval}: {e}")
-        return None
+        log.warning(f"Spot klines error {symbol} {interval}: {e}")
+
+    return None
 
 
 def get_binance_ticker(symbol: str) -> dict | None:
+    """Fetch 24hr ticker — Futures → Spot fallback."""
+    # 1. Futures
+    try:
+        r = requests.get(
+            f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr",
+            params={"symbol": symbol}, timeout=8
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+
+    # 2. Spot fallback
     try:
         r = requests.get(f"{BINANCE_BASE}/ticker/24hr", params={"symbol": symbol}, timeout=8)
         return r.json() if r.status_code == 200 else None
@@ -2711,13 +2744,23 @@ def get_btc_context() -> dict:
     # ── Fallback: kalau klines gagal, fetch price dari ticker ──
     if price == 0 or tf_4h.get("error"):
         try:
+            # Coba futures dulu
             r = requests.get(
-                f"{BINANCE_BASE}/ticker/price",
+                f"{BINANCE_FUTURES}/fapi/v1/ticker/price",
                 params={"symbol": "BTCUSDT"}, timeout=8
             )
             if r.status_code == 200:
                 price = float(r.json().get("price", 0))
-                log.info(f"BTC price fallback (ticker): ${price:,.2f}")
+                log.info(f"BTC price fallback (futures ticker): ${price:,.2f}")
+            else:
+                # Fallback spot
+                r = requests.get(
+                    f"{BINANCE_BASE}/ticker/price",
+                    params={"symbol": "BTCUSDT"}, timeout=8
+                )
+                if r.status_code == 200:
+                    price = float(r.json().get("price", 0))
+                    log.info(f"BTC price fallback (spot ticker): ${price:,.2f}")
         except Exception as e:
             log.warning(f"BTC ticker fallback error: {e}")
 
@@ -3640,11 +3683,11 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
         lines.append(f"💰 <code>{fmt_num(coin['price'])}</code>  📊 {coin['change_24h']:+.2f}%  📈 Vol +{coin['volume_increase_pct']:.1f}%")
 
         if not binance_sym:
-            # ── Auto-resolve: coba cari di Binance pakai symbol langsung ──
+            # ── Auto-resolve: coba cari di Binance Futures pakai symbol langsung ──
             candidate = f"{sym}USDT"
             try:
                 r = requests.get(
-                    f"{BINANCE_BASE}/ticker/price",
+                    f"{BINANCE_FUTURES}/fapi/v1/ticker/price",
                     params={"symbol": candidate}, timeout=5
                 )
                 if r.status_code == 200:
