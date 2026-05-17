@@ -706,7 +706,7 @@ Format: paragraf mengalir, tanpa bullet. Profesional, mudah dipahami trader Indo
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 450}
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 900}
     }) or "⚠️ Gemini tidak merespons saat ini, coba lagi sebentar."
 
 
@@ -2830,7 +2830,7 @@ def calculate_quality_score(coin: dict, vol_increase_pct: float) -> float:
     return round(min(score, 10.0), 2)
 
 
-def screen_coins() -> list:
+def screen_coins(manual: bool = False) -> list:
     global prev_volumes, is_first_scan
     coins    = get_top_coins()
     scored   = []
@@ -2845,7 +2845,8 @@ def screen_coins() -> list:
         prev_vol = prev_volumes.get(cid, 0)
         vol_increase = ((vol - prev_vol) / prev_vol) * 100 if prev_vol > 0 else 0
 
-        if not is_first_scan and vol_increase < 3: continue
+        # Manual scan bypass vol filter — tampilkan top coins apapun kondisinya
+        if not manual and not is_first_scan and vol_increase < 3: continue
         if vol_increase > MAX_VOLUME_INCREASE: continue
 
         quality = calculate_quality_score(coin, vol_increase)
@@ -4809,7 +4810,7 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/scan"):
         send_telegram("📡 Manual scan dimulai... ⏳", chat_id)
-        threading.Thread(target=run_scan, daemon=True).start()
+        threading.Thread(target=run_scan, kwargs={"manual": True, "chat_id": chat_id}, daemon=True).start()
 
     elif text_lower.startswith("/status"):
         handle_status_command(chat_id)
@@ -5455,9 +5456,9 @@ def _check_heartbeat(state: dict, signals_sent: int = 0):
         state[_LAST_HB_KEY] = now.isoformat()
         log.info("💓 Heartbeat sent")
 
-def run_scan():
+def run_scan(manual: bool = False, chat_id: str = None):
     log.info("=" * 50)
-    log.info("🚀 Starting scan...")
+    log.info(f"🚀 Starting scan... (manual={manual})")
 
     # ── v12: Cek outcome sinyal sebelumnya sebelum scan ──
     if TRACKER_MODULE:
@@ -5469,12 +5470,18 @@ def run_scan():
             log.warning(f"Signal tracker on_scan_start error: {e}")
 
     btc   = get_btc_context()
-    coins = screen_coins()
+    coins = screen_coins(manual=manual)
 
     log.info(f"BTC: {btc['environment']} | Coins screened: {len(coins)}")
 
     if not coins:
         log.info("No coins passed filters this scan.")
+        if manual and chat_id:
+            send_telegram(
+                "📭 <b>Scan selesai</b> — tidak ada coin yang memenuhi filter saat ini.\n"
+                "Market mungkin sedang sidewalk / volume tidak bergerak.",
+                chat_id
+            )
         return
 
     msg, enriched_coins = build_telegram_message(btc, coins)
