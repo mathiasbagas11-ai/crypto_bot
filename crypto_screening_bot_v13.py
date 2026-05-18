@@ -193,7 +193,7 @@ NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 
 # v11: Gemini dipakai untuk semua AI calls (free tier)
 
-SCAN_INTERVAL_MINUTES   = 30
+SCAN_INTERVAL_MINUTES   = 10
 TOP_COINS_COUNT         = 5
 PREPUMP_SCAN_INTERVAL   = 5    # menit — scan cepat, alert HANYA kalau HOT
 PREPUMP_ALERT_THRESHOLD = 70   # score >= 70 → kirim alert
@@ -235,7 +235,7 @@ SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
 
 # ── v13: SIGNAL GATE — hanya kirim kalau semua criteria green ──────────────
-GATE_MASTER_SCORE_MIN   = 75      # master score minimum (dari confirmed_signal engine)
+GATE_MASTER_SCORE_MIN   = 65      # master score minimum (dari confirmed_signal engine)
 GATE_MONEYFLOW_TF_MIN   = 2       # min berapa TF yang harus inflow/outflow
 GATE_BT_PF_MIN          = 1.0     # backtest profit factor minimum
 GATE_REQUIRE_ENTRY_MODE = True    # entry mode HARUS jelas (MOMENTUM_NOW atau RETEST_WAIT)
@@ -5185,6 +5185,7 @@ def run_gated_scan():
     for coin in coins:
         sym         = coin["symbol"]
         binance_sym = SYMBOL_MAP.get(coin["id"])
+        log.info(f"── Evaluating {sym} | binance_map={'yes' if binance_sym else 'no'}")
 
         # ── Auto-resolve Binance Futures symbol ──
         if not binance_sym:
@@ -5232,20 +5233,27 @@ def run_gated_scan():
             oi = {}
 
         if (tf_4h.get("error") or tf_1h.get("error")) and EXCHANGE_RESOLVER:
+            log.info(f"Binance klines failed for {sym} — trying exchange_resolver")
             resolved = resolve_symbol_full(sym)
-            if resolved and resolved.get("exchange") != "binance_futures":
+            if resolved:
                 exc          = resolved["exchange"]
                 exc_sym      = resolved["symbol"]
-                tf_4h        = analyze_timeframe_exc(exc_sym, "4h",  exc)
-                tf_1h        = analyze_timeframe_exc(exc_sym, "1h",  exc)
-                tf_15m       = analyze_timeframe_exc(exc_sym, "15m", exc)
-                oi           = get_open_interest(exc_sym) if binance_sym else {}
-                exchange_used = exc
-                analysis_sym  = exc_sym
-                log.info(f"Gated scan fallback: {sym} → {exc_sym} on {exc}")
+                tf_4h_try    = analyze_timeframe_exc(exc_sym, "4h",  exc)
+                tf_1h_try    = analyze_timeframe_exc(exc_sym, "1h",  exc)
+                tf_15m_try   = analyze_timeframe_exc(exc_sym, "15m", exc)
+                if not tf_4h_try.get("error") and not tf_1h_try.get("error"):
+                    tf_4h        = tf_4h_try
+                    tf_1h        = tf_1h_try
+                    tf_15m       = tf_15m_try
+                    oi           = get_open_interest(exc_sym) if binance_sym else {}
+                    exchange_used = exc
+                    analysis_sym  = exc_sym
+                    log.info(f"✅ Gated fallback OK: {sym} → {exc_sym} on {exc}")
+                else:
+                    log.info(f"❌ Gated fallback failed: {sym} on {exc} also error")
 
         if tf_4h.get("error") or tf_1h.get("error"):
-            log.debug(f"Skip {sym} — no data from any exchange")
+            log.info(f"Skip {sym} — no data from any exchange")
             continue
 
         confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
