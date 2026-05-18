@@ -5170,7 +5170,7 @@ def run_gated_scan():
 
     # ── 1. Screen + compute indicators ────────────
     btc   = get_btc_context()
-    coins = screen_coins()
+    coins = screen_coins(manual=True)  # bypass vol filter — auto scan juga butuh semua coins
     log.info(f"🔍 Gated scan: BTC={btc['environment']} | {len(coins)} coins screened")
 
     if not coins:
@@ -5185,31 +5185,67 @@ def run_gated_scan():
     for coin in coins:
         sym         = coin["symbol"]
         binance_sym = SYMBOL_MAP.get(coin["id"])
-        if not binance_sym:
-            continue
 
-        # Blacklist check
-        if SYMBOL_MEMORY_MODULE:
+        # ── Auto-resolve Binance Futures symbol ──
+        if not binance_sym:
+            candidate = f"{sym}USDT"
+            try:
+                r = requests.get(
+                    f"{BINANCE_FUTURES}/fapi/v1/ticker/price",
+                    params={"symbol": candidate}, timeout=5
+                )
+                if r.status_code == 200:
+                    binance_sym = candidate
+                    SYMBOL_MAP[coin["id"]] = candidate
+                    TICKER_TO_BINANCE[sym] = candidate
+            except Exception:
+                pass
+
+        # ── Blacklist check ──
+        if binance_sym and SYMBOL_MEMORY_MODULE:
             is_bl, bl_r = is_blacklisted(binance_sym)
             if is_bl:
                 log.info(f"⛔ {binance_sym} blacklisted, skip: {bl_r}")
                 continue
 
-        # Cooldown check
-        if not _gate_cooldown_ok(binance_sym, state):
-            log.info(f"⏳ {binance_sym} in gate cooldown, skip")
+        # ── Cooldown check ──
+        track_sym = binance_sym or f"{sym}USDT"
+        if not _gate_cooldown_ok(track_sym, state):
+            log.info(f"⏳ {track_sym} in gate cooldown, skip")
             continue
 
+        # ── Fetch klines: Binance → exchange_resolver fallback ──
+        exchange_used = "binance_futures"
+        analysis_sym  = track_sym
         try:
-            tf_4h  = analyze_timeframe(binance_sym, "4h")
-            tf_1h  = analyze_timeframe(binance_sym, "1h")
-            tf_15m = analyze_timeframe(binance_sym, "15m")
-            oi     = get_open_interest(binance_sym)
+            if binance_sym:
+                tf_4h  = analyze_timeframe(binance_sym, "4h")
+                tf_1h  = analyze_timeframe(binance_sym, "1h")
+                tf_15m = analyze_timeframe(binance_sym, "15m")
+                oi     = get_open_interest(binance_sym)
+            else:
+                tf_4h = tf_1h = tf_15m = {"error": True}
+                oi = {}
         except Exception as e:
-            log.warning(f"Data fetch error {binance_sym}: {e}")
-            continue
+            log.warning(f"Data fetch error {track_sym}: {e}")
+            tf_4h = tf_1h = tf_15m = {"error": True}
+            oi = {}
+
+        if (tf_4h.get("error") or tf_1h.get("error")) and EXCHANGE_RESOLVER:
+            resolved = resolve_symbol_full(sym)
+            if resolved and resolved.get("exchange") != "binance_futures":
+                exc          = resolved["exchange"]
+                exc_sym      = resolved["symbol"]
+                tf_4h        = analyze_timeframe_exc(exc_sym, "4h",  exc)
+                tf_1h        = analyze_timeframe_exc(exc_sym, "1h",  exc)
+                tf_15m       = analyze_timeframe_exc(exc_sym, "15m", exc)
+                oi           = get_open_interest(exc_sym) if binance_sym else {}
+                exchange_used = exc
+                analysis_sym  = exc_sym
+                log.info(f"Gated scan fallback: {sym} → {exc_sym} on {exc}")
 
         if tf_4h.get("error") or tf_1h.get("error"):
+            log.debug(f"Skip {sym} — no data from any exchange")
             continue
 
         confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
@@ -5219,11 +5255,11 @@ def run_gated_scan():
             continue
 
         # Detectors
-        prepump = detect_prepump(binance_sym, tf_1h, tf_4h, oi)
-        predump = detect_predump(binance_sym, tf_1h, tf_4h, oi)
+        prepump = detect_prepump(analysis_sym, tf_1h, tf_4h, oi)
+        predump = detect_predump(analysis_sym, tf_1h, tf_4h, oi)
         eqh_eql = tf_1h.get("liquidity", {})
-        scalp   = detect_scalp_setup(binance_sym, tf_15m, tf_1h, tf_4h, oi)
-        swing   = detect_swing_setup(binance_sym, tf_4h, tf_1h, tf_15m, oi, eqh_eql)
+        scalp   = detect_scalp_setup(analysis_sym, tf_15m, tf_1h, tf_4h, oi)
+        swing   = detect_swing_setup(analysis_sym, tf_4h, tf_1h, tf_15m, oi, eqh_eql)
 
         # ─────────────────────────────────────────
         # GATE EVALUATION
@@ -5268,7 +5304,7 @@ def run_gated_scan():
             try:
                 from backtest_engine import quick_validate_signal
                 bt_dir = "LONG" if pump_dir else "SHORT"
-                bt_result = quick_validate_signal(binance_sym, bt_dir)
+                bt_result = quick_validate_signal(analysis_sym, bt_dir)
                 bt_pass   = bt_result.get("valid", False) and bt_result.get("profit_factor", 0) >= GATE_BT_PF_MIN
                 bt_pf     = bt_result.get("profit_factor", 0)
                 bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
@@ -5306,7 +5342,7 @@ def run_gated_scan():
             confidence_label = ("HIGH" if raw_master >= 85 else
                                 "MEDIUM" if raw_master >= 75 else "LOW")
             msg = _build_gated_signal_message(
-                symbol=binance_sym, price=price,
+                symbol=analysis_sym, price=price,
                 direction="LONG" if pump_dir else "SHORT",
                 master_score=raw_master, confidence=confidence_label,
                 trade=trade, oi_data=oi, confluence=confluence,
@@ -5314,9 +5350,9 @@ def run_gated_scan():
                 alert_type="SETUP"
             )
             send_telegram(msg)
-            _gate_mark_sent(binance_sym, state)
+            _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
-            log.info(f"🚀 SIGNAL SENT: {binance_sym} {direction} score={raw_master}")
+            log.info(f"🚀 SIGNAL SENT: {analysis_sym} {direction} score={raw_master}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
@@ -5329,7 +5365,7 @@ def run_gated_scan():
                             (_bt_dir == "SHORT" and _tp_val < _entry_val)
                     if _sane and _tp_val and _sl_val:
                         on_signal_sent(
-                            symbol          = binance_sym,
+                            symbol          = analysis_sym,
                             signal_type     = "GATED_SIGNAL",
                             direction       = _bt_dir,
                             entry_price     = _entry_val,
@@ -5340,7 +5376,7 @@ def run_gated_scan():
                             reasons         = gate_reasons[:3],
                         )
                     else:
-                        log.warning(f"⚠️ GATED_SIGNAL sanity fail {binance_sym}: dir={_bt_dir} entry={_entry_val} tp={_tp_val}")
+                        log.warning(f"⚠️ GATED_SIGNAL sanity fail {analysis_sym}: dir={_bt_dir} entry={_entry_val} tp={_tp_val}")
                 except Exception as e:
                     log.debug(f"Tracker error: {e}")
 
@@ -5348,7 +5384,7 @@ def run_gated_scan():
             if trade.get("entry_mode") == "RETEST_WAIT" and trade.get("confirmation_zone"):
                 cz = trade["confirmation_zone"]
                 retest_entry = {
-                    "symbol":    binance_sym,
+                    "symbol":    analysis_sym,
                     "direction": "LONG" if pump_dir else "SHORT",
                     "zone":      cz,
                     "entry":     trade.get("entry", price),
@@ -5363,11 +5399,10 @@ def run_gated_scan():
                     "notified":  False,
                 }
                 queue = state.get(_RETEST_QUEUE_KEY, [])
-                # Hapus entry lama untuk symbol yang sama
-                queue = [q for q in queue if q.get("symbol") != binance_sym]
+                queue = [q for q in queue if q.get("symbol") != analysis_sym]
                 queue.append(retest_entry)
                 state[_RETEST_QUEUE_KEY] = queue
-                log.info(f"⏳ {binance_sym} masuk retest queue: zona {cz}")
+                log.info(f"⏳ {analysis_sym} masuk retest queue: zona {cz}")
 
         else:
             # Gate not passed — cek apakah masuk watchlist
@@ -5376,13 +5411,13 @@ def run_gated_scan():
                 needs = " + ".join(
                     k for k, v in gate_results.items() if not v
                 )
-                watchlist_new[binance_sym] = {
+                watchlist_new[analysis_sym] = {
                     "score":     raw_master,
                     "direction": direction,
                     "needs":     needs,
                     "ts":        datetime.now(timezone.utc).isoformat()[:16],
                 }
-            log.info(f"  {binance_sym}: gates failed — {'; '.join(failed_reasons)}")
+            log.info(f"  {analysis_sym}: gates failed — {'; '.join(failed_reasons)}")
 
         time.sleep(0.3)  # rate limit guard
 
