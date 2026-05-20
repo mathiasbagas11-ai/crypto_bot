@@ -233,6 +233,7 @@ SCALP_SL_PCT            = 0.008   # scalp SL: 0.8%
 SWING_TP_PCT            = 0.055   # swing TP: 5.5%
 SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
+SCALP_ALERT_THRESHOLD   = 65      # score >= 65 → auto alert (GOOD SCALP atau lebih)
 
 # ── v13: SIGNAL GATE — hanya kirim kalau semua criteria green ──────────────
 GATE_MASTER_SCORE_MIN   = 65      # master score minimum (dari confirmed_signal engine)
@@ -5547,16 +5548,18 @@ def run_scan(manual: bool = False, chat_id: str = None):
         return
 
     msg, enriched_coins = build_telegram_message(btc, coins)
-    send_telegram(msg)
+    send_telegram(msg, chat_id if manual else None)
 
     # ── v12: Confirmed Entry Signal Engine ─────────────────
     # Jalankan di background — tidak block scan berikutnya
     # Backtest validasi butuh ~10-30 detik per coin
     if CONFIRMED_MODULE and enriched_coins:
         tracker_fn = on_signal_sent if TRACKER_MODULE else None
+        # Kirim confirmed signal ke chat yang sama dengan peminta scan
+        _confirmed_send = (lambda msg, cid=chat_id: send_telegram(msg, cid)) if (manual and chat_id) else send_telegram
         threading.Thread(
             target=run_confirmed_signal_scan,
-            args=(enriched_coins, send_telegram, tracker_fn),
+            args=(enriched_coins, _confirmed_send, tracker_fn),
             daemon=True
         ).start()
         log.info(f"🔬 Confirmed signal scan started ({len(enriched_coins)} coins) in background")
@@ -5752,6 +5755,67 @@ def run_predump_auto():
         log.info(f"Pre-dump scan: no HOT signal (best score={best}, threshold={PREDUMP_ALERT_THRESHOLD})")
 
 
+def run_scalp_auto():
+    """
+    Auto scalp scan tiap 5 menit.
+    Kirim alert HANYA kalau ada kandidat dengan score >= SCALP_ALERT_THRESHOLD (GOOD atau A+).
+    """
+    log.info("⚡ Auto scalp scan triggered")
+    candidates = scan_scalp_candidates()
+
+    hot = [c for c in candidates if c.get("score", 0) >= SCALP_ALERT_THRESHOLD]
+
+    if hot:
+        msg = build_scalp_message(hot)
+        send_telegram(msg)
+
+        # Track sinyal scalp ke signal tracker
+        if TRACKER_MODULE:
+            for c in hot:
+                try:
+                    trade     = c.get("trade", {})
+                    tp        = trade.get("tp1") or trade.get("tp") or 0
+                    sl        = trade.get("sl") or 0
+                    price     = c.get("price", 0)
+                    entry_val = float(trade.get("entry") or price)
+                    direc     = c.get("direction", "NONE")
+                    bt_dir    = "LONG" if direc == "LONG" else "SHORT"
+                    # Sanity: LONG tp > entry, SHORT tp < entry
+                    sane = (bt_dir == "LONG" and float(tp) > entry_val) or \
+                           (bt_dir == "SHORT" and float(tp) < entry_val)
+                    if tp and sl and entry_val and sane:
+                        on_signal_sent(
+                            symbol          = c["symbol"],
+                            signal_type     = "SCALP",
+                            direction       = bt_dir,
+                            entry_price     = entry_val,
+                            tp              = float(tp),
+                            sl              = float(sl),
+                            score           = c["score"],
+                            confluence_level= c.get("label", ""),
+                            reasons         = c.get("reasons", [])[:3],
+                        )
+                    else:
+                        log.warning(f"⚠️ SCALP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
+                except Exception as e:
+                    log.debug(f"Scalp tracker error {c.get('symbol','')}: {e}")
+
+        if LEARNING_MODULE:
+            for c in hot:
+                try:
+                    log_decision(actor="SCALP", symbol=c["symbol"], decision="ALERT",
+                        summary=f"score={c['score']}, label={c['label']}",
+                        score=c["score"], confluence_level=c.get("label",""),
+                        direction=c.get("direction","NONE"), reasons=c.get("reasons",[])[:3])
+                except Exception as e:
+                    log.debug(f"scalp log_decision error: {e}")
+
+        log.info(f"⚡ Scalp HOT alert: {len(hot)} kandidat (score >= {SCALP_ALERT_THRESHOLD})")
+    else:
+        best = candidates[0]["score"] if candidates else 0
+        log.info(f"Scalp scan: no HOT signal (best score={best}, threshold={SCALP_ALERT_THRESHOLD})")
+
+
 # ─────────────────────────────────────────────
 # STANDALONE ENTRY POINT
 # ─────────────────────────────────────────────
@@ -5763,6 +5827,7 @@ if __name__ == "__main__":
     log.info(f"Interval  : {SCAN_INTERVAL_MINUTES} minutes")
     log.info(f"Pre-pump  : scan tiap {PREPUMP_SCAN_INTERVAL}m, alert jika score >= {PREPUMP_ALERT_THRESHOLD}")
     log.info(f"Pre-dump  : scan tiap {PREPUMP_SCAN_INTERVAL}m, alert jika score >= {PREDUMP_ALERT_THRESHOLD}")
+    log.info(f"Scalp     : scan tiap {PREPUMP_SCAN_INTERVAL}m, alert jika score >= {SCALP_ALERT_THRESHOLD}")
     log.info(f"Top coins : {TOP_COINS_COUNT}")
     log.info(f"Gemini    : {'✅ Key set' if GEMINI_API_KEY else '⚠️ No key'} (manual: /analyze /ask /chart /news /macro)")
     log.info(f"NewsAPI   : {'✅ Key set' if NEWSAPI_KEY else '⚠️ No key — /news disabled'}")
@@ -5794,10 +5859,10 @@ if __name__ == "__main__":
     scheduler = BlockingScheduler(timezone="UTC")
     # v13: run_gated_scan menggantikan run_scan untuk auto scheduling
     # run_scan tetap tersedia via /scan command (manual trigger, kirim full report)
-    scheduler.add_job(run_gated_scan,   "interval", minutes=SCAN_INTERVAL_MINUTES, id="screener_scan")
-    scheduler.add_job(run_prepump_auto, "interval", minutes=PREPUMP_SCAN_INTERVAL, id="prepump_scan")
-    scheduler.add_job(run_predump_auto, "interval", minutes=PREPUMP_SCAN_INTERVAL, id="predump_scan")
-    scheduler.add_job(run_predump_auto, "interval", minutes=PREPUMP_SCAN_INTERVAL, id="predump_scan2")
+    scheduler.add_job(run_gated_scan,   "interval", minutes=SCAN_INTERVAL_MINUTES,  id="screener_scan")
+    scheduler.add_job(run_prepump_auto, "interval", minutes=PREPUMP_SCAN_INTERVAL,  id="prepump_scan")
+    scheduler.add_job(run_predump_auto, "interval", minutes=PREPUMP_SCAN_INTERVAL,  id="predump_scan")
+    scheduler.add_job(run_scalp_auto,   "interval", minutes=PREPUMP_SCAN_INTERVAL,  id="scalp_scan")
 
     # Risk daily reset jam 00:00 UTC
     if RISK_MODULE:
@@ -5805,7 +5870,7 @@ if __name__ == "__main__":
 
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
-        f"PrePump/Dump={PREPUMP_SCAN_INTERVAL}m | "
+        f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"Risk reset=00:00 UTC"
     )
 
