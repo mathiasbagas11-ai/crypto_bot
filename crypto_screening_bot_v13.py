@@ -504,48 +504,26 @@ def claude_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     if swing and swing.get("score", 0) >= 50:
         swing_ctx = f"\nSwing Setup: {swing['label']} (score {swing['score']}/100, est hold {swing.get('hold_estimate','')})"
 
-    prompt = f"""Kamu adalah analis crypto profesional ahli Smart Money Concepts (SMC), liquidity theory, dan price action.
+    coin_name = symbol.replace("USDT", "")
+    prompt = f"""Kamu adalah trader crypto senior. Tugasmu bukan menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
 
-Analisa lengkap untuk {symbol} — data real-time multi-timeframe:
+DATA {coin_name} @ ${price}:
+- Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
+- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
+- OB: {ob_ctx.strip()}
+- Setup:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
 
-═══ MARKET DATA ═══
-Harga: ${price}
-Signal: {confluence['direction']} | Score: {confluence['score']}/100 | Level: {confluence['level']}
+Jawab dalam Bahasa Indonesia, max 5-6 kalimat, format wajib:
 
-Market Structure:
-- 4H: {s4.get('trend','?')} | CHoCH: {s4.get('choch',False)} | BoS: {s4.get('bos',False)}
-- 1H: {s1.get('trend','?')} | CHoCH: {s1.get('choch',False)} | BoS: {s1.get('bos',False)}
+🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
+Alasan: [1-2 alasan paling decisive saja]
 
-Entry Context:
-- 15M Rejection: {rej.get('type','NONE')} (strength: {rej.get('strength',0)})
-- 15M FVG: {fvg.get('fvg_type','NONE')}
-- OI Change: {oi_data.get('oi_change_pct','N/A')}% | L/S Ratio: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
-- Funding Rate: {oi_data.get('funding_rate','N/A')}%
-- Volume Anomaly 4H: {va4.get('is_anomaly',False)} ({va4.get('multiplier',1):.1f}x)
+📋 **Trade Plan**: Entry ... | SL ... | TP ... | Konfirmasi: ... (hanya jika bukan SKIP)
 
-═══ LIQUIDITY & STRUCTURE ═══
-{liq_ctx if liq_ctx else "- Tidak ada data liquidity zone signifikan"}
-
-═══ ORDER BLOCK VALIDATION ═══
-{ob_ctx}
-
-═══ SETUP DETECTORS ═══
-{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
-
-═══ CONFLUENCE SIGNALS ═══
-{signals_summary}
-
-Berikan analisa KOMPREHENSIF dalam Bahasa Indonesia mencakup:
-
-**1. KONDISI & BIAS MARKET** — Struktur dan bias {symbol} dari perspektif multi-TF. Seberapa kuat conviction?
-**2. ORDER FLOW** — Analisa CVD, MFI, volume anomaly, dan divergensi price vs flow.
-**3. LIQUIDITY LANDSCAPE** — EQH, EQL, dan arah yang kemungkinan akan di-hunt smart money.
-**4. ORDER BLOCK & FVG** — OB fresh yang layak sebagai entry area, FVG yang relevant.
-**5. TRADE PLAN** — Entry zone, konfirmasi, TP, SL jika ada setup valid.
-**6. RISIKO & SKENARIO** — Level invalidasi kritis dan skenario alternatif.
-**7. VERDICT** — LONG NOW / SHORT NOW / WAIT RETEST / SKIP dengan alasan konkret.
-
-Gaya: header bold tiap bagian, paragraf mengalir. Profesional dan actionable untuk trader Indonesia."""
+⚠️ **Risk**: [satu hal yang bisa batalkan setup ini]"""
 
     try:
         r = requests.post(
@@ -557,10 +535,10 @@ Gaya: header bold tiap bagian, paragraf mengalir. Profesional dan actionable unt
             },
             json={
                 "model"      : CLAUDE_MODEL,
-                "max_tokens" : 1800,
+                "max_tokens" : 500,
                 "messages"   : [{"role": "user", "content": prompt}],
             },
-            timeout=45,
+            timeout=30,
         )
         if r.ok:
             return r.json()["content"][0]["text"].strip()
@@ -676,61 +654,35 @@ def gemini_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
         except Exception:
             sym_memory_ctx = ""
 
-    prompt = f"""Kamu adalah analis crypto profesional ahli Smart Money Concepts (SMC) dan liquidity theory.
+    coin_name = symbol.replace("USDT", "")
+    mf4  = tf_4h.get("money_flow", {})
+    mf1  = tf_1h.get("money_flow", {})
+    mf15 = tf_15m.get("money_flow", {})
+
+    prompt = f"""Kamu adalah trader crypto senior — tugasmu BUKAN menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
 {sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
-Analisa {symbol} — data real-time multi-timeframe:
+DATA {coin_name} @ ${price}:
+- Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
+- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- MF → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
+- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
+- OB: {ob_ctx.strip()}
+- Setup:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
 
-MARKET DATA:
-- Harga: ${price}
-- Signal: {confluence['direction']} | Score: {confluence['score']}/100 | Level: {confluence['level']}
-- 4H: {s4.get('trend','?')} | CHoCH:{s4.get('choch',False)} BoS:{s4.get('bos',False)}
-- 1H: {s1.get('trend','?')} | CHoCH:{s1.get('choch',False)} BoS:{s1.get('bos',False)}
-- 15M Rejection: {rej.get('type','NONE')} | FVG: {fvg.get('fvg_type','NONE')}
-- OI Change: {oi_data.get('oi_change_pct','N/A')}% | L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
-- Funding: {oi_data.get('funding_rate','N/A')}% | Vol Anomaly 4H: {va4.get('multiplier',1):.1f}x
-- Money Flow 4H: {tf_4h.get('money_flow',{}).get('bias','N/A')} {tf_4h.get('money_flow',{}).get('strength','')} (CVD {tf_4h.get('money_flow',{}).get('cvd_pct',0):+.1f}% | MFI {tf_4h.get('money_flow',{}).get('mfi',50):.0f} | VWAP {tf_4h.get('money_flow',{}).get('vwap_bias','?')})
-- Money Flow 1H: {tf_1h.get('money_flow',{}).get('bias','N/A')} {tf_1h.get('money_flow',{}).get('strength','')} (CVD {tf_1h.get('money_flow',{}).get('cvd_pct',0):+.1f}% | MFI {tf_1h.get('money_flow',{}).get('mfi',50):.0f})
-- Money Flow 15M: {tf_15m.get('money_flow',{}).get('bias','N/A')} (CVD {tf_15m.get('money_flow',{}).get('cvd_pct',0):+.1f}% | MFI {tf_15m.get('money_flow',{}).get('mfi',50):.0f})
+Jawab dalam Bahasa Indonesia, max 5-6 kalimat total, format:
 
-LIQUIDITY & STRUCTURE:
-{liq_ctx if liq_ctx else "Tidak ada data liquidity zone signifikan"}
+🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
+Alasan: [1-2 alasan paling decisive — bukan semua indikator]
 
-ORDER BLOCK VALIDATION:
-{ob_ctx}
+📋 **Trade Plan**: Entry ... | SL ... | TP ... | Konfirmasi: ... (isi hanya jika bukan SKIP)
 
-SETUP DETECTORS:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
-
-CONFLUENCE SIGNALS:
-{signals_summary}
-
-Berikan analisa KOMPREHENSIF Bahasa Indonesia mencakup:
-
-**1. KONDISI & BIAS MARKET**
-Jelaskan struktur dan bias dominan {symbol} saat ini dari perspektif multi-timeframe. Seberapa kuat conviction?
-
-**2. ORDER FLOW & MONEY FLOW**
-Bahas CVD, MFI, volume anomaly, dan apakah ada divergensi price vs order flow.
-
-**3. LIQUIDITY LANDSCAPE**
-Identifikasi EQH, EQL, dan area liquidity yang belum di-sweep. Ke mana smart money kemungkinan bergerak?
-
-**4. ORDER BLOCK & FVG**
-OB mana yang masih fresh dan layak sebagai entry area? FVG mana yang paling relevant?
-
-**5. SETUP & TRADE PLAN**
-Apakah ada setup valid (scalp/swing)? Jika ya: entry zone, konfirmasi yang dibutuhkan, TP target, SL.
-
-**6. RISIKO & INVALIDASI**
-Level invalidasi kritis? Skenario alternatif yang perlu diwaspadai?
-
-**7. VERDICT**
-LONG NOW / SHORT NOW / WAIT RETEST / SKIP — alasan konkret.
-
-Format: gunakan header bold tiap bagian, paragraf mengalir. Profesional, detail, actionable."""
+⚠️ **Risk**: [satu hal yang bisa batalkan setup ini]"""
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1800}
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 500}
     }) or "⚠️ Gemini tidak merespons saat ini, coba lagi sebentar."
 
 
@@ -882,75 +834,42 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
 
     coin_name = symbol.replace("USDT", "")
 
-    system_msg = ("Kamu adalah analis crypto profesional senior dengan spesialisasi Smart Money Concepts (SMC), "
-                  "liquidity theory, order flow, dan price action. Berikan analisa KOMPREHENSIF dan MENDALAM "
-                  "dalam Bahasa Indonesia. Hindari basa-basi — langsung ke analisa yang actionable.")
+    system_msg = ("Kamu adalah trader crypto senior spesialis SMC dan order flow. "
+                  "Tugasmu adalah memberi VERDICT yang langsung actionable — bukan menjelaskan ulang data. "
+                  "Data teknikal sudah ditampilkan ke user, kamu cukup beri judgment: bisa entry atau tidak, kenapa, dan trade plan-nya. "
+                  "Jawab singkat, padat, Bahasa Indonesia. Max 5-6 kalimat.")
 
     user_msg = f"""{sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
-═══ DATA REAL-TIME: {coin_name} ═══
-Harga saat ini : ${price}
-Signal awal    : {confluence['direction']} | Score: {confluence['score']}/100 | Level: {confluence['level']}
+DATA: {coin_name} @ ${price}
+- Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M Rejection: {rej.get('type','NONE')}
+- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- Money Flow → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
+- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
+- OB: {ob_ctx.strip()}{pp_ctx}{pd_ctx}{sc_ctx}{sw_ctx}{rt_ctx}
+- Confluence signals: {signals_summary}
 
-MARKET STRUCTURE:
-- 4H: {s4.get('trend','?')} | CHoCH: {s4.get('choch',False)} | BoS: {s4.get('bos',False)}
-- 1H: {s1.get('trend','?')} | CHoCH: {s1.get('choch',False)} | BoS: {s1.get('bos',False)}
+INSTRUKSI:
+Berikan analisa singkat dalam Bahasa Indonesia — JANGAN ulangi data di atas, langsung ke kesimpulan dan judgment kamu.
 
-ENTRY CONTEXT:
-- 15M Rejection: {rej.get('type','NONE')} (strength: {rej.get('strength',0)})
-- 15M FVG: {fvg.get('fvg_type','NONE')}
-- OI Change: {oi_data.get('oi_change_pct','N/A')}% | L/S Ratio: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
-- Funding Rate: {oi_data.get('funding_rate','N/A')}%
-- Volume Anomaly 4H: {va4.get('is_anomaly',False)} ({va4.get('multiplier',1):.1f}x, Z={va4.get('zscore',0):.1f})
+Format WAJIB (max 5-6 kalimat total):
 
-MONEY FLOW MULTI-TF:
-- 4H: {mf4.get('bias','N/A')} {mf4.get('strength','')} | CVD {mf4.get('cvd_pct',0):+.1f}% | MFI {mf4.get('mfi',50):.0f} | VWAP {mf4.get('vwap_bias','?')} ({mf4.get('vwap_pct',0):+.1f}%)
-- 1H: {mf1.get('bias','N/A')} {mf1.get('strength','')} | CVD {mf1.get('cvd_pct',0):+.1f}% | MFI {mf1.get('mfi',50):.0f}
-- 15M: {mf15.get('bias','N/A')} | CVD {mf15.get('cvd_pct',0):+.1f}% | MFI {mf15.get('mfi',50):.0f}
+🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
+Kenapa verdict ini? Sebutkan 1-2 alasan PALING KUAT (bukan semua indikator, cukup yang decisive).
 
-LIQUIDITY & STRUCTURE:
-{liq_ctx if liq_ctx else "Tidak ada liquidity zone signifikan terdeteksi"}
+📋 **Trade Plan** (isi hanya jika LONG NOW / SHORT NOW / WAIT RETEST):
+Entry: ... | SL: ... | TP: ... | Konfirmasi: ...
 
-ORDER BLOCK VALIDATION:
-{ob_ctx}
-
-SETUP DETECTORS:{pp_ctx}{pd_ctx}{sc_ctx}{sw_ctx}{rt_ctx}
-
-CONFLUENCE SIGNALS (top 10):
-{signals_summary}
-
-═══ INSTRUKSI ANALISA ═══
-Berikan analisa LENGKAP dan MENDALAM dalam Bahasa Indonesia mencakup:
-
-**1. KONDISI & BIAS MARKET**
-Jelaskan kondisi struktur {coin_name} sekarang secara detail — apakah trend dominan bullish/bearish/ranging, apa yang bisa dikonfirmasi dari multi-TF alignment, dan seberapa kuat conviction saat ini.
-
-**2. ANALISA PRICE ACTION & ORDER FLOW**
-Bahas money flow CVD, MFI, dan volume anomaly. Apakah ada divergensi antara price action dan order flow? Apa implikasinya?
-
-**3. LIQUIDITY LANDSCAPE**
-Identifikasi semua liquidity pool yang relevan (EQH, EQL, sweep yang sudah/belum terjadi). Di mana smart money kemungkinan akan "hunt" liquidity berikutnya?
-
-**4. ORDER BLOCK & FVG**
-Analisa OB yang masih fresh vs yang sudah mitigated. Mana yang paling kuat sebagai area entry? FVG mana yang paling likely diisi?
-
-**5. SETUP VALIDITY & TRADE PLAN**
-Apakah ada setup scalp atau swing yang valid saat ini? Berikan reasoning detail. Jika ada entry yang ideal: jelaskan entry zone, konfirmasi yang dibutuhkan, target TP, dan SL.
-
-**6. RISK ASSESSMENT & SKENARIO ALTERNATIF**
-Apa skenario bullish vs bearish masing-masing? Level invalidasi mana yang paling kritis? Faktor risiko apa yang bisa membatalkan setup ini?
-
-**7. VERDICT & REKOMENDASI AKSI**
-Pilih SATU: LONG NOW / SHORT NOW / WAIT RETEST / SKIP — dengan alasan konkret.
-
-Format: header bold setiap bagian, isi paragraf mengalir. Profesional, konkret, mudah dipahami trader Indonesia."""
+⚠️ **Risk**: Satu hal yang bisa bikin setup ini gagal."""
 
     result = _groq_request(
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user",   "content": user_msg},
         ],
-        max_tokens=2000,
-        temperature=0.65,
+        max_tokens=500,
+        temperature=0.55,
     )
     return result or ""
 
@@ -4003,46 +3922,44 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
     if with_gemini:
         lines.append("")
         insight = ""
-        ai_source = ""
+        ai_label = ""
 
         # 1. Groq (tercepat, free, Llama 3.3 70B)
         if GROQ_API_KEY and not insight:
             try:
-                lines.append("🤖 <b>AI Insight (Groq / Llama 3.3 70B):</b>")
                 insight = groq_analyze_coin(
                     symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
                     prepump, predump, scalp, swing, realtime
                 )
-                ai_source = "groq"
+                if insight:
+                    ai_label = "🤖 <b>AI Insight (Groq / Llama 3.3 70B):</b>"
             except Exception as e:
                 log.warning(f"Groq analyze error: {e}")
-                insight = ""
 
         # 2. Gemini (fallback — ada search grounding)
         if GEMINI_API_KEY and not insight:
-            if ai_source != "groq":
-                lines.append("🤖 <b>AI Insight (Gemini):</b>")
             insight = gemini_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
                 prepump, predump, scalp, swing
             )
-            ai_source = "gemini"
+            if insight:
+                ai_label = "🤖 <b>AI Insight (Gemini):</b>"
 
         # 3. Claude (last resort)
         if ANTHROPIC_API_KEY and not insight:
-            if ai_source not in ("groq", "gemini"):
-                lines.append("🤖 <b>AI Insight (Claude):</b>")
             insight = claude_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
                 prepump, predump, scalp, swing
             )
-            ai_source = "claude"
+            if insight:
+                ai_label = "🤖 <b>AI Insight (Claude):</b>"
 
         if insight:
+            lines.append(ai_label)
             lines.append(f"<i>{insight}</i>")
         else:
-            lines.append("<i>⚠️ Semua AI tidak merespons saat ini — coba /analyze lagi.</i>")
-            lines.append("<i>Tips: Set GROQ_API_KEY di .env untuk AI yang lebih cepat dan reliabel.</i>")
+            lines.append("<i>⚠️ Semua AI tidak merespons — coba /analyze lagi.</i>")
+            lines.append("<i>Tips: Set GROQ_API_KEY di .env untuk AI yang lebih cepat.</i>")
 
         # Sentiment overlay (tetap via Gemini karena butuh search grounding)
         if GEMINI_API_KEY:
