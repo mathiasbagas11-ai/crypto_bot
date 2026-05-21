@@ -186,18 +186,22 @@ except ImportError:
 TELEGRAM_BOT_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID      = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY")
-ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")   # v10: Claude API
+ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
+GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL            = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_API_URL          = "https://api.groq.com/openai/v1/chat/completions"
+CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
 # v9: New module env vars
 NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 
-# v11: Gemini dipakai untuk semua AI calls (free tier)
+# v14: AI priority chain → Groq (fastest) → Gemini (search grounding) → Claude (fallback)
 
 SCAN_INTERVAL_MINUTES   = 10
 TOP_COINS_COUNT         = 5
 PREPUMP_SCAN_INTERVAL   = 5    # menit — scan cepat, alert HANYA kalau HOT
-PREPUMP_ALERT_THRESHOLD = 70   # score >= 70 → kirim alert
-PREDUMP_ALERT_THRESHOLD = 70   # score >= 70 → kirim alert
+PREPUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
+PREDUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
 
 # CoinGecko filters
 MIN_MARKET_CAP       = 50_000_000
@@ -233,14 +237,14 @@ SCALP_SL_PCT            = 0.008   # scalp SL: 0.8%
 SWING_TP_PCT            = 0.055   # swing TP: 5.5%
 SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
-SCALP_ALERT_THRESHOLD   = 65      # score >= 65 → auto alert (GOOD SCALP atau lebih)
+SCALP_ALERT_THRESHOLD   = 55      # score >= 55 → auto alert (v14: turun dari 65)
 
-# ── v13: SIGNAL GATE — hanya kirim kalau semua criteria green ──────────────
-GATE_MASTER_SCORE_MIN   = 65      # master score minimum (dari confirmed_signal engine)
-GATE_MONEYFLOW_TF_MIN   = 2       # min berapa TF yang harus inflow/outflow
+# ── v14: SIGNAL GATE — relaxed untuk lebih banyak signal valid ─────────────
+GATE_MASTER_SCORE_MIN   = 55      # v14: turun dari 65 (formula baru berbasis conf_score)
+GATE_MONEYFLOW_TF_MIN   = 1       # v14: turun dari 2 — cukup 1 TF aligned
 GATE_BT_PF_MIN          = 1.0     # backtest profit factor minimum
 GATE_REQUIRE_ENTRY_MODE = True    # entry mode HARUS jelas (MOMENTUM_NOW atau RETEST_WAIT)
-GATE_COOLDOWN_HOURS     = 4       # cooldown per symbol setelah signal dikirim
+GATE_COOLDOWN_HOURS     = 2       # v14: turun dari 4 jam
 HEARTBEAT_INTERVAL_HRS  = 4       # interval "no signal" update
 WATCHLIST_THRESHOLD     = 60      # master score ambang batas masuk watchlist
 
@@ -531,14 +535,17 @@ Entry Context:
 ═══ CONFLUENCE SIGNALS ═══
 {signals_summary}
 
-Berikan analisa SINGKAT dalam Bahasa Indonesia (max 6 kalimat total):
-1. Kondisi market {symbol} sekarang — bias dan struktur dominan
-2. Liquidity zone yang paling relevan sebagai target atau trap
-3. Order Block yang masih FRESH dan layak sebagai area entry
-4. Apakah ada setup scalp atau swing yang valid? Kenapa iya/tidak?
-5. Risk utama yang perlu diwaspadai
+Berikan analisa KOMPREHENSIF dalam Bahasa Indonesia mencakup:
 
-Gaya: profesional, langsung ke poin, mudah dipahami trader Indonesia. Tanpa bullet point — paragraf mengalir."""
+**1. KONDISI & BIAS MARKET** — Struktur dan bias {symbol} dari perspektif multi-TF. Seberapa kuat conviction?
+**2. ORDER FLOW** — Analisa CVD, MFI, volume anomaly, dan divergensi price vs flow.
+**3. LIQUIDITY LANDSCAPE** — EQH, EQL, dan arah yang kemungkinan akan di-hunt smart money.
+**4. ORDER BLOCK & FVG** — OB fresh yang layak sebagai entry area, FVG yang relevant.
+**5. TRADE PLAN** — Entry zone, konfirmasi, TP, SL jika ada setup valid.
+**6. RISIKO & SKENARIO** — Level invalidasi kritis dan skenario alternatif.
+**7. VERDICT** — LONG NOW / SHORT NOW / WAIT RETEST / SKIP dengan alasan konkret.
+
+Gaya: header bold tiap bagian, paragraf mengalir. Profesional dan actionable untuk trader Indonesia."""
 
     try:
         r = requests.post(
@@ -550,10 +557,10 @@ Gaya: profesional, langsung ke poin, mudah dipahami trader Indonesia. Tanpa bull
             },
             json={
                 "model"      : CLAUDE_MODEL,
-                "max_tokens" : 500,
+                "max_tokens" : 1800,
                 "messages"   : [{"role": "user", "content": prompt}],
             },
-            timeout=30,
+            timeout=45,
         )
         if r.ok:
             return r.json()["content"][0]["text"].strip()
@@ -696,18 +703,34 @@ SETUP DETECTORS:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
 CONFLUENCE SIGNALS:
 {signals_summary}
 
-Berikan analisa SINGKAT Bahasa Indonesia (max 6 kalimat):
-1. Kondisi & bias market {symbol} sekarang
-2. Liquidity zone paling relevan sebagai target/trap
-3. OB yang masih FRESH dan layak sebagai entry area
-4. Setup scalp/swing valid? Kenapa iya/tidak?
-5. Risk utama yang perlu diwaspadai
+Berikan analisa KOMPREHENSIF Bahasa Indonesia mencakup:
 
-Format: paragraf mengalir, tanpa bullet. Profesional, mudah dipahami trader Indonesia."""
+**1. KONDISI & BIAS MARKET**
+Jelaskan struktur dan bias dominan {symbol} saat ini dari perspektif multi-timeframe. Seberapa kuat conviction?
+
+**2. ORDER FLOW & MONEY FLOW**
+Bahas CVD, MFI, volume anomaly, dan apakah ada divergensi price vs order flow.
+
+**3. LIQUIDITY LANDSCAPE**
+Identifikasi EQH, EQL, dan area liquidity yang belum di-sweep. Ke mana smart money kemungkinan bergerak?
+
+**4. ORDER BLOCK & FVG**
+OB mana yang masih fresh dan layak sebagai entry area? FVG mana yang paling relevant?
+
+**5. SETUP & TRADE PLAN**
+Apakah ada setup valid (scalp/swing)? Jika ya: entry zone, konfirmasi yang dibutuhkan, TP target, SL.
+
+**6. RISIKO & INVALIDASI**
+Level invalidasi kritis? Skenario alternatif yang perlu diwaspadai?
+
+**7. VERDICT**
+LONG NOW / SHORT NOW / WAIT RETEST / SKIP — alasan konkret.
+
+Format: gunakan header bold tiap bagian, paragraf mengalir. Profesional, detail, actionable."""
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 900}
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1800}
     }) or "⚠️ Gemini tidak merespons saat ini, coba lagi sebentar."
 
 
@@ -723,8 +746,231 @@ Jawab dalam Bahasa Indonesia, singkat dan padat (max 5 kalimat):
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400}
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 800}
     }) or "⚠️ Gemini tidak merespons saat ini."
+
+
+# ─────────────────────────────────────────────
+# v14: GROQ AI — Cepat, Free Tier, OpenAI-compatible
+# Pro: inference tercepat (~200 tok/s), free tier 30 RPM, bagus untuk analisa panjang
+# Con: tidak ada web search grounding, context window lebih kecil dari Gemini 2.5
+# ─────────────────────────────────────────────
+
+def _groq_request(messages: list, max_tokens: int = 1800, temperature: float = 0.65) -> str:
+    """
+    Call Groq API (OpenAI-compatible endpoint).
+    Model: llama-3.3-70b-versatile — reasoning bagus, context 128k, gratis.
+    """
+    if not GROQ_API_KEY:
+        return ""
+
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       GROQ_MODEL,
+                    "messages":    messages,
+                    "max_tokens":  max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            elif r.status_code == 429:
+                wait = 15 * (2 ** attempt)
+                log.warning(f"Groq 429 rate limit (attempt {attempt+1}), retry in {wait}s...")
+                time.sleep(wait)
+            elif r.status_code in (503, 502):
+                time.sleep(10 * (attempt + 1))
+            else:
+                log.warning(f"Groq API error {r.status_code}: {r.text[:200]}")
+                return ""
+        except Exception as e:
+            log.warning(f"Groq exception (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(8)
+
+    log.warning("Groq: max retries reached.")
+    return ""
+
+
+def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
+                       tf_15m: dict, oi_data: dict, price: float,
+                       prepump: dict = None, predump: dict = None,
+                       scalp: dict = None, swing: dict = None,
+                       realtime: dict = None) -> str:
+    """
+    Analisa coin via Groq (Llama 3.3 70B) — dipanggil dari /analyze.
+    Lebih cepat dan lebih panjang dari Gemini free tier.
+    """
+    if not GROQ_API_KEY:
+        return ""
+
+    s4  = tf_4h.get("structure", {})
+    s1  = tf_1h.get("structure", {})
+    rej = tf_15m.get("rejection", {})
+    fvg = tf_15m.get("fvg", {})
+    ob4 = tf_4h.get("order_blocks", {})
+    ob1 = tf_1h.get("order_blocks", {})
+    va4 = tf_4h.get("volume_anomaly", {})
+    mf4 = tf_4h.get("money_flow", {})
+    mf1 = tf_1h.get("money_flow", {})
+    mf15 = tf_15m.get("money_flow", {})
+    signals_summary = "\n".join(confluence.get("reasons", [])[:10])
+
+    candles_4h = tf_4h.get("candles", [])
+    candles_1h = tf_1h.get("candles", [])
+    ob_ctx = _build_ob_mitigation_context(ob4, ob1, price, candles_4h, candles_1h)
+
+    liq_1h   = tf_1h.get("liquidity", {})
+    sweep_1h = tf_1h.get("sweep", {})
+    sweep_15m = tf_15m.get("sweep", {})
+    tl_sup = tf_4h.get("trendline_sup", {})
+    tl_res = tf_4h.get("trendline_res", {})
+
+    liq_ctx = ""
+    if liq_1h.get("nearest_eqh"):
+        eqh = liq_1h["nearest_eqh"]
+        liq_ctx += f"- EQH (target LONG): {eqh['distance_pct']:.1f}% di atas (level {eqh['count']} touches)\n"
+    if liq_1h.get("nearest_eql"):
+        eql = liq_1h["nearest_eql"]
+        liq_ctx += f"- EQL (target SHORT): {eql['distance_pct']:.1f}% di bawah (level {eql['count']} touches)\n"
+    if sweep_1h.get("swept"):
+        liq_ctx += f"- 1H Liquidity Sweep: {sweep_1h['sweep_type']} (recovery {sweep_1h['recovery_strength']:.0f}%)\n"
+    if sweep_15m.get("swept"):
+        liq_ctx += f"- 15M Liquidity Sweep: {sweep_15m['sweep_type']} (recovery {sweep_15m['recovery_strength']:.0f}%)\n"
+    if tl_sup.get("valid"):
+        liq_ctx += f"- Trendline Support: {tl_sup['distance_pct']:+.1f}% ({tl_sup['touches']} touches, {tl_sup['direction']})\n"
+    if tl_res.get("valid"):
+        liq_ctx += f"- Trendline Resist : {tl_res['distance_pct']:+.1f}% ({tl_res['touches']} touches, {tl_res['direction']})\n"
+
+    pp_ctx = ""
+    if prepump and prepump.get("total_score", 0) >= 35:
+        pp_ctx = (f"\nPre-Pump Score: {prepump['total_score']}/100 ({prepump['label']})\n"
+                  f"- Funding: {prepump['funding_score']}/30 | Momentum: {prepump['momentum_score']}/35 | OI+PA: {prepump['oi_pa_score']}/35")
+    pd_ctx = ""
+    if predump and predump.get("total_score", 0) >= 35:
+        pd_ctx = (f"\nPre-Dump Score: {predump['total_score']}/100 ({predump['label']})\n"
+                  f"- Funding: {predump['funding_score']}/30 | Momentum: {predump['momentum_score']}/35 | OI+PA: {predump['oi_pa_score']}/35")
+    sc_ctx = ""
+    if scalp and scalp.get("score", 0) >= 45:
+        sc_ctx = f"\nScalp: {scalp['label']} (score {scalp['score']}/100, arah {scalp['direction']})"
+    sw_ctx = ""
+    if swing and swing.get("score", 0) >= 45:
+        sw_ctx = f"\nSwing: {swing['label']} (score {swing['score']}/100, est hold {swing.get('hold_estimate','')})"
+
+    rt_ctx = ""
+    if realtime and not realtime.get("error"):
+        rt_ctx = (f"\nReal-time Momentum (1M candles):\n"
+                  f"- Price velocity 15m: {realtime.get('velocity_15m', 0):+.2f}%\n"
+                  f"- Volume burst: {realtime.get('vol_burst', 1):.1f}x vs 10m avg\n"
+                  f"- Momentum label: {realtime.get('momentum_label', 'N/A')}\n"
+                  f"- Short-term bias: {realtime.get('short_bias', 'NEUTRAL')}")
+
+    sym_memory_ctx = ""
+    if SYMBOL_MEMORY_MODULE:
+        try:
+            sym_memory_ctx = build_symbol_context_block(symbol)
+        except Exception:
+            pass
+
+    coin_name = symbol.replace("USDT", "")
+
+    system_msg = ("Kamu adalah analis crypto profesional senior dengan spesialisasi Smart Money Concepts (SMC), "
+                  "liquidity theory, order flow, dan price action. Berikan analisa KOMPREHENSIF dan MENDALAM "
+                  "dalam Bahasa Indonesia. Hindari basa-basi — langsung ke analisa yang actionable.")
+
+    user_msg = f"""{sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
+═══ DATA REAL-TIME: {coin_name} ═══
+Harga saat ini : ${price}
+Signal awal    : {confluence['direction']} | Score: {confluence['score']}/100 | Level: {confluence['level']}
+
+MARKET STRUCTURE:
+- 4H: {s4.get('trend','?')} | CHoCH: {s4.get('choch',False)} | BoS: {s4.get('bos',False)}
+- 1H: {s1.get('trend','?')} | CHoCH: {s1.get('choch',False)} | BoS: {s1.get('bos',False)}
+
+ENTRY CONTEXT:
+- 15M Rejection: {rej.get('type','NONE')} (strength: {rej.get('strength',0)})
+- 15M FVG: {fvg.get('fvg_type','NONE')}
+- OI Change: {oi_data.get('oi_change_pct','N/A')}% | L/S Ratio: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
+- Funding Rate: {oi_data.get('funding_rate','N/A')}%
+- Volume Anomaly 4H: {va4.get('is_anomaly',False)} ({va4.get('multiplier',1):.1f}x, Z={va4.get('zscore',0):.1f})
+
+MONEY FLOW MULTI-TF:
+- 4H: {mf4.get('bias','N/A')} {mf4.get('strength','')} | CVD {mf4.get('cvd_pct',0):+.1f}% | MFI {mf4.get('mfi',50):.0f} | VWAP {mf4.get('vwap_bias','?')} ({mf4.get('vwap_pct',0):+.1f}%)
+- 1H: {mf1.get('bias','N/A')} {mf1.get('strength','')} | CVD {mf1.get('cvd_pct',0):+.1f}% | MFI {mf1.get('mfi',50):.0f}
+- 15M: {mf15.get('bias','N/A')} | CVD {mf15.get('cvd_pct',0):+.1f}% | MFI {mf15.get('mfi',50):.0f}
+
+LIQUIDITY & STRUCTURE:
+{liq_ctx if liq_ctx else "Tidak ada liquidity zone signifikan terdeteksi"}
+
+ORDER BLOCK VALIDATION:
+{ob_ctx}
+
+SETUP DETECTORS:{pp_ctx}{pd_ctx}{sc_ctx}{sw_ctx}{rt_ctx}
+
+CONFLUENCE SIGNALS (top 10):
+{signals_summary}
+
+═══ INSTRUKSI ANALISA ═══
+Berikan analisa LENGKAP dan MENDALAM dalam Bahasa Indonesia mencakup:
+
+**1. KONDISI & BIAS MARKET**
+Jelaskan kondisi struktur {coin_name} sekarang secara detail — apakah trend dominan bullish/bearish/ranging, apa yang bisa dikonfirmasi dari multi-TF alignment, dan seberapa kuat conviction saat ini.
+
+**2. ANALISA PRICE ACTION & ORDER FLOW**
+Bahas money flow CVD, MFI, dan volume anomaly. Apakah ada divergensi antara price action dan order flow? Apa implikasinya?
+
+**3. LIQUIDITY LANDSCAPE**
+Identifikasi semua liquidity pool yang relevan (EQH, EQL, sweep yang sudah/belum terjadi). Di mana smart money kemungkinan akan "hunt" liquidity berikutnya?
+
+**4. ORDER BLOCK & FVG**
+Analisa OB yang masih fresh vs yang sudah mitigated. Mana yang paling kuat sebagai area entry? FVG mana yang paling likely diisi?
+
+**5. SETUP VALIDITY & TRADE PLAN**
+Apakah ada setup scalp atau swing yang valid saat ini? Berikan reasoning detail. Jika ada entry yang ideal: jelaskan entry zone, konfirmasi yang dibutuhkan, target TP, dan SL.
+
+**6. RISK ASSESSMENT & SKENARIO ALTERNATIF**
+Apa skenario bullish vs bearish masing-masing? Level invalidasi mana yang paling kritis? Faktor risiko apa yang bisa membatalkan setup ini?
+
+**7. VERDICT & REKOMENDASI AKSI**
+Pilih SATU: LONG NOW / SHORT NOW / WAIT RETEST / SKIP — dengan alasan konkret.
+
+Format: header bold setiap bagian, isi paragraf mengalir. Profesional, konkret, mudah dipahami trader Indonesia."""
+
+    result = _groq_request(
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_msg},
+        ],
+        max_tokens=2000,
+        temperature=0.65,
+    )
+    return result or ""
+
+
+def groq_free_ask(question: str) -> str:
+    """Jawab pertanyaan crypto via Groq (Llama 70B) — lebih cepat dan lebih detail."""
+    if not GROQ_API_KEY:
+        return ""
+
+    system_msg = ("Kamu adalah asisten crypto trading profesional ahli SMC, technical analysis, "
+                  "fundamental crypto, dan DeFi. Jawab dalam Bahasa Indonesia, komprehensif dan actionable.")
+    result = _groq_request(
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": question},
+        ],
+        max_tokens=1200,
+        temperature=0.6,
+    )
+    return result or ""
 
 
 def gemini_analyze_chart_image(image_base64: str, mime_type: str = "image/jpeg") -> str:
@@ -1333,6 +1579,107 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
         result["strength"] = "WEAK"
 
     return result
+
+# ─────────────────────────────────────────────
+# v14: REAL-TIME MOMENTUM DETECTOR
+# Tidak pakai indikator lagging — hanya raw price velocity & volume burst
+# dari 1m candles (15 candles = 15 menit terakhir data live)
+# ─────────────────────────────────────────────
+
+def detect_realtime_momentum(symbol: str) -> dict:
+    """
+    Deteksi momentum REAL-TIME dari 1m candles — zero lagging indicators.
+
+    Metrik:
+    1. Price velocity 5m / 10m / 15m: % change close vs close N menit lalu
+    2. Volume burst: avg volume 3 candle terakhir vs 10 candle sebelumnya
+    3. Short-term direction: HH atau LL di 1m (5 candle terakhir)
+    4. Breakout check: apakah price breakout dari high/low 15 candle sebelumnya
+
+    Returns: dict dengan velocity, vol_burst, momentum_label, short_bias, breakout
+    """
+    result = {
+        "error":          True,
+        "velocity_5m":    0.0,
+        "velocity_10m":   0.0,
+        "velocity_15m":   0.0,
+        "vol_burst":      1.0,
+        "momentum_label": "UNKNOWN",
+        "short_bias":     "NEUTRAL",
+        "breakout_up":    False,
+        "breakout_down":  False,
+    }
+
+    try:
+        candles_1m = get_binance_klines(symbol, "1m", limit=20)
+        if not candles_1m or len(candles_1m) < 16:
+            return result
+
+        current_close = candles_1m[-1]["close"]
+        result["error"] = False
+
+        # ── 1. Price velocity ──────────────────────
+        if len(candles_1m) >= 6:
+            result["velocity_5m"]  = round(
+                (current_close - candles_1m[-6]["close"]) / candles_1m[-6]["close"] * 100, 3)
+        if len(candles_1m) >= 11:
+            result["velocity_10m"] = round(
+                (current_close - candles_1m[-11]["close"]) / candles_1m[-11]["close"] * 100, 3)
+        if len(candles_1m) >= 16:
+            result["velocity_15m"] = round(
+                (current_close - candles_1m[-16]["close"]) / candles_1m[-16]["close"] * 100, 3)
+
+        # ── 2. Volume burst ────────────────────────
+        recent_vols = [c["volume"] for c in candles_1m[-3:]]
+        base_vols   = [c["volume"] for c in candles_1m[-13:-3]]
+        avg_recent  = sum(recent_vols) / len(recent_vols) if recent_vols else 1
+        avg_base    = sum(base_vols)   / len(base_vols)   if base_vols   else 1
+        result["vol_burst"] = round(avg_recent / max(avg_base, 1), 2)
+
+        # ── 3. Short-term direction (HH/LL last 5 candles) ──
+        last5 = candles_1m[-5:]
+        highs5 = [c["high"]  for c in last5]
+        lows5  = [c["low"]   for c in last5]
+        hh = highs5[-1] > max(highs5[:-1])
+        hl = lows5[-1]  > min(lows5[:-1])
+        lh = highs5[-1] < max(highs5[:-1])
+        ll = lows5[-1]  < min(lows5[:-1])
+
+        if hh and hl:   result["short_bias"] = "BULLISH"
+        elif lh and ll: result["short_bias"] = "BEARISH"
+        else:           result["short_bias"] = "RANGING"
+
+        # ── 4. Breakout dari range 15 candle sebelumnya ──
+        prev15 = candles_1m[-16:-1]
+        if prev15:
+            prev_high = max(c["high"] for c in prev15)
+            prev_low  = min(c["low"]  for c in prev15)
+            result["breakout_up"]   = current_close > prev_high
+            result["breakout_down"] = current_close < prev_low
+
+        # ── 5. Label ─────────────────────────────
+        v = result["velocity_15m"]
+        burst = result["vol_burst"]
+        if v > 0.8 and burst >= 1.5:
+            result["momentum_label"] = "STRONG_BULL_MOMENTUM"
+        elif v > 0.4:
+            result["momentum_label"] = "BULL_MOMENTUM"
+        elif v < -0.8 and burst >= 1.5:
+            result["momentum_label"] = "STRONG_BEAR_MOMENTUM"
+        elif v < -0.4:
+            result["momentum_label"] = "BEAR_MOMENTUM"
+        elif result["breakout_up"]:
+            result["momentum_label"] = "BREAKOUT_UP"
+        elif result["breakout_down"]:
+            result["momentum_label"] = "BREAKOUT_DOWN"
+        else:
+            result["momentum_label"] = "CONSOLIDATING"
+
+    except Exception as e:
+        log.debug(f"detect_realtime_momentum error {symbol}: {e}")
+
+    return result
+
 
 # ─────────────────────────────────────────────
 # v8: LIQUIDITY ZONE DETECTION
@@ -2585,7 +2932,8 @@ def scan_predump_candidates(symbols: list = None) -> list:
 # CONFLUENCE ENGINE
 # ─────────────────────────────────────────────
 
-def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dict) -> dict:
+def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dict,
+                             realtime: dict = None) -> dict:
     pump_score = dump_score = 0
     reasons = []
 
@@ -2712,6 +3060,35 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
     elif t1 == "BEARISH" and mf_1h_cvd > 2:
         pump_score += 5
         reasons.append(f"⚠️ Money Flow divergence: 1H bearish tapi CVD positif ({mf_1h_cvd:.1f}%) — weak sellers")
+
+    # v14: Real-time momentum contribution (1m candles — zero lag)
+    if realtime and not realtime.get("error"):
+        rt_label = realtime.get("momentum_label", "")
+        rt_burst = realtime.get("vol_burst", 1.0)
+        rt_v15   = realtime.get("velocity_15m", 0)
+        rt_bias  = realtime.get("short_bias", "NEUTRAL")
+        rt_bo_up = realtime.get("breakout_up", False)
+        rt_bo_dn = realtime.get("breakout_down", False)
+
+        if "STRONG_BULL" in rt_label:
+            pump_score += 12
+            reasons.append(f"⚡ RT: Strong bull momentum 15m (+{rt_v15:.2f}%) vol {rt_burst:.1f}x burst")
+        elif "BULL_MOMENTUM" in rt_label or rt_bias == "BULLISH":
+            pump_score += 7
+            reasons.append(f"🟢 RT: Bull momentum 1m (+{rt_v15:.2f}%) — buying pressure aktif")
+        elif "STRONG_BEAR" in rt_label:
+            dump_score += 12
+            reasons.append(f"⚡ RT: Strong bear momentum 15m ({rt_v15:.2f}%) vol {rt_burst:.1f}x burst")
+        elif "BEAR_MOMENTUM" in rt_label or rt_bias == "BEARISH":
+            dump_score += 7
+            reasons.append(f"🔴 RT: Bear momentum 1m ({rt_v15:.2f}%) — selling pressure aktif")
+
+        if rt_bo_up:
+            pump_score += 8
+            reasons.append(f"💥 RT: Breakout UP dari range 15 menit terakhir — momentum")
+        elif rt_bo_dn:
+            dump_score += 8
+            reasons.append(f"💥 RT: Breakout DOWN dari range 15 menit terakhir — momentum")
 
     total = pump_score + dump_score
     if total == 0:
@@ -3302,12 +3679,13 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                                scalp: dict = None, swing: dict = None,
                                news_sentiment: dict = None,
                                with_risk: bool = True,
-                               with_claude: bool = False) -> list:
+                               with_claude: bool = False,
+                               realtime: dict = None) -> list:
     """
     Build rich analysis block per koin.
-    with_claude=True  → panggil Claude API (manual /analyze saja)
-    with_gemini=True  → panggil Gemini sentiment overlay (Gemini, bukan coin analysis)
-    Auto scan selalu with_claude=False untuk hemat token.
+    v14: AI chain — Groq (cepat) → Gemini (grounding) → Claude (fallback)
+    with_gemini=True → trigger AI analysis (nama dipertahankan untuk kompatibilitas)
+    Auto scan selalu with_gemini=False untuk hemat token.
     """
     lines = []
 
@@ -3621,24 +3999,61 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append("")
             lines.append(format_risk_block(entry, sl, direc))
 
-    # ── Gemini AI Insight (manual /analyze only) ──
-    if with_gemini and GEMINI_API_KEY:
+    # ── v14: AI Insight — chain: Groq → Gemini → Claude ──
+    if with_gemini:
         lines.append("")
-        lines.append("🤖 <b>AI Insight (Gemini):</b>")
-        insight = gemini_analyze_coin(
-            symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
-            prepump, predump, scalp, swing
-        )
-        lines.append(f"<i>{insight}</i>" if insight else "<i>Gemini tidak merespons saat ini.</i>")
+        insight = ""
+        ai_source = ""
 
-        sentiment = gemini_sentiment_overlay(symbol)
-        if sentiment:
-            lines.append("")
-            lines.append("🌐 <b>Sentiment &amp; Event Overlay:</b>")
-            lines.append(f"<i>{sentiment}</i>")
+        # 1. Groq (tercepat, free, Llama 3.3 70B)
+        if GROQ_API_KEY and not insight:
+            try:
+                lines.append("🤖 <b>AI Insight (Groq / Llama 3.3 70B):</b>")
+                insight = groq_analyze_coin(
+                    symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                    prepump, predump, scalp, swing, realtime
+                )
+                ai_source = "groq"
+            except Exception as e:
+                log.warning(f"Groq analyze error: {e}")
+                insight = ""
 
-    elif with_gemini and not GEMINI_API_KEY:
-        lines.append("\n⚠️ <i>GEMINI_API_KEY belum diset di .env</i>")
+        # 2. Gemini (fallback — ada search grounding)
+        if GEMINI_API_KEY and not insight:
+            if ai_source != "groq":
+                lines.append("🤖 <b>AI Insight (Gemini):</b>")
+            insight = gemini_analyze_coin(
+                symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                prepump, predump, scalp, swing
+            )
+            ai_source = "gemini"
+
+        # 3. Claude (last resort)
+        if ANTHROPIC_API_KEY and not insight:
+            if ai_source not in ("groq", "gemini"):
+                lines.append("🤖 <b>AI Insight (Claude):</b>")
+            insight = claude_analyze_coin(
+                symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                prepump, predump, scalp, swing
+            )
+            ai_source = "claude"
+
+        if insight:
+            lines.append(f"<i>{insight}</i>")
+        else:
+            lines.append("<i>⚠️ Semua AI tidak merespons saat ini — coba /analyze lagi.</i>")
+            lines.append("<i>Tips: Set GROQ_API_KEY di .env untuk AI yang lebih cepat dan reliabel.</i>")
+
+        # Sentiment overlay (tetap via Gemini karena butuh search grounding)
+        if GEMINI_API_KEY:
+            sentiment = gemini_sentiment_overlay(symbol)
+            if sentiment:
+                lines.append("")
+                lines.append("🌐 <b>Sentiment &amp; Event Overlay:</b>")
+                lines.append(f"<i>{sentiment}</i>")
+
+    elif with_gemini and not GEMINI_API_KEY and not GROQ_API_KEY:
+        lines.append("\n⚠️ <i>Set GROQ_API_KEY atau GEMINI_API_KEY di .env untuk AI insight</i>")
 
     return lines
 
@@ -4018,7 +4433,10 @@ def handle_analyze_command(user_input: str, chat_id: str):
             chat_id)
         return
 
-    confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
+    # v14: real-time momentum untuk /analyze juga
+    realtime_momentum = detect_realtime_momentum(binance_sym)
+
+    confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi, realtime_momentum)
     prepump    = detect_prepump(binance_sym, tf_1h, tf_4h, oi)
     predump    = detect_predump(binance_sym, tf_1h, tf_4h, oi)
     eqh_eql    = tf_1h.get("liquidity", {})
@@ -4032,7 +4450,7 @@ def handle_analyze_command(user_input: str, chat_id: str):
             news_s = get_coin_sentiment(binance_sym)
         except Exception as e:
             log.warning(f"News sentiment error: {e}")
-    ts         = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -4045,11 +4463,21 @@ def handle_analyze_command(user_input: str, chat_id: str):
         "",
     ]
 
+    # v14: real-time momentum info
+    if not realtime_momentum.get("error"):
+        rt_label = realtime_momentum.get("momentum_label", "")
+        rt_v15   = realtime_momentum.get("velocity_15m", 0)
+        rt_burst = realtime_momentum.get("vol_burst", 1)
+        lines.append(f"⚡ <b>Real-time (1M):</b> {rt_label}  {rt_v15:+.2f}% / 15m  Vol {rt_burst:.1f}x")
+        lines.append("")
+
+    # v14: AI Analysis chain — Groq first (fast), then Gemini, then Claude
     coin_lines = build_coin_analysis_block(
         binance_sym, price, confluence, tf_4h, tf_1h, tf_15m, oi,
         with_gemini=True, prepump=prepump, predump=predump,
         scalp=scalp, swing=swing,
-        news_sentiment=news_s, with_risk=True
+        news_sentiment=news_s, with_risk=True,
+        realtime=realtime_momentum
     )
     lines.extend(coin_lines)
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -4422,25 +4850,50 @@ def handle_ask_command(question: str, chat_id: str):
     if not question.strip():
         send_telegram("❓ Format: `/ask <pertanyaan>` — contoh: `/ask apa itu order block?`", chat_id)
         return
-    send_telegram("🤖 Tanya ke Gemini AI... ⏳", chat_id)
-    answer = gemini_free_ask(question)
-    send_telegram(f"🤖 *Gemini AI:*\n\n{answer}", chat_id)
+
+    # v14: Groq → Gemini → Claude chain
+    if GROQ_API_KEY:
+        send_telegram("🤖 Tanya ke Groq AI (Llama 70B)... ⏳", chat_id)
+        answer = groq_free_ask(question)
+        if answer:
+            send_telegram(f"🤖 <b>Groq AI:</b>\n\n{answer}", chat_id)
+            return
+
+    if GEMINI_API_KEY:
+        send_telegram("🤖 Tanya ke Gemini AI... ⏳", chat_id)
+        answer = gemini_free_ask(question)
+        if answer:
+            send_telegram(f"🤖 <b>Gemini AI:</b>\n\n{answer}", chat_id)
+            return
+
+    if ANTHROPIC_API_KEY:
+        send_telegram("🤖 Tanya ke Claude AI... ⏳", chat_id)
+        answer = claude_free_ask(question)
+        if answer:
+            send_telegram(f"🤖 <b>Claude AI:</b>\n\n{answer}", chat_id)
+            return
+
+    send_telegram("⚠️ Tidak ada AI key yang aktif. Set GROQ_API_KEY, GEMINI_API_KEY, atau ANTHROPIC_API_KEY di .env", chat_id)
 
 
 def handle_status_command(chat_id: str):
-    gemini_status   = "✅ Connected" if GEMINI_API_KEY else "❌ No API Key"
-    learning_status = "✅ Active" if LEARNING_MODULE else "⚠️ Module missing"
-    journal_status  = "✅ Active" if JOURNAL_MODULE else "⚠️ Module missing"
+    gemini_status    = "✅ Connected" if GEMINI_API_KEY else "❌ No API Key"
+    groq_status      = f"✅ {GROQ_MODEL}" if GROQ_API_KEY else "❌ No API Key"
+    claude_status    = "✅ Connected" if ANTHROPIC_API_KEY else "⚪ Not set"
+    learning_status  = "✅ Active" if LEARNING_MODULE else "⚠️ Module missing"
+    journal_status   = "✅ Active" if JOURNAL_MODULE else "⚠️ Module missing"
     backtest_status  = "✅ Active" if BACKTEST_MODULE  else "⚠️ Module missing"
     tracker_status   = "✅ Active" if TRACKER_MODULE   else "⚠️ Module missing"
     confirmed_status = "✅ Active" if CONFIRMED_MODULE else "⚠️ Module missing"
     saldo = f"${get_current_balance():,.2f} USDT" if JOURNAL_MODULE else "N/A"
     msg = (
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🤖 *CRYPTO SCREENER v12*\n"
+        "🤖 <b>CRYPTO SCREENER v14</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Status          : ✅ Running\n"
-        f"Gemini AI       : {gemini_status}\n"
+        f"🤖 Groq AI      : {groq_status}\n"
+        f"🤖 Gemini AI    : {gemini_status}\n"
+        f"🤖 Claude AI    : {claude_status}\n"
         f"Learning Engine : {learning_status}\n"
         f"Trade Journal   : {journal_status}\n"
         f"Backtest Engine : {backtest_status}\n"
@@ -5257,7 +5710,10 @@ def run_gated_scan():
             log.info(f"Skip {sym} — no data from any exchange")
             continue
 
-        confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
+        # v14: fetch real-time momentum sebelum confluence (1m candles, non-blocking)
+        realtime_momentum = detect_realtime_momentum(analysis_sym)
+
+        confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi, realtime_momentum)
         direction  = confluence.get("direction", "NEUTRAL")
 
         if direction == "NEUTRAL":
@@ -5287,10 +5743,14 @@ def run_gated_scan():
         sc_score   = scalp.get("score", 0)   if scalp else 0
         sw_score   = swing.get("score", 0)   if swing else 0
 
+        # v14: conf_score adalah base — detector lain tambah bonus max +40
+        # Formula lama salah: conf_score*0.4 → max 40 poin padahal gate 65
         if pump_dir:
-            raw_master = int(conf_score * 0.40 + pp_score * 0.25 + sc_score * 0.20 + sw_score * 0.15)
+            bonus = min(40, (pp_score // 4) + (sc_score // 5) + (sw_score // 6))
+            raw_master = min(100, conf_score + bonus)
         else:
-            raw_master = int(conf_score * 0.40 + pd_score * 0.25 + sc_score * 0.20 + sw_score * 0.15)
+            bonus = min(40, (pd_score // 4) + (sc_score // 5) + (sw_score // 6))
+            raw_master = min(100, conf_score + bonus)
 
         gate_results["master_score"] = raw_master >= GATE_MASTER_SCORE_MIN
         if gate_results["master_score"]:
