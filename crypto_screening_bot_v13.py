@@ -892,6 +892,58 @@ def groq_free_ask(question: str) -> str:
     return result or ""
 
 
+def groq_signal_insight(
+    symbol: str, direction: str, master_score: int,
+    gate_reasons: list, trade: dict,
+    tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dict,
+) -> str:
+    """
+    AI commentary singkat untuk confirmed/gated signal — dipanggil otomatis saat sinyal lolos gate.
+    Fokus: kenapa sinyal ini valid SEKARANG + satu risk utama.
+    Max 3 kalimat — tidak ulangi data, langsung ke judgment.
+    """
+    if not GROQ_API_KEY:
+        return ""
+
+    coin  = symbol.replace("USDT", "")
+    s4    = tf_4h.get("structure", {})
+    s1    = tf_1h.get("structure", {})
+    mf4   = tf_4h.get("money_flow", {})
+    mf1   = tf_1h.get("money_flow", {})
+    mf15  = tf_15m.get("money_flow", {})
+    em    = trade.get("entry_mode", "")
+    entry = trade.get("entry", 0)
+    tp1   = trade.get("tp1", 0)
+    sl    = trade.get("sl", 0)
+
+    gate_str = " | ".join(gate_reasons[:3])
+    user_msg = (
+        f"Signal {direction} {coin} lolos semua gate (score {master_score}/100).\n"
+        f"Gate passed: {gate_str}\n"
+        f"Entry mode: {em} | Entry: {entry} | TP1: {tp1} | SL: {sl}\n"
+        f"4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | "
+        f"MF 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
+        f"MF 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
+        f"MF 15M: {mf15.get('bias','?')} | "
+        f"Funding: {oi_data.get('funding_rate','N/A')}% | OI: {oi_data.get('oi_change_pct','N/A')}% | "
+        f"L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})\n\n"
+        f"Dalam 2-3 kalimat Bahasa Indonesia:\n"
+        f"1. Kenapa sinyal ini valid dan layak dieksekusi sekarang (sebutkan alasan paling kuat)\n"
+        f"2. Satu hal yang bisa bikin sinyal ini gagal / level invalidasi\n"
+        f"Jangan ulangi angka yang sudah ada di atas. Langsung ke judgment."
+    )
+
+    result = _groq_request(
+        messages=[
+            {"role": "system", "content": "Kamu trader crypto senior. Jawab singkat, langsung ke poin, Bahasa Indonesia."},
+            {"role": "user",   "content": user_msg},
+        ],
+        max_tokens=250,
+        temperature=0.5,
+    )
+    return result or ""
+
+
 def gemini_analyze_chart_image(image_base64: str, mime_type: str = "image/jpeg") -> str:
     """Analisa chart image via Gemini Vision."""
     if not GEMINI_API_KEY:
@@ -3918,25 +3970,15 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append("")
             lines.append(format_risk_block(entry, sl, direc))
 
-    # ── v14: AI Insight — chain: Groq → Gemini → Claude ──
+    # ── AI Insight untuk /analyze, /scalp, /prepump, dll ──
+    # Chain: Gemini (primary, search grounding) → Claude (fallback)
+    # Groq dipakai KHUSUS untuk confirmed/gated signal — bukan di sini
     if with_gemini:
         lines.append("")
-        insight = ""
+        insight  = ""
         ai_label = ""
 
-        # 1. Groq (tercepat, free, Llama 3.3 70B)
-        if GROQ_API_KEY and not insight:
-            try:
-                insight = groq_analyze_coin(
-                    symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
-                    prepump, predump, scalp, swing, realtime
-                )
-                if insight:
-                    ai_label = "🤖 <b>AI Insight (Groq / Llama 3.3 70B):</b>"
-            except Exception as e:
-                log.warning(f"Groq analyze error: {e}")
-
-        # 2. Gemini (fallback — ada search grounding)
+        # 1. Gemini — primary untuk on-demand analysis
         if GEMINI_API_KEY and not insight:
             insight = gemini_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -3945,7 +3987,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Gemini):</b>"
 
-        # 3. Claude (last resort)
+        # 2. Claude — fallback kalau Gemini tidak merespons
         if ANTHROPIC_API_KEY and not insight:
             insight = claude_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -3958,8 +4000,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append(ai_label)
             lines.append(f"<i>{insight}</i>")
         else:
-            lines.append("<i>⚠️ Semua AI tidak merespons — coba /analyze lagi.</i>")
-            lines.append("<i>Tips: Set GROQ_API_KEY di .env untuk AI yang lebih cepat.</i>")
+            lines.append("<i>⚠️ AI tidak merespons saat ini — coba lagi sebentar.</i>")
 
         # Sentiment overlay (tetap via Gemini karena butuh search grounding)
         if GEMINI_API_KEY:
@@ -5735,6 +5776,24 @@ def run_gated_scan():
                 mf_reasons=mf_all_reasons, gate_reasons=gate_reasons,
                 alert_type="SETUP"
             )
+
+            # v14: Groq AI insight — append sebelum dikirim
+            if GROQ_API_KEY:
+                try:
+                    ai_txt = groq_signal_insight(
+                        symbol     = analysis_sym,
+                        direction  = "LONG" if pump_dir else "SHORT",
+                        master_score = raw_master,
+                        gate_reasons = gate_reasons,
+                        trade      = trade,
+                        tf_4h      = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
+                        oi_data    = oi,
+                    )
+                    if ai_txt:
+                        msg += f"\n\n─── AI INSIGHT ───\n🤖 <i>{ai_txt}</i>"
+                except Exception as _ai_e:
+                    log.debug(f"Groq signal insight error: {_ai_e}")
+
             send_telegram(msg)
             _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
