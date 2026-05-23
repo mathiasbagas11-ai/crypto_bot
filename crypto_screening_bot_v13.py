@@ -83,7 +83,9 @@ try:
     from risk_manager      import (calc_position_size, format_risk_block,
                                    format_risk_status, set_capital, set_risk_pct,
                                    set_daily_loss_limit, record_trade_result,
-                                   get_risk_summary, reset_daily as risk_reset_daily)
+                                   get_risk_summary, reset_daily as risk_reset_daily,
+                                   format_personal_trade_plan_block,
+                                   update_capital_after_trade, is_balance_set)
     RISK_MODULE = True
 except ImportError:
     RISK_MODULE = False
@@ -249,7 +251,8 @@ HEARTBEAT_INTERVAL_HRS  = 4       # interval "no signal" update
 WATCHLIST_THRESHOLD     = 60      # master score ambang batas masuk watchlist
 
 # Gemini
-GEMINI_API_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+_GEMINI_MODEL    = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent"
 BINANCE_BASE     = "https://api.binance.com/api/v3"
 BINANCE_FUTURES  = "https://fapi.binance.com"
 
@@ -671,14 +674,16 @@ DATA {coin_name} @ ${price}:
 - OB: {ob_ctx.strip()}
 - Setup:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
 
-Jawab dalam Bahasa Indonesia, max 5-6 kalimat total, format:
+Jawab dalam Bahasa Indonesia, max 5-6 kalimat total.
+JANGAN pakai markdown (**bold** atau *italic*) — gunakan emoji sebagai pengganti.
+Format wajib:
 
-🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
-Alasan: [1-2 alasan paling decisive — bukan semua indikator]
+🎯 [LONG NOW / SHORT NOW / WAIT RETEST / SKIP]
+Alasan: [1-2 alasan paling decisive]
 
-📋 **Trade Plan**: Entry ... | SL ... | TP ... | Konfirmasi: ... (isi hanya jika bukan SKIP)
+📋 Trade Plan: Entry ... | SL ... | TP ... | Konfirmasi: ... (isi hanya jika bukan SKIP)
 
-⚠️ **Risk**: [satu hal yang bisa batalkan setup ini]"""
+⚠️ Risk: [satu hal yang bisa batalkan setup ini]"""
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -839,13 +844,31 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
                   "Data teknikal sudah ditampilkan ke user, kamu cukup beri judgment: bisa entry atau tidak, kenapa, dan trade plan-nya. "
                   "Jawab singkat, padat, Bahasa Indonesia. Max 5-6 kalimat.")
 
+    rsi_4h  = tf_4h.get("rsi", 0)
+    rsi_1h  = tf_1h.get("rsi", 0)
+    rsi_15m = tf_15m.get("rsi", 0)
+    atr_4h  = tf_4h.get("atr", 0)
+    va1     = tf_1h.get("volume_anomaly", {})
+    va15    = tf_15m.get("volume_anomaly", {})
+
+    # Beri label RSI agar AI lebih mudah interpret
+    def _rsi_label(v):
+        if v >= 70: return "OB"
+        if v >= 60: return "bullish"
+        if v <= 30: return "OS"
+        if v <= 40: return "bearish"
+        return "neutral"
+
     user_msg = f"""{sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
 DATA: {coin_name} @ ${price}
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M Rejection: {rej.get('type','NONE')}
+- RSI → 4H: {rsi_4h:.0f} ({_rsi_label(rsi_4h)}) | 1H: {rsi_1h:.0f} ({_rsi_label(rsi_1h)}) | 15M: {rsi_15m:.0f} ({_rsi_label(rsi_15m)})
+- ATR 4H: {atr_4h:.4f} ({atr_4h/price*100:.2f}% dari harga) — ukuran candle normal
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - Money Flow → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
-- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- Volume → 4H: {va4.get('multiplier',1):.1f}x | 1H: {va1.get('multiplier',1):.1f}x | 15M: {va15.get('multiplier',1):.1f}x
+- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
 - Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
 - OB: {ob_ctx.strip()}{pp_ctx}{pd_ctx}{sc_ctx}{sw_ctx}{rt_ctx}
 - Confluence signals: {signals_summary}
@@ -930,12 +953,13 @@ def groq_signal_insight(
         f"Dalam 2-3 kalimat Bahasa Indonesia:\n"
         f"1. Kenapa sinyal ini valid dan layak dieksekusi sekarang (sebutkan alasan paling kuat)\n"
         f"2. Satu hal yang bisa bikin sinyal ini gagal / level invalidasi\n"
-        f"Jangan ulangi angka yang sudah ada di atas. Langsung ke judgment."
+        f"Jangan ulangi angka yang sudah ada di atas. Langsung ke judgment.\n"
+        f"JANGAN pakai markdown **bold** atau *italic* — cukup plain text dengan emoji."
     )
 
     result = _groq_request(
         messages=[
-            {"role": "system", "content": "Kamu trader crypto senior. Jawab singkat, langsung ke poin, Bahasa Indonesia."},
+            {"role": "system", "content": "Kamu trader crypto senior. Jawab singkat, langsung ke poin, Bahasa Indonesia. Plain text, tanpa markdown."},
             {"role": "user",   "content": user_msg},
         ],
         max_tokens=250,
@@ -949,28 +973,25 @@ def gemini_analyze_chart_image(image_base64: str, mime_type: str = "image/jpeg")
     if not GEMINI_API_KEY:
         return "⚠️ GEMINI_API_KEY belum di-set."
 
-    prompt = """Kamu adalah analis crypto profesional SMC (Smart Money Concepts). Tugasmu bukan untuk mengapresiasi atau memuji — tugasmu adalah membedah chart ini secara KRITIS dan memberikan verdict yang actionable.
+    prompt = """Kamu adalah analis crypto profesional SMC (Smart Money Concepts). Bedah chart ini secara KRITIS dan berikan verdict actionable.
+JANGAN pakai markdown **bold** atau *italic* — gunakan emoji sebagai pengganti header.
 
 Analisa WAJIB mencakup:
 
-1. 📊 **MARKET STRUCTURE** — Bullish/Bearish/Ranging? Ada CHoCH atau BoS? Di mana last BoS-nya?
-2. 🧱 **ORDER BLOCKS & FVG** — Identifikasi OB yang FRESH (belum mitigated). Ada FVG yang belum diisi? Di range harga berapa?
-3. 💧 **LIQUIDITY** — Di mana liquidity pool terkumpul? Equal highs/lows? Sweep sudah terjadi atau belum?
-4. ⚠️ **RISIKO & INVALIDASI** — Apa yang bisa bikin setup ini GAGAL? Level mana yang jadi invalidasi?
-5. 🎯 **TRADE PLAN** (jika ada setup valid):
-   - Entry zone: [range harga]
-   - TP1: [harga] | TP2: [harga]
-   - SL: [harga]
-   - R:R ratio
-6. 🏁 **VERDICT** — Pilih SATU: **TRADE** / **SKIP** / **WAIT**
-   - TRADE: setup sudah valid, entry sekarang
-   - WAIT: setup forming tapi belum konfirmasi
-   - SKIP: tidak ada setup valid, terlalu berisiko
+📊 MARKET STRUCTURE — Bullish/Bearish/Ranging? Ada CHoCH atau BoS? Di mana last BoS-nya?
+🧱 ORDER BLOCKS & FVG — OB yang FRESH (belum mitigated). Ada FVG yang belum diisi? Di range harga berapa?
+💧 LIQUIDITY — Di mana liquidity pool terkumpul? Equal highs/lows? Sweep sudah terjadi atau belum?
+⚠️ RISIKO & INVALIDASI — Apa yang bisa bikin setup ini GAGAL? Level invalidasi-nya?
+🎯 TRADE PLAN (jika ada setup valid): Entry zone | TP1 | TP2 | SL | R:R ratio
+🏁 VERDICT — Pilih SATU: TRADE / SKIP / WAIT
+   TRADE: setup valid, entry sekarang
+   WAIT: setup forming, belum konfirmasi
+   SKIP: tidak ada setup valid
 
 PENTING:
-- Jika setup LEMAH atau TIDAK JELAS → bilang SKIP dengan alasan spesifik, JANGAN kasih trade plan
-- Jika ada kesalahan umum yang sering trader retail buat di chart ini → sebutkan
-- Jangan basa-basi. Jawab to the point dalam Bahasa Indonesia."""
+- Setup LEMAH atau TIDAK JELAS → bilang SKIP dengan alasan spesifik, JANGAN kasih trade plan
+- Sebutkan kesalahan umum trader retail di chart ini jika ada
+- Jawab to the point dalam Bahasa Indonesia, tanpa basa-basi."""
 
     return _gemini_request({
         "contents": [{
@@ -3579,6 +3600,43 @@ def _md_to_html(text: str) -> str:
     """
     return text
 
+
+def _sanitize_ai_output(text: str) -> str:
+    """
+    Bersihkan output AI sebelum dimasukkan ke pesan HTML Telegram.
+
+    Masalah umum:
+    1. AI kadang pakai **bold** atau *italic* (markdown) → convert ke HTML
+    2. AI kadang output karakter < > & → harus di-escape agar tidak break HTML parser Telegram
+    3. AI kadang pakai # header → strip
+
+    Urutan penting: escape dulu, BARU convert markdown ke HTML tags.
+    Kalau dibalik, karakter < dari HTML tag yang baru dibuat malah ikut di-escape.
+    """
+    import html as _html_lib
+
+    if not text:
+        return text
+
+    # 1. Strip markdown headers (## Heading → Heading)
+    text = re.sub(r"^#{1,4}\s*", "", text, flags=re.MULTILINE)
+
+    # 2. Escape karakter HTML special SEBELUM insert tag apapun
+    #    Tapi skip kalau sudah ada HTML tag (misalnya dari bagian pesan lain)
+    #    Untuk AI output yang seharusnya plain/markdown, aman di-escape semua
+    text = _html_lib.escape(text)
+
+    # 3. Convert **bold** → <b>bold</b>  (setelah escape, ** tidak kena escape)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+
+    # 4. Convert *italic* (single asterisk, bukan bagian dari **)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+
+    # 5. Convert __bold__ → <b>bold</b>
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
+    return text.strip()
+
 def send_telegram(message: str, chat_id: str = None):
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
@@ -3971,14 +4029,22 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append(format_risk_block(entry, sl, direc))
 
     # ── AI Insight untuk /analyze, /scalp, /prepump, dll ──
-    # Chain: Gemini (primary, search grounding) → Claude (fallback)
-    # Groq dipakai KHUSUS untuk confirmed/gated signal — bukan di sini
+    # Chain: Groq (primary, cepat) → Gemini (fallback, search grounding) → Claude (last resort)
     if with_gemini:
         lines.append("")
         insight  = ""
         ai_label = ""
 
-        # 1. Gemini — primary untuk on-demand analysis
+        # 1. Groq — primary untuk on-demand analysis (cepat, llama-3.3-70b)
+        if GROQ_API_KEY and not insight:
+            insight = groq_analyze_coin(
+                symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                prepump, predump, scalp, swing
+            )
+            if insight:
+                ai_label = "🤖 <b>AI Insight (Groq):</b>"
+
+        # 2. Gemini — fallback kalau Groq tidak merespons
         if GEMINI_API_KEY and not insight:
             insight = gemini_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -3987,7 +4053,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Gemini):</b>"
 
-        # 2. Claude — fallback kalau Gemini tidak merespons
+        # 3. Claude — last resort
         if ANTHROPIC_API_KEY and not insight:
             insight = claude_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -3998,7 +4064,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
 
         if insight:
             lines.append(ai_label)
-            lines.append(f"<i>{insight}</i>")
+            lines.append(_sanitize_ai_output(insight))
         else:
             lines.append("<i>⚠️ AI tidak merespons saat ini — coba lagi sebentar.</i>")
 
@@ -4727,13 +4793,30 @@ def handle_logtrade_command(args: str, chat_id: str):
         if err:
             send_telegram(err, chat_id, parse_mode="HTML")
             return
+        pnl = float(data["pnl"])
         t = log_trade(
             coin=data["coin"], direction=data["direction"],
             entry_price=float(data["entry"]), margin_usdt=float(data["margin"]),
-            leverage=int(data["leverage"]), pnl_usdt=float(data["pnl"]),
+            leverage=int(data["leverage"]), pnl_usdt=pnl,
             note=data.get("note", "")
         )
-        send_telegram(format_trade_logged(t), chat_id, parse_mode="HTML")
+        msg = format_trade_logged(t)
+
+        # v14: auto-update capital + catat daily PnL di risk manager
+        if RISK_MODULE:
+            try:
+                record_trade_result(pnl)           # update daily PnL
+                new_cap = update_capital_after_trade(pnl)  # update capital permanen
+                result_emoji = "🟢" if pnl >= 0 else "🔴"
+                msg += (
+                    f"\n\n{result_emoji} <b>Balance diperbarui</b>: "
+                    f"<code>${new_cap:,.2f} USDT</code>  ({pnl:+.2f})\n"
+                    f"Sinyal berikutnya akan pakai balance terbaru."
+                )
+            except Exception as e:
+                log.debug(f"Risk update after logtrade error: {e}")
+
+        send_telegram(msg, chat_id, parse_mode="HTML")
 
 
 def handle_trades_command(chat_id: str):
@@ -4757,16 +4840,90 @@ def handle_weeksummary_command(chat_id: str):
 
 
 def handle_setbalance_command(args: str, chat_id: str):
-    """Handle /setbalance <USDT> — set saldo awal."""
-    if not JOURNAL_MODULE:
-        send_telegram("❌ Trade journal module tidak tersedia.", chat_id)
-        return
+    """
+    Handle /setbalance <USDT> — set balance trading.
+    v14: sync ke BOTH trade_journal DAN risk_manager sekaligus.
+    """
     try:
         amount = float(args.strip().replace(",", ""))
-        msg = set_initial_balance(amount)
-        send_telegram(msg, chat_id, parse_mode="HTML")
+        if amount <= 0:
+            raise ValueError("Amount harus > 0")
     except ValueError:
-        send_telegram("❓ Format: <code>/setbalance 500</code> (angka USDT)", chat_id, parse_mode="HTML")
+        send_telegram(
+            "❓ Format: <code>/setbalance 500</code> (angka USDT)\n"
+            "Contoh: <code>/setbalance 1000</code>",
+            chat_id, parse_mode="HTML"
+        )
+        return
+
+    # Auto-adjust risk% berdasarkan ukuran akun
+    # Akun kecil: risk% lebih kecil biar tidak blown dengan 1 trade
+    if amount < 100:
+        auto_risk = 1.5    # $60 → max rugi $0.90/trade
+    elif amount < 300:
+        auto_risk = 2.0
+    elif amount < 1000:
+        auto_risk = 2.0
+    else:
+        auto_risk = 2.0
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💰 <b>BALANCE DISET</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"\n💵 Balance: <b>${amount:,.2f} USDT</b>",
+        f"🎚 Risk/trade: <b>{auto_risk}%</b> = max rugi <b>${amount * auto_risk / 100:.2f}</b> per trade\n",
+    ]
+
+    # 1. Sync ke trade journal
+    if JOURNAL_MODULE:
+        try:
+            set_initial_balance(amount)
+            lines.append("✅ Trade journal: tercatat")
+        except Exception as e:
+            lines.append(f"⚠️ Journal error: {e}")
+
+    # 2. Sync ke risk manager + set risk%
+    if RISK_MODULE:
+        try:
+            set_capital(amount)
+            set_risk_pct(auto_risk)
+            lines.append("✅ Risk manager: modal + risk% diperbarui")
+        except Exception as e:
+            lines.append(f"⚠️ Risk manager error: {e}")
+
+    # Pesan kontekstual berdasarkan ukuran akun
+    lines.append("")
+    if amount < 100:
+        lines += [
+            "📌 <b>Mode akun kecil aktif</b>",
+            f"  Dari <b>${amount:.0f}</b> ke <b>$1,000</b> butuh ~{int((1000/amount - 1) * 100)}x growth.",
+            "  Kuncinya: <b>konsistensi + disiplin SL</b>, bukan all-in.",
+            "  Dengan 2% compounding per trade menang, perlu ±180 trade profit.",
+            "",
+            "  Tips untuk akun kecil:",
+            "  • Prioritaskan sinyal CONFIDENCE HIGH / score ≥ 80",
+            "  • Skip sinyal FAIR — tunggu yang GOOD atau EXCELLENT",
+            "  • Jangan balas dendam setelah SL",
+        ]
+    elif amount < 500:
+        lines += [
+            "📌 Akun medium — tetap disiplin risk management.",
+            "  Gunakan leverage sesuai rekomendasi, jangan naikkan manual.",
+        ]
+
+    lines += [
+        "",
+        "📊 Mulai sekarang setiap sinyal akan tampilkan:",
+        "  • Margin yang disarankan + leverage",
+        "  • Estimasi profit (TP) dan loss (SL) dalam USDT",
+        "",
+        f"⚙️ Ubah risk: <code>/setrisk 1.5</code>",
+        f"📈 Setelah trade: <code>/logtrade</code>",
+        f"📊 Cek status: <code>/risk</code>",
+    ]
+
+    send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
 
 
 def handle_journal_wizard_message(text: str, chat_id: str):
@@ -5511,6 +5668,25 @@ def _build_gated_signal_message(
     except Exception as _e:
         log.debug(f"Whale inject error: {_e}")
 
+    # ─── PERSONAL TRADE PLAN (hanya muncul kalau user sudah /setbalance) ───
+    if RISK_MODULE:
+        try:
+            entry_val = float(trade.get("entry") or price)
+            sl_val    = float(trade.get("sl") or 0)
+            tp1_val   = float(trade.get("tp1") or 0)
+            tp2_val   = float(trade.get("tp2") or 0)
+            if entry_val > 0 and sl_val > 0:
+                plan_block = format_personal_trade_plan_block(
+                    entry=entry_val, sl=sl_val,
+                    tp1=tp1_val, tp2=tp2_val,
+                    direction=direction
+                )
+                if plan_block:   # kosong kalau belum /setbalance
+                    lines.append("")
+                    lines.append(plan_block)
+        except Exception as _pe:
+            log.debug(f"Personal trade plan error: {_pe}")
+
     lines.append("")
     lines.append("<i>⚠️ Not financial advice. DYOR.</i>")
     return "\n".join(lines)
@@ -5790,7 +5966,7 @@ def run_gated_scan():
                         oi_data    = oi,
                     )
                     if ai_txt:
-                        msg += f"\n\n─── AI INSIGHT ───\n🤖 <i>{ai_txt}</i>"
+                        msg += f"\n\n─── AI INSIGHT ───\n🤖 {_sanitize_ai_output(ai_txt)}"
                 except Exception as _ai_e:
                     log.debug(f"Groq signal insight error: {_ai_e}")
 

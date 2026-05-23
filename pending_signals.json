@@ -1,0 +1,173 @@
+[
+  {
+    "id": "QNTUSDT_1779494434794",
+    "symbol": "QNTUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "SHORT",
+    "entry_price": 80.24918,
+    "tp": 76.27815,
+    "sl": 81.15535714,
+    "score": 76,
+    "confluence_level": "GOOD",
+    "reasons": [
+      "Master score 76/100 \u2265 55",
+      "MoneyFlow OUTFLOW: 3/3 TF aligned (4H, 1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:00:34.794955+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "JSTUSDT_1779494446378",
+    "symbol": "JSTUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 0.09135234,
+    "tp": 0.0929138,
+    "sl": 0.09096607,
+    "score": 100,
+    "confluence_level": "EXCELLENT",
+    "reasons": [
+      "Master score 100/100 \u2265 55",
+      "MoneyFlow INFLOW: 2/3 TF aligned (4H, 1H)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:00:46.378147+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "LABUSDT_1779494460176",
+    "symbol": "LABUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "SHORT",
+    "entry_price": 4.70599914,
+    "tp": 4.50015968,
+    "sl": 4.77533429,
+    "score": 91,
+    "confluence_level": "EXCELLENT",
+    "reasons": [
+      "Master score 91/100 \u2265 55",
+      "MoneyFlow OUTFLOW: 2/3 TF aligned (1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:01:00.176377+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "FETUSDT_1779494528458",
+    "symbol": "FETUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 0.1940874,
+    "tp": 0.2189412,
+    "sl": 0.19107143,
+    "score": 89,
+    "confluence_level": "EXCELLENT",
+    "reasons": [
+      "Master score 89/100 \u2265 55",
+      "MoneyFlow INFLOW: 2/3 TF aligned (4H, 1H)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:02:08.458855+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "TRXUSDT_1779494536823",
+    "symbol": "TRXUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 0.35604066,
+    "tp": 0.35904048,
+    "sl": 0.35465036,
+    "score": 82,
+    "confluence_level": "GOOD",
+    "reasons": [
+      "Master score 82/100 \u2265 55",
+      "MoneyFlow INFLOW: 1/3 TF aligned (4H)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:02:16.823493+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "LUNCUSDT_1779495221882",
+    "symbol": "LUNCUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "SHORT",
+    "entry_price": 8.283e-05,
+    "tp": 7.98e-05,
+    "sl": 8.378e-05,
+    "score": 78,
+    "confluence_level": "GOOD",
+    "reasons": [
+      "Master score 78/100 \u2265 55",
+      "MoneyFlow OUTFLOW: 3/3 TF aligned (4H, 1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:13:41.882427+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "BSBUSDT_1779495945778",
+    "symbol": "BSBUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 1.04328,
+    "tp": 1.26554195,
+    "sl": 0.9806832,
+    "score": 66,
+    "confluence_level": "GOOD",
+    "reasons": [
+      "Master score 66/100 \u2265 55",
+      "MoneyFlow INFLOW: 2/3 TF aligned (1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:25:45.778495+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "GRTUSDT_1779496428431",
+    "symbol": "GRTUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 0.0254508,
+    "tp": 0.02748492,
+    "sl": 0.02518857,
+    "score": 100,
+    "confluence_level": "EXCELLENT",
+    "reasons": [
+      "Master score 100/100 \u2265 55",
+      "MoneyFlow INFLOW: 3/3 TF aligned (4H, 1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:33:48.431350+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  },
+  {
+    "id": "NEARUSDT_1779497062876",
+    "symbol": "NEARUSDT",
+    "signal_type": "GATED_SIGNAL",
+    "direction": "LONG",
+    "entry_price": 2.084,
+    "tp": 2.33408,
+    "sl": 1.95896,
+    "score": 100,
+    "confluence_level": "EXCELLENT",
+    "reasons": [
+      "Master score 100/100 \u2265 55",
+      "MoneyFlow INFLOW: 2/3 TF aligned (1H, 15M)",
+      "Backtest not available (fallback pass)"
+    ],
+    "created_at": "2026-05-23T00:44:22.876230+00:00",
+    "status": "PENDING",
+    "timeout_hours": 24
+  }
+]

@@ -26,7 +26,8 @@ STATE_FILE = Path("risk_state.json")
 
 # Default config
 DEFAULT_STATE = {
-    "capital_usdt"    : 1000.0,   # modal total
+    "capital_usdt"    : 0.0,      # modal total (0 = belum diset)
+    "balance_set"     : False,    # True kalau user sudah /setbalance
     "risk_pct"        : 2.0,      # max risk % per trade
     "daily_loss_limit": 5.0,      # max loss % per hari sebelum stop trading
     "daily_pnl_usdt"  : 0.0,      # PnL hari ini
@@ -92,8 +93,14 @@ def set_capital(amount_usdt: float):
     """Set modal total. Contoh: set_capital(500)"""
     s = _load()
     s["capital_usdt"] = float(amount_usdt)
+    s["balance_set"]  = True   # tandai bahwa user sudah set balance
     _save(s)
     log.info(f"Modal diset: ${amount_usdt:.2f} USDT")
+
+
+def is_balance_set() -> bool:
+    """Cek apakah user sudah pernah /setbalance."""
+    return _load().get("balance_set", False)
 
 
 def set_risk_pct(pct: float):
@@ -235,6 +242,155 @@ def reset_daily():
     s["last_reset_date"] = date.today().isoformat()
     _save(s)
     log.info("Risk manager: manual daily reset")
+
+# ── Personal Trade Plan ──────────────────────
+
+def calc_personal_trade_plan(entry: float, sl: float,
+                              tp1: float = 0, tp2: float = 0,
+                              direction: str = "LONG") -> dict:
+    """
+    Hitung trade plan personal berdasarkan balance tersimpan.
+
+    Logic:
+    - risk_amount  = capital × risk_pct%   (max USDT yang siap hilang)
+    - sl_dist      = |entry - sl| / entry
+    - notional     = risk_amount / sl_dist  (total posisi yang dibutuhkan)
+    - margin_rec   = min(notional, capital × 20%)  (jangan taruh > 20% modal)
+    - leverage_rec = round(notional / margin_rec), capped 1–20x
+
+    Returns semua angka + flag trading_halted.
+    """
+    s = _load()
+    s = _auto_reset_daily(s)
+    capital  = s["capital_usdt"]
+    risk_pct = s["risk_pct"]
+
+    if capital <= 0 or entry <= 0 or sl <= 0:
+        return {"error": "Data tidak valid — cek /setbalance dulu"}
+
+    sl_dist = abs(entry - sl) / entry
+    if sl_dist < 0.001:
+        return {"error": "SL terlalu dekat entry (< 0.1%)"}
+
+    risk_amount  = capital * risk_pct / 100
+    notional     = risk_amount / sl_dist
+
+    # Margin: jangan lebih dari 20% modal
+    max_margin   = capital * 0.20
+    margin_rec   = min(notional, max_margin)
+
+    # Leverage: berapa kali margin harus di-leverage biar notional terpenuhi
+    lev_raw      = notional / margin_rec if margin_rec > 0 else 1
+    leverage_rec = max(1, min(20, round(lev_raw)))
+
+    # Recalc dengan leverage yang sudah di-round
+    actual_notional = margin_rec * leverage_rec
+
+    # TP profit
+    tp1_profit = tp1_profit_pct = 0.0
+    if tp1 > 0:
+        tp1_dist   = abs(tp1 - entry) / entry
+        tp1_profit = round(actual_notional * tp1_dist, 2)
+        tp1_profit_pct = round(tp1_profit / capital * 100, 2)
+
+    tp2_profit = tp2_profit_pct = 0.0
+    if tp2 > 0:
+        tp2_dist   = abs(tp2 - entry) / entry
+        tp2_profit = round(actual_notional * tp2_dist, 2)
+        tp2_profit_pct = round(tp2_profit / capital * 100, 2)
+
+    # SL loss: cap di risk_amount (tidak bisa rugi lebih dari yang diniatkan)
+    sl_loss     = round(min(actual_notional * sl_dist, risk_amount * 1.05), 2)
+    sl_loss_pct = round(sl_loss / capital * 100, 2)
+
+    return {
+        "capital"          : round(capital, 2),
+        "risk_pct"         : risk_pct,
+        "risk_amount"      : round(risk_amount, 2),
+        "sl_dist_pct"      : round(sl_dist * 100, 2),
+        "notional"         : round(notional, 2),
+        "margin_rec"       : round(margin_rec, 2),
+        "leverage_rec"     : leverage_rec,
+        "actual_notional"  : round(actual_notional, 2),
+        "tp1_profit"       : tp1_profit,
+        "tp1_profit_pct"   : tp1_profit_pct,
+        "tp2_profit"       : tp2_profit,
+        "tp2_profit_pct"   : tp2_profit_pct,
+        "sl_loss"          : sl_loss,
+        "sl_loss_pct"      : sl_loss_pct,
+        "daily_pnl"        : round(s["daily_pnl_usdt"], 2),
+        "daily_trades"     : s["daily_trades"],
+        "trading_halted"   : s["trading_halted"],
+    }
+
+
+def format_personal_trade_plan_block(entry: float, sl: float,
+                                      tp1: float, tp2: float,
+                                      direction: str) -> str:
+    """
+    Format personal trade plan sebagai blok HTML Telegram-ready.
+    Return "" kalau user belum /setbalance — tidak muncul di sinyal.
+    """
+    if not is_balance_set():
+        return ""   # sembunyikan kalau belum set
+
+    calc = calc_personal_trade_plan(entry, sl, tp1, tp2, direction)
+    if "error" in calc:
+        return f"⚠️ <i>Trade plan: {calc['error']}</i>"
+
+    dir_emoji = "🟢" if direction in ("LONG", "PUMP") else "🔴"
+    lines = []
+
+    if calc["trading_halted"]:
+        lines.append("⛔ <b>TRADING HALTED</b> — daily loss limit tercapai! Tunggu reset besok.")
+        lines.append("")
+
+    lines += [
+        "─── PERSONAL TRADE PLAN ───",
+        f"💵 Balance  : <code>${calc['capital']:,.2f}</code>  "
+        f"(risk {calc['risk_pct']}% = maks rugi <b>${calc['risk_amount']:.2f}</b>)",
+        f"📦 Gunakan  : <b>${calc['margin_rec']:.2f}</b> margin  ×  "
+        f"<b>{calc['leverage_rec']}x</b>  =  ${calc['actual_notional']:.2f} posisi",
+        "",
+    ]
+
+    if calc["tp1_profit"] > 0:
+        lines.append(
+            f"  {dir_emoji} TP1 hit → <b>+${calc['tp1_profit']:.2f}</b>"
+            f"  (+{calc['tp1_profit_pct']:.1f}% balance)"
+        )
+    if calc["tp2_profit"] > 0:
+        lines.append(
+            f"  ✅ TP2 hit → <b>+${calc['tp2_profit']:.2f}</b>"
+            f"  (+{calc['tp2_profit_pct']:.1f}% balance)"
+        )
+    lines.append(
+        f"  🔴 SL hit  → <b>-${calc['sl_loss']:.2f}</b>"
+        f"  (-{calc['sl_loss_pct']:.1f}% balance)"
+    )
+
+    if calc["daily_trades"] > 0:
+        pnl_emoji = "🟢" if calc["daily_pnl"] >= 0 else "🔴"
+        lines.append(
+            f"\n  {pnl_emoji} Daily PnL hari ini: "
+            f"<b>{calc['daily_pnl']:+.2f} USDT</b>  ({calc['daily_trades']} trade)"
+        )
+
+    return "\n".join(lines)
+
+
+def update_capital_after_trade(pnl_usdt: float):
+    """
+    Update capital setelah trade selesai — dipanggil otomatis dari /logtrade.
+    Ini beda dari record_trade_result: ini update capital permanen, bukan cuma daily PnL.
+    """
+    s = _load()
+    old_capital = s["capital_usdt"]
+    s["capital_usdt"] = max(0.0, round(old_capital + pnl_usdt, 2))
+    _save(s)
+    log.info(f"Capital updated: ${old_capital:.2f} → ${s['capital_usdt']:.2f} ({pnl_usdt:+.2f})")
+    return s["capital_usdt"]
+
 
 # ── Telegram Format ───────────────────────────
 
