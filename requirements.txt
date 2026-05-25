@@ -6,3 +6,6 @@ matplotlib
 pandas
 mplfinance
 cryptography
+gspread
+google-auth
+google-auth-oauthlib

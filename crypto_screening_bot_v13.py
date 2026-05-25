@@ -3637,7 +3637,7 @@ def _sanitize_ai_output(text: str) -> str:
 
     return text.strip()
 
-def send_telegram(message: str, chat_id: str = None):
+def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
         return
@@ -4845,7 +4845,14 @@ def handle_setbalance_command(args: str, chat_id: str):
     v14: sync ke BOTH trade_journal DAN risk_manager sekaligus.
     """
     try:
-        amount = float(args.strip().replace(",", ""))
+        s = args.strip()
+        # Koma sebagai desimal (57,28 → 57.28) vs ribuan (1,000 → 1000)
+        import re as _re
+        if _re.match(r'^\d+,\d{1,2}$', s):
+            s = s.replace(',', '.')
+        else:
+            s = s.replace(',', '')
+        amount = float(s)
         if amount <= 0:
             raise ValueError("Amount harus > 0")
     except ValueError:
