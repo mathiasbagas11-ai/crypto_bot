@@ -25,6 +25,7 @@ except ImportError:
     GEMINI_OK = False
 
 CREDENTIALS_FILE   = os.getenv("GOOGLE_CREDENTIALS_FILE", "google_credentials.json")
+CREDENTIALS_JSON   = os.getenv("GOOGLE_CREDENTIALS_JSON", "")   # isi JSON langsung (untuk Railway)
 SPREADSHEET_ID     = os.getenv("GOOGLE_SPREADSHEET_ID", "")
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 JOURNAL_STATE_FILE = Path("journal_state.json")
@@ -52,10 +53,13 @@ def _get_sheet():
         log.error("gspread tidak terinstall"); return None
     if not SPREADSHEET_ID:
         log.error("GOOGLE_SPREADSHEET_ID belum diset di .env"); return None
-    if not Path(CREDENTIALS_FILE).exists():
-        log.error(f"File credentials tidak ditemukan: {CREDENTIALS_FILE}"); return None
     try:
-        creds  = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+        if CREDENTIALS_JSON:
+            creds = Credentials.from_service_account_info(json.loads(CREDENTIALS_JSON), scopes=SCOPES)
+        elif Path(CREDENTIALS_FILE).exists():
+            creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+        else:
+            log.error("Google credentials tidak ditemukan (set GOOGLE_CREDENTIALS_JSON di Railway)"); return None
         client = gspread.authorize(creds)
         return client.open_by_key(SPREADSHEET_ID)
     except Exception as e:
