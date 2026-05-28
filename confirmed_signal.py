@@ -345,6 +345,24 @@ def compute_master_score(
     if conflict_r:
         master_score = int(master_score * 0.75)
 
+    # Minimum strong component requirement
+    # Mencegah 1 sinyal lemah yang sendirian trigger confirmed signal via ratio dominance
+    if direction in ("LONG", "SHORT"):
+        strong_comps = sum(
+            1 for c in components.values()
+            if c.get("score", 0) >= 50
+            and (
+                (direction == "LONG"  and "LONG"  in c.get("direction", ""))
+             or (direction == "SHORT" and "SHORT" in c.get("direction", ""))
+            )
+        )
+        if strong_comps < 2:
+            master_score = int(master_score * 0.65)
+            conflict_r.append(
+                f"⚠️ Hanya {strong_comps}/5 komponen score ≥50 — "
+                f"sinyal kurang solid, score dikurangi 35%"
+            )
+
     # Agreement bonus: semua detector agree → bonus
     total_votes = long_votes + short_votes
     if direction == "LONG":
@@ -493,6 +511,37 @@ def generate_confirmed_signal(
         log.info(f"  {symbol}: in cooldown, skip")
         return None
 
+    # 3d. Macro trend filter — EMA9 vs EMA21 pada 4H candles
+    # Sinyal yang berlawanan dengan macro trend kena penalty besar
+    try:
+        _c4h = tf_4h.get("candles", [])
+        if _c4h and len(_c4h) >= 22:
+            _cls = [c["close"] for c in _c4h]
+            # EMA9
+            _k9 = 2 / 10; _e9 = sum(_cls[:9]) / 9
+            for _v in _cls[9:]:
+                _e9 = _v * _k9 + _e9 * (1 - _k9)
+            # EMA21
+            _k21 = 2 / 22; _e21 = sum(_cls[:21]) / 21
+            for _v in _cls[21:]:
+                _e21 = _v * _k21 + _e21 * (1 - _k21)
+            _macro_bull  = _e9 > _e21
+            _macro_label = "BULLISH" if _macro_bull else "BEARISH"
+            _contra = (direction == "LONG" and not _macro_bull) or \
+                      (direction == "SHORT" and _macro_bull)
+            if _contra:
+                _m_penalty = 15
+                master["master_score"] = max(0, master["master_score"] - _m_penalty)
+                master["conflict_reasons"].append(
+                    f"📉 Macro 4H EMA: {_macro_label} — sinyal {direction} melawan macro trend (-{_m_penalty}pt)"
+                )
+                log.info(f"  {symbol}: macro contra {_macro_label} -{_m_penalty}pt → score={master['master_score']}")
+                if master["master_score"] < MASTER_SCORE_CONFIRMED:
+                    log.info(f"  {symbol}: dropped below threshold after macro filter, skip")
+                    return None
+    except Exception as _me:
+        log.debug(f"Macro filter error {symbol}: {_me}")
+
     # 3b. AUTO MARKET CONTEXT VALIDATION (7-layer check)
     val_result = None
     if AUTO_VALIDATOR_ENABLED:
@@ -544,7 +593,17 @@ def generate_confirmed_signal(
 
     if not bt_result["valid"]:
         log.info(f"  {symbol}: BT validation FAILED — {bt_result['reason']}")
-        return None
+        # Cek apakah ada cached signal accuracy yang bisa jadi override
+        # (run /signalbt untuk update cache)
+        cached_acc = _load_signal_bt_cache(symbol)
+        if cached_acc and cached_acc.get("accuracy_4h", 0) >= 60 and bt_result.get("profit_factor", 0) >= 0.85:
+            log.info(f"  {symbol}: Trade BT borderline tapi signal accuracy {cached_acc['accuracy_4h']:.0f}% >= 60% — allow")
+            master["bt_validated"]     = True
+            master["bt_profit_factor"] = bt_result.get("profit_factor", 0)
+            master["bt_win_rate"]      = bt_result.get("win_rate", 0)
+            master["bt_reason"]        = bt_result.get("reason", "") + f" | Signal acc {cached_acc['accuracy_4h']:.0f}%@4H"
+        else:
+            return None
 
     # 4b. Feedback-derived rules check
     try:
@@ -612,6 +671,51 @@ def generate_confirmed_signal(
     return signal
 
 
+SIGNAL_BT_CACHE_FILE = "signal_bt_cache.json"
+
+
+def _load_signal_bt_cache(symbol: str) -> Optional[dict]:
+    """Load cached signal backtest accuracy for a symbol (saved by /signalbt)."""
+    try:
+        if not os.path.exists(SIGNAL_BT_CACHE_FILE):
+            return None
+        with open(SIGNAL_BT_CACHE_FILE) as f:
+            cache = json.load(f)
+        entry = cache.get(symbol)
+        if not entry:
+            return None
+        # Cache expires after 48h
+        cached_at = datetime.fromisoformat(entry.get("cached_at", "2000-01-01T00:00:00+00:00"))
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
+        if age_h > 48:
+            return None
+        return entry
+    except Exception:
+        return None
+
+
+def save_signal_bt_cache(symbol: str, stats: dict):
+    """Save signal backtest result to cache (called from backtest_engine after /signalbt)."""
+    try:
+        cache = {}
+        if os.path.exists(SIGNAL_BT_CACHE_FILE):
+            with open(SIGNAL_BT_CACHE_FILE) as f:
+                cache = json.load(f)
+        cache[symbol] = {
+            "accuracy_4h":  stats.get("accuracy_4h", 0),
+            "accuracy_24h": stats.get("accuracy_24h", 0),
+            "signals_fired": stats.get("signals_fired", 0),
+            "avg_score":    stats.get("avg_score", 0),
+            "cached_at":    datetime.now(timezone.utc).isoformat(),
+        }
+        with open(SIGNAL_BT_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        log.debug(f"Signal BT cache save error: {e}")
+
+
 def _save_confirmed_signal(signal: dict):
     try:
         history = []
@@ -651,7 +755,8 @@ def format_confirmed_signal_message(signal: dict) -> str:
     comp     = signal.get("component_scores", {})
     reasons  = signal.get("reasons", [])
     conflicts = signal.get("conflict_reasons", [])
-    ts       = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    _wib      = timezone(timedelta(hours=7))
+    ts        = datetime.now(_wib).strftime("%d %b %Y %H:%M WIB")
 
     dir_emoji  = "🟢" if direc == "LONG"  else "🔴"
     conf_emoji = "🔥" if conf == "HIGH"   else "✅" if conf == "MEDIUM" else "🟡"
@@ -770,6 +875,25 @@ def format_confirmed_signal_message(signal: dict) -> str:
     if val and AUTO_VALIDATOR_ENABLED:
         lines += ["", format_validation_summary(val)]
 
+    # Signal accuracy cache (from /signalbt)
+    sym_key = signal.get("symbol", "")
+    sig_cache = _load_signal_bt_cache(sym_key)
+    if sig_cache and sig_cache.get("signals_fired", 0) >= 3:
+        acc4  = sig_cache.get("accuracy_4h",  0)
+        acc24 = sig_cache.get("accuracy_24h", 0)
+        acc_emoji = "✅" if acc4 >= 60 else "🟡"
+        lines += [
+            "",
+            "─────── SIGNAL ACCURACY ───────",
+            f"{acc_emoji} Historical accuracy: {acc4:.0f}%@4H | {acc24:.0f}%@24H",
+            f"   (dari {sig_cache['signals_fired']} sinyal serupa, avg score {sig_cache.get('avg_score', 0):.0f})",
+        ]
+    else:
+        lines += [
+            "",
+            f"💡 _Jalankan `/signalbt {sym_key.replace('USDT', '')} 30` untuk lihat historical signal accuracy_",
+        ]
+
     lines += [
         "",
         "─────── MANAJEMEN RISIKO ───────",
@@ -860,8 +984,8 @@ def run_confirmed_signal_scan(
                 except Exception as e:
                     log.debug(f"Tracker record error: {e}")
 
-            # Jangan spam — max 2 confirmed signals per scan
-            if confirmed_count >= 2:
+            # Max 1 confirmed signal per scan — quality over quantity
+            if confirmed_count >= 1:
                 break
 
         except Exception as e:

@@ -126,6 +126,7 @@ try:
         handle_btresult_command  as _bt_result,
         handle_btcompare_command as _bt_compare,
         handle_btstats_command   as _bt_stats,
+        handle_signal_bt_command as _bt_signal,
         STRATEGY_CONFIG          as BT_STRATEGY_CONFIG,
     )
     BACKTEST_MODULE = True
@@ -2460,6 +2461,115 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
     }
 
 # ─────────────────────────────────────────────
+# RSI DIVERGENCE DETECTOR
+# ─────────────────────────────────────────────
+
+def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -> dict:
+    """
+    Deteksi RSI divergence — salah satu sinyal reversal momentum paling reliable.
+
+    Regular Bullish : price LL + RSI HL → akumulasi tersembunyi, pump likely
+    Regular Bearish : price HH + RSI LH → distribusi tersembunyi, dump likely
+
+    Digunakan sebagai bonus score di prepump/predump detector untuk sinyal
+    yang muncul SEBELUM price action terlihat jelas.
+
+    Return:
+      type: REGULAR_BULLISH | REGULAR_BEARISH | NONE
+      bull_score: 0-15  (boost ke prepump momentum)
+      bear_score: 0-15  (boost ke predump momentum)
+      details: list reason strings
+    """
+    empty = {"type": "NONE", "strength": "NONE", "bull_score": 0, "bear_score": 0, "details": []}
+
+    if not candles or len(candles) < period + lookback + 5:
+        return empty
+
+    work   = candles[-(period + lookback + 5):]
+    cls    = [c["close"] for c in work]
+    h_arr  = [c["high"]  for c in work]
+    l_arr  = [c["low"]   for c in work]
+
+    # RSI series (Wilder smoothing)
+    gains  = [max(cls[i] - cls[i-1], 0) for i in range(1, len(cls))]
+    losses = [max(cls[i-1] - cls[i], 0) for i in range(1, len(cls))]
+    if len(gains) < period:
+        return empty
+
+    avg_g = float(np.mean(gains[:period]))
+    avg_l = float(np.mean(losses[:period]))
+    rsi_s = []
+    for i in range(period, len(gains)):
+        avg_g = (avg_g * (period - 1) + gains[i]) / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+        rs    = avg_g / avg_l if avg_l > 0 else 100
+        rsi_s.append(100 - 100 / (1 + rs))
+
+    if len(rsi_s) < lookback:
+        return empty
+
+    rsi_w = rsi_s[-lookback:]
+    h_w   = h_arr[-lookback:]
+    l_w   = l_arr[-lookback:]
+    n     = lookback
+
+    # Find 2-bar confirmed swing pivots
+    swing_highs: list = []
+    swing_lows:  list = []
+
+    for i in range(2, n - 2):
+        if (h_w[i] >= h_w[i-1] and h_w[i] >= h_w[i-2] and
+                h_w[i] >= h_w[i+1] and h_w[i] >= h_w[i+2]):
+            swing_highs.append((i, h_w[i], rsi_w[i]))
+        if (l_w[i] <= l_w[i-1] and l_w[i] <= l_w[i-2] and
+                l_w[i] <= l_w[i+1] and l_w[i] <= l_w[i+2]):
+            swing_lows.append((i, l_w[i], rsi_w[i]))
+
+    bull_score = 0
+    bear_score = 0
+    details: list = []
+    div_type   = "NONE"
+
+    # Regular Bearish: price HH + RSI LH (momentum melemah di puncak)
+    if len(swing_highs) >= 2:
+        ph, lh = swing_highs[-2], swing_highs[-1]
+        p_diff = (lh[1] - ph[1]) / ph[1] * 100  if ph[1] > 0 else 0
+        r_diff = lh[2] - ph[2]
+        if p_diff > 0.5 and r_diff < -3:
+            bear_score = min(15, int(abs(r_diff) * 1.1))
+            strength   = "HIGH" if abs(r_diff) >= 8 else "MEDIUM"
+            details.append(
+                f"⚡ RSI Bearish Div ({strength}): price +{p_diff:.1f}% HH "
+                f"tapi RSI {r_diff:.0f}pt LH — distribusi tersembunyi, dump imminent"
+            )
+            div_type = "REGULAR_BEARISH"
+
+    # Regular Bullish: price LL + RSI HL (momentum membangun di bawah)
+    if len(swing_lows) >= 2:
+        pl, ll_p = swing_lows[-2], swing_lows[-1]
+        p_diff = (ll_p[1] - pl[1]) / pl[1] * 100  if pl[1] > 0 else 0  # negative = LL
+        r_diff = ll_p[2] - pl[2]                                          # positive = HL
+        if p_diff < -0.5 and r_diff > 3:
+            bull_score = min(15, int(r_diff * 1.1))
+            strength   = "HIGH" if r_diff >= 8 else "MEDIUM"
+            details.append(
+                f"⚡ RSI Bullish Div ({strength}): price {p_diff:.1f}% LL "
+                f"tapi RSI +{r_diff:.0f}pt HL — akumulasi tersembunyi, pump imminent"
+            )
+            if div_type == "NONE":
+                div_type = "REGULAR_BULLISH"
+
+    max_s = max(bull_score, bear_score)
+    return {
+        "type":       div_type,
+        "strength":   "HIGH" if max_s >= 12 else ("MEDIUM" if max_s >= 7 else "LOW"),
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "details":    details,
+    }
+
+
+# ─────────────────────────────────────────────
 # PRE-PUMP DETECTOR
 # ─────────────────────────────────────────────
 
@@ -2554,6 +2664,16 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mult = vol_4h.get("multiplier", 1)
         result["reasons"].append(f"  Volume spike 4H: {mult:.1f}x normal")
 
+    # RSI Divergence — akumulasi tersembunyi yang muncul SEBELUM pump terlihat
+    _div_pp = detect_rsi_divergence(tf_1h.get("candles", []), lookback=25)
+    if _div_pp["bull_score"] >= 7:
+        _pp_bonus = min(_div_pp["bull_score"], 12)
+        mom_score += _pp_bonus
+        result["reasons"].extend(_div_pp["details"])
+    elif _div_pp["bear_score"] >= 7:
+        mom_score = max(0, mom_score - 5)
+        result["reasons"].append("⚠️ RSI Bearish Div — momentum downside lebih kuat dari upside")
+
     result["momentum_score"] = min(mom_score, 35)
 
     # ── 3. OI + PRICE ACTION + ATR ──────────────
@@ -2603,9 +2723,82 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
 
     result["oi_pa_score"] = min(oi_pa_score, 35)
 
+    # ── 4. EARLY WARNING: kondisi SEBELUM pump (max 20 poin) ────────────
+    # Deteksi akumulasi tersembunyi yang muncul SEBELUM pump terlihat jelas.
+    # Ini yang bikin sinyal bisa dikirim lebih awal.
+    early_score = 0
+    candles_1h  = tf_1h.get("candles", [])
+
+    # 4a. BB Squeeze Duration — semakin lama kompresi, semakin besar potensi breakout
+    if candles_1h and len(candles_1h) >= 22:
+        closes_arr = [c["close"] for c in candles_1h[-22:]]
+        squeeze_count = 0
+        for _j in range(2, 12):
+            w = closes_arr[max(0, _j - 20):_j]
+            if len(w) < 15:
+                continue
+            mid   = float(np.mean(w))
+            std   = float(np.std(w))
+            bw_pct = (4.0 * std / mid * 100.0) if mid > 0 else 99.0
+            if bw_pct < 4.0:
+                squeeze_count += 1
+        if squeeze_count >= 8:
+            early_score += 10
+            result["reasons"].append(
+                f"🌀 BB Squeeze panjang ({squeeze_count}/10 candle) — energi terkompresi, pump imminent"
+            )
+        elif squeeze_count >= 5:
+            early_score += 5
+            result["reasons"].append(f"  BB Squeeze forming ({squeeze_count}/10 candle) — watch ketat")
+
+    # 4b. Stealth accumulation: volume naik tapi harga flat = smart money masuk diam-diam
+    if candles_1h and len(candles_1h) >= 20:
+        recent_5  = candles_1h[-5:]
+        baseline  = candles_1h[-20:-5]
+        v_recent  = float(np.mean([c["volume"] for c in recent_5]))
+        v_base    = float(np.mean([c["volume"] for c in baseline]))
+        p_start   = recent_5[0]["close"]
+        p_end     = recent_5[-1]["close"]
+        price_chg = abs(p_end - p_start) / p_start * 100 if p_start > 0 else 99.0
+        if v_base > 0:
+            vol_ratio = v_recent / v_base
+            if vol_ratio >= 1.4 and price_chg < 1.0:
+                early_score += 8
+                result["reasons"].append(
+                    f"🔍 Stealth accumulation: vol +{(vol_ratio - 1) * 100:.0f}% saat harga flat "
+                    f"— smart money akumulasi diam-diam"
+                )
+            elif vol_ratio >= 1.2 and price_chg < 0.5:
+                early_score += 4
+                result["reasons"].append(
+                    f"  Volume quietly building ({(vol_ratio - 1) * 100:.0f}% above baseline)"
+                )
+
+    # 4c. OI/Price divergence: OI naik, harga flat/turun = akumulasi conviction tersembunyi
+    oi_c_ew  = oi_data.get("oi_change_pct", 0) or 0
+    candles_1h_ew = tf_1h.get("candles", [])
+    if candles_1h_ew and len(candles_1h_ew) >= 2:
+        _p_now  = candles_1h_ew[-1]["close"]
+        _p_prev = candles_1h_ew[-2]["close"]
+        _p1h_chg = (_p_now - _p_prev) / _p_prev * 100 if _p_prev > 0 else 0
+        if oi_c_ew >= 3 and abs(_p1h_chg) < 0.5:
+            early_score += 6
+            result["reasons"].append(
+                f"📊 OI/Price divergence: OI +{oi_c_ew:.1f}% vs harga flat "
+                f"— conviction long tersembunyi, pre-pump setup"
+            )
+        elif oi_c_ew >= 2 and _p1h_chg <= 0:
+            early_score += 3
+            result["reasons"].append(
+                f"  OI +{oi_c_ew:.1f}% saat harga turun — akumulasi stealth"
+            )
+
+    result["early_warning_score"] = min(early_score, 20)
+
     # ── TOTAL SCORE & LABEL ──────────────────────
-    total = result["funding_score"] + result["momentum_score"] + result["oi_pa_score"]
-    result["total_score"] = total
+    total = (result["funding_score"] + result["momentum_score"] +
+             result["oi_pa_score"] + result["early_warning_score"])
+    result["total_score"] = min(total, 100)
 
     if total >= 75:
         result["label"] = "🔥 HOT PRE-PUMP"
@@ -2785,6 +2978,16 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mult = vol_4h.get("multiplier", 1)
         result["reasons"].append(f"  Volume spike 4H: {mult:.1f}x — perlu konfirmasi arah")
 
+    # RSI Divergence — distribusi tersembunyi yang muncul SEBELUM dump terlihat
+    _div_pd = detect_rsi_divergence(tf_1h.get("candles", []), lookback=25)
+    if _div_pd["bear_score"] >= 7:
+        _pd_bonus = min(_div_pd["bear_score"], 12)
+        mom_score += _pd_bonus
+        result["reasons"].extend(_div_pd["details"])
+    elif _div_pd["bull_score"] >= 7:
+        mom_score = max(0, mom_score - 5)
+        result["reasons"].append("⚠️ RSI Bullish Div — potensi bounce lebih besar dari dump")
+
     result["momentum_score"] = min(mom_score, 35)
 
     # ── 3. OI + PRICE ACTION + ATR BEARISH ──────
@@ -2854,9 +3057,88 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
 
     result["oi_pa_score"] = min(oi_pa_score, 35)
 
+    # ── 4. EARLY WARNING: kondisi SEBELUM dump (max 20 poin) ────────────
+    # Deteksi distribusi tersembunyi sebelum dump terlihat jelas.
+    early_score = 0
+    candles_1h  = tf_1h.get("candles", [])
+
+    # 4a. BB Squeeze Duration — kompresi sebelum dump breakout bawah
+    if candles_1h and len(candles_1h) >= 22:
+        closes_arr = [c["close"] for c in candles_1h[-22:]]
+        squeeze_count = 0
+        for _j in range(2, 12):
+            w = closes_arr[max(0, _j - 20):_j]
+            if len(w) < 15:
+                continue
+            mid   = float(np.mean(w))
+            std   = float(np.std(w))
+            bw_pct = (4.0 * std / mid * 100.0) if mid > 0 else 99.0
+            if bw_pct < 4.0:
+                squeeze_count += 1
+        if squeeze_count >= 8:
+            early_score += 10
+            result["reasons"].append(
+                f"🌀 BB Squeeze panjang ({squeeze_count}/10 candle) — energi terkompresi, dump imminent"
+            )
+        elif squeeze_count >= 5:
+            early_score += 5
+            result["reasons"].append(f"  BB Squeeze forming ({squeeze_count}/10 candle) — watch ketat")
+
+    # 4b. Stealth distribution: volume tinggi + dominasi candle bearish + harga belum turun banyak
+    if candles_1h and len(candles_1h) >= 20:
+        recent_5   = candles_1h[-5:]
+        baseline   = candles_1h[-20:-5]
+        v_recent   = float(np.mean([c["volume"] for c in recent_5]))
+        v_base     = float(np.mean([c["volume"] for c in baseline]))
+        bear_count = sum(1 for c in recent_5 if c["close"] < c["open"])
+        p_start    = recent_5[0]["close"]
+        p_end      = recent_5[-1]["close"]
+        price_chg  = (p_end - p_start) / p_start * 100 if p_start > 0 else 0
+        if v_base > 0:
+            vol_ratio = v_recent / v_base
+            if vol_ratio >= 1.4 and bear_count >= 3 and abs(price_chg) < 2.0:
+                early_score += 8
+                result["reasons"].append(
+                    f"📤 Stealth distribution: vol +{(vol_ratio - 1) * 100:.0f}% + "
+                    f"{bear_count}/5 bearish candle saat harga flat "
+                    f"— smart money exit diam-diam"
+                )
+            elif vol_ratio >= 1.2 and bear_count >= 2 and price_chg <= 0.5:
+                early_score += 4
+                result["reasons"].append(
+                    f"  Volume spike + {bear_count}/5 bearish candle — distribusi potential"
+                )
+
+    # 4c. OI/Price divergence bearish: OI naik + long-heavy + harga flat = longs terperangkap
+    oi_c_ew  = oi_data.get("oi_change_pct", 0) or 0
+    ls_bias_ew = oi_data.get("ls_bias", "BALANCED")
+    if candles_1h and len(candles_1h) >= 2:
+        _p_now  = candles_1h[-1]["close"]
+        _p_prev = candles_1h[-2]["close"]
+        _p1h_chg = (_p_now - _p_prev) / _p_prev * 100 if _p_prev > 0 else 0
+        if oi_c_ew >= 3 and ls_bias_ew == "LONG_HEAVY" and _p1h_chg < 1.0:
+            early_score += 8
+            result["reasons"].append(
+                f"📊 OI +{oi_c_ew:.1f}% + Long-heavy + harga flat "
+                f"— longs terperangkap, dump setup forming silently"
+            )
+        elif oi_c_ew >= 2 and ls_bias_ew == "LONG_HEAVY":
+            early_score += 4
+            result["reasons"].append(
+                f"  OI naik + long-heavy ({ls_bias_ew}) — distribusi potential"
+            )
+        elif oi_c_ew >= 3 and _p1h_chg < 0.5:
+            early_score += 3
+            result["reasons"].append(
+                f"  OI divergence: OI +{oi_c_ew:.1f}% vs harga flat — konsolidasi sebelum dump"
+            )
+
+    result["early_warning_score"] = min(early_score, 20)
+
     # ── TOTAL SCORE & LABEL ──────────────────────
-    total = result["funding_score"] + result["momentum_score"] + result["oi_pa_score"]
-    result["total_score"] = total
+    total = (result["funding_score"] + result["momentum_score"] +
+             result["oi_pa_score"] + result["early_warning_score"])
+    result["total_score"] = min(total, 100)
 
     if total >= 75:
         result["label"] = "💀 HOT PRE-DUMP"
@@ -5371,6 +5653,22 @@ def process_update(update: dict):
             _bt_stats(chat_id, send_telegram)
         else:
             send_telegram("❌ Backtest module tidak tersedia.", chat_id)
+
+    elif text_lower.startswith("/signalbt"):
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        if BACKTEST_MODULE:
+            threading.Thread(
+                target=_bt_signal,
+                args=(args, chat_id, send_telegram),
+                daemon=True
+            ).start()
+        else:
+            send_telegram(
+                "❌ Backtest module tidak tersedia.\n"
+                "Pastikan `backtest_engine.py` ada di folder yang sama.",
+                chat_id
+            )
 
     elif text_lower.startswith("/signals"):
         if TRACKER_MODULE:
