@@ -9,3 +9,4 @@ cryptography
 gspread
 google-auth
 google-auth-oauthlib
+websocket-client
