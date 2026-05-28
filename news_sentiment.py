@@ -2,29 +2,42 @@
 """
 NEWS SENTIMENT MODULE
 =====================
-Pure module — dipanggil dari crypto_screening_bot_v9.py
-Tidak ada polling loop, tidak ada Telegram handler sendiri.
+Pure module — dipanggil dari crypto_screening_bot_v13.py
 
 Fungsi utama:
-  get_coin_sentiment(symbol)  → dict sentiment untuk coin tertentu
-  get_macro_sentiment()       → dict macro sentiment global
-  format_sentiment_block(s)   → string siap kirim ke Telegram
+  get_coin_sentiment(symbol)     → dict sentiment untuk coin tertentu
+  get_macro_sentiment()          → dict macro sentiment global
+  get_high_impact_events(symbol) → list high-impact events (Fed, unlock, hack, dll)
+  format_sentiment_block(s)      → string siap kirim ke Telegram
+  get_news_gate(symbol, direction) → (penalty_pts, blocked, reasons)
+
+High-Impact Event Categories:
+  FED_HAWKISH / FED_DOVISH    — Federal Reserve rate decisions
+  FOMC_DECISION               — FOMC meeting outcomes
+  TOKEN_UNLOCK                — scheduled large token unlocks
+  HACK_EXPLOIT                — protocol hacks / exploits
+  REGULATORY_NEGATIVE         — SEC, bans, crackdowns
+  REGULATORY_POSITIVE         — ETF approvals, positive regulation
+  BUYBACK                     — company/protocol token buyback
+  PARTNERSHIP                 — major partnership announcements
+  LISTING                     — major exchange listing
+  DELISTING                   — exchange delisting
 
 Requires .env:
   NEWSAPI_KEY=...
   GEMINI_API_KEY=...
 """
 
-import os, time, logging, requests
+import os, time, logging, requests, re
 from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger("news_sentiment")
 
-NEWSAPI_KEY   = os.getenv("NEWSAPI_KEY", "")
+NEWSAPI_KEY    = os.getenv("NEWSAPI_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL  = "gemini-2.0-flash"
-GEMINI_BASE   = "https://generativelanguage.googleapis.com/v1beta"
-NEWSAPI_BASE  = "https://newsapi.org/v2"
+GEMINI_MODEL   = "gemini-2.0-flash"
+GEMINI_BASE    = "https://generativelanguage.googleapis.com/v1beta"
+NEWSAPI_BASE   = "https://newsapi.org/v2"
 
 NEWS_LOOKBACK_DAYS = 2
 MAX_ARTICLES       = 7
@@ -43,11 +56,74 @@ COIN_SEARCH_MAP = {
     "FET":"Fetch.ai FET crypto","PENDLE":"Pendle crypto",
     "ENA":"Ethena ENA crypto","AAVE":"Aave AAVE crypto",
     "JUP":"Jupiter JUP Solana","HYPE":"Hyperliquid HYPE crypto",
+    "ORDI":"Ordinals ORDI Bitcoin","WIF":"dogwifhat WIF Solana",
 }
 
 SENTIMENT_EMOJI = {
     "BULLISH":"🟢","BEARISH":"🔴","NEUTRAL":"⚪","MIXED":"🟡","UNKNOWN":"❓"
 }
+
+# ── High-Impact Keyword Patterns ──────────────
+# Each entry: (category, direction, min_score_impact, keywords_list)
+# direction: "BEARISH" | "BULLISH" | "NEUTRAL"
+_HIGH_IMPACT_PATTERNS = [
+    # Federal Reserve
+    ("FED_HAWKISH",          "BEARISH", 25,
+     ["rate hike", "hawkish", "fed raises", "interest rate increase",
+      "tighten", "higher for longer", "powell hawkish"]),
+    ("FED_DOVISH",           "BULLISH", 20,
+     ["rate cut", "dovish", "fed cuts", "fed lowers", "pivot",
+      "pause rate", "easing", "powell dovish", "rate reduction"]),
+    ("FOMC_DECISION",        "NEUTRAL", 15,
+     ["fomc", "federal open market", "fomc meeting", "fed decision",
+      "federal reserve decision"]),
+
+    # Token / Protocol Events
+    ("TOKEN_UNLOCK",         "BEARISH", 20,
+     ["token unlock", "vesting unlock", "cliff unlock",
+      "tokens unlocked", "unlock event", "large unlock"]),
+    ("HACK_EXPLOIT",         "BEARISH", 35,
+     ["hack", "exploit", "hacked", "exploited", "stolen", "attack",
+      "rug pull", "smart contract exploit", "bridge hack", "protocol drained"]),
+    ("BUYBACK",              "BULLISH", 20,
+     ["buyback", "buy back", "token buyback", "treasury buyback",
+      "repurchase program", "burning tokens"]),
+    ("PARTNERSHIP",          "BULLISH", 12,
+     ["partnership", "collaboration", "integration", "alliance",
+      "major deal", "signs agreement"]),
+    ("LISTING",              "BULLISH", 18,
+     ["listed on", "new listing", "coinbase listing", "binance listing",
+      "exchange listing", "listed at"]),
+    ("DELISTING",            "BEARISH", 22,
+     ["delist", "delisting", "removed from", "withdrawn from listing"]),
+
+    # Regulatory
+    ("REGULATORY_NEGATIVE",  "BEARISH", 25,
+     ["sec charges", "sec lawsuit", "banned", "crackdown", "illegal",
+      "money laundering", "fraud charges", "regulator blocks",
+      "china ban", "government ban"]),
+    ("REGULATORY_POSITIVE",  "BULLISH", 22,
+     ["etf approved", "approved by sec", "etf approval", "regulatory clarity",
+      "legal tender", "regulated", "approved crypto", "green light"]),
+
+    # Macro
+    ("INFLATION_HIGH",       "BEARISH", 15,
+     ["cpi above", "inflation surges", "hot inflation", "inflation jumps",
+      "higher inflation", "inflation beats"]),
+    ("INFLATION_LOW",        "BULLISH", 12,
+     ["cpi below", "inflation cools", "disinflation", "inflation drops",
+      "inflation falls", "lower than expected inflation"]),
+    ("MARKET_CRASH",         "BEARISH", 30,
+     ["market crash", "stock market crash", "financial crisis",
+      "black swan", "systemic risk", "liquidity crisis"]),
+    ("RISK_ON",              "BULLISH", 10,
+     ["risk appetite", "risk on", "stocks rally", "bull market",
+      "market optimism", "institutional buying"]),
+]
+
+# ── In-memory cache for articles (avoid hammering NewsAPI) ──
+_article_cache: dict = {}
+_ARTICLE_CACHE_TTL = 30 * 60   # 30 minutes
 
 # ── NewsAPI ───────────────────────────────────
 
@@ -55,6 +131,11 @@ def _fetch_articles(query: str, days: int = NEWS_LOOKBACK_DAYS,
                     n: int = MAX_ARTICLES) -> list:
     if not NEWSAPI_KEY:
         return []
+    cache_key = f"{query}_{days}_{n}"
+    cached = _article_cache.get(cache_key)
+    if cached and time.time() - cached["_ts"] < _ARTICLE_CACHE_TTL:
+        return cached["articles"]
+
     from_dt = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         r = requests.get(f"{NEWSAPI_BASE}/everything", params={
@@ -62,7 +143,9 @@ def _fetch_articles(query: str, days: int = NEWS_LOOKBACK_DAYS,
             "language": "en", "pageSize": n, "apiKey": NEWSAPI_KEY,
         }, timeout=15)
         if r.ok:
-            return r.json().get("articles", [])
+            articles = r.json().get("articles", [])
+            _article_cache[cache_key] = {"articles": articles, "_ts": time.time()}
+            return articles
     except Exception as e:
         log.warning(f"NewsAPI error: {e}")
     return []
@@ -153,7 +236,89 @@ def _parse_response(text: str) -> dict:
     result["trading_implication"] = " ".join(impl_buf)
     return result
 
+# ── High-Impact Event Detector ────────────────
+
+def _scan_articles_for_high_impact(articles: list, coin_sym: str = "") -> list:
+    """
+    Scan article titles + descriptions for high-impact patterns.
+
+    Returns list of dicts:
+      category:  str (e.g. "FED_HAWKISH")
+      direction: "BULLISH" | "BEARISH" | "NEUTRAL"
+      impact:    int (0-100, score penalty/bonus magnitude)
+      headline:  str (matched article title)
+      source:    str
+      date:      str
+    """
+    found = []
+    seen_cats: set = set()
+
+    for article in articles:
+        title = (article.get("title") or "").lower()
+        desc  = (article.get("description") or "").lower()
+        full  = f"{title} {desc}"
+        src   = article.get("source", {}).get("name", "")
+        date  = article.get("publishedAt", "")[:10]
+        headline = article.get("title", "")
+
+        for cat, direction, impact, keywords in _HIGH_IMPACT_PATTERNS:
+            if cat in seen_cats:
+                continue
+            for kw in keywords:
+                if kw in full:
+                    # Coin-specific: check if the article is about this coin
+                    # (unless it's a macro event like FED/FOMC)
+                    is_macro = cat.startswith(("FED_", "FOMC", "INFLATION", "MARKET_"))
+                    if not is_macro and coin_sym:
+                        sym_l = coin_sym.lower()
+                        coin_name_l = COIN_SEARCH_MAP.get(coin_sym.upper(), "").lower()
+                        if sym_l not in full and not any(
+                            part in full for part in coin_name_l.split()[:2]
+                        ):
+                            break  # keyword match but not about this coin
+
+                    found.append({
+                        "category":  cat,
+                        "direction": direction,
+                        "impact":    impact,
+                        "headline":  headline[:120],
+                        "source":    src,
+                        "date":      date,
+                        "keyword":   kw,
+                    })
+                    seen_cats.add(cat)
+                    break
+
+    # Sort by impact descending
+    found.sort(key=lambda x: x["impact"], reverse=True)
+    return found
+
+
 # ── Public API ────────────────────────────────
+
+def get_high_impact_events(symbol: str) -> list:
+    """
+    Fetch and scan news for high-impact events for a specific coin.
+
+    Returns list of event dicts (may be empty if no high-impact news found).
+    """
+    sym = symbol.upper().replace("USDT", "")
+    query = COIN_SEARCH_MAP.get(sym, f"{sym} cryptocurrency")
+
+    # Include macro news too
+    macro_q  = "Federal Reserve FOMC interest rate OR token unlock OR hack exploit crypto"
+    coin_arts  = _fetch_articles(query, days=2, n=7)
+    macro_arts = _fetch_articles(macro_q, days=2, n=5)
+
+    # Deduplicate
+    seen, merged = set(), []
+    for a in coin_arts + macro_arts:
+        t = a.get("title", "")
+        if t and t not in seen:
+            seen.add(t); merged.append(a)
+
+    return _scan_articles_for_high_impact(merged, sym)
+
 
 def get_coin_sentiment(symbol: str) -> dict:
     """Fetch + analyze sentiment untuk satu coin. Returns dict."""
@@ -169,10 +334,11 @@ def get_coin_sentiment(symbol: str) -> dict:
         t = a.get("title","")
         if t and t not in seen:
             seen.add(t); merged.append(a)
-    txt = _format_for_prompt(merged[:MAX_ARTICLES])
+    txt    = _format_for_prompt(merged[:MAX_ARTICLES])
     result = _gemini_analyze(txt, f"{sym} crypto and macro market")
-    result["symbol"]   = sym
-    result["articles"] = merged[:5]
+    result["symbol"]        = sym
+    result["articles"]      = merged[:5]
+    result["high_impact"]   = _scan_articles_for_high_impact(merged, sym)
     return result
 
 
@@ -184,8 +350,101 @@ def get_macro_sentiment() -> dict:
     txt   = _format_for_prompt(arts)
     result = _gemini_analyze(
         txt, "global macro economics, Federal Reserve, crypto regulation and ETF")
-    result["articles"] = arts[:5]
+    result["articles"]    = arts[:5]
+    result["high_impact"] = _scan_articles_for_high_impact(arts, "")
     return result
+
+
+def get_news_gate(symbol: str, direction: str) -> tuple:
+    """
+    Evaluate news for a signal gate decision.
+
+    Returns: (penalty_pts, blocked, reasons)
+      penalty_pts: int — subtract from master score
+      blocked:     bool — hard block the signal
+      reasons:     list[str]
+
+    Logic:
+      - Any HACK_EXPLOIT → immediate block if direction == LONG
+      - FED_HAWKISH + direction LONG → -15pt
+      - TOKEN_UNLOCK (large) + direction LONG → -10pt
+      - REGULATORY_NEGATIVE → -12pt LONG
+      - REGULATORY_POSITIVE → -8pt SHORT (counter-signal)
+      - Multiple HIGH_IMPACT bearish events → escalating penalty
+    """
+    events = get_high_impact_events(symbol)
+    if not events:
+        return 0, False, []
+
+    penalty  = 0
+    blocked  = False
+    reasons  = []
+    is_long  = direction in ("LONG", "PUMP")
+
+    for ev in events:
+        cat    = ev["category"]
+        ev_dir = ev["direction"]
+        impact = ev["impact"]
+        hl     = ev["headline"][:80]
+
+        if is_long:
+            if cat == "HACK_EXPLOIT":
+                blocked = True
+                reasons.append(f"🚨 HACK/EXPLOIT detected — {hl} | LONG BLOCKED")
+                break
+
+            if ev_dir == "BEARISH":
+                if cat == "FED_HAWKISH":
+                    pts = 15
+                elif cat in ("REGULATORY_NEGATIVE",):
+                    pts = 12
+                elif cat == "TOKEN_UNLOCK":
+                    pts = 10
+                elif cat == "MARKET_CRASH":
+                    pts = 20
+                else:
+                    pts = min(impact // 2, 10)
+                penalty += pts
+                reasons.append(f"📰 {cat} ({ev['date']}): -{pts}pt | {hl}")
+
+        else:  # SHORT
+            if ev_dir == "BULLISH":
+                if cat == "FED_DOVISH":
+                    pts = 12
+                elif cat in ("REGULATORY_POSITIVE", "LISTING"):
+                    pts = 10
+                elif cat == "BUYBACK":
+                    pts = 8
+                elif cat == "RISK_ON":
+                    pts = 6
+                else:
+                    pts = min(impact // 2, 8)
+                penalty += pts
+                reasons.append(f"📰 {cat} ({ev['date']}): -{pts}pt | {hl}")
+
+            if cat == "HACK_EXPLOIT":
+                # Hack is SHORT tailwind — bonus not penalty
+                penalty -= 5  # reduce penalty
+                reasons.append(f"⚠️ HACK/EXPLOIT → SHORT aligned: {hl}")
+
+    # Cap penalty at 30pt
+    penalty = min(penalty, 30)
+    return penalty, blocked, reasons
+
+
+def format_high_impact_block(events: list) -> str:
+    """Format high-impact events for Telegram display."""
+    if not events:
+        return ""
+    lines = ["⚡ *HIGH-IMPACT EVENTS:*"]
+    for ev in events[:4]:
+        d_emoji = "🔴" if ev["direction"] == "BEARISH" else \
+                  "🟢" if ev["direction"] == "BULLISH" else "⚪"
+        lines.append(
+            f"  {d_emoji} [{ev['date']}] *{ev['category']}* (impact {ev['impact']})"
+        )
+        lines.append(f"     _{ev['headline']}_")
+    return "\n".join(lines)
 
 
 def format_sentiment_block(s: dict, mode: str = "full") -> str:
@@ -207,6 +466,12 @@ def format_sentiment_block(s: dict, mode: str = "full") -> str:
         ]
         if s.get("trading_implication"):
             lines.append(f"   _{s['trading_implication']}_")
+        # High-impact events in short mode
+        hi = s.get("high_impact", [])
+        if hi:
+            top = hi[0]
+            d_e = "🔴" if top["direction"] == "BEARISH" else "🟢"
+            lines.append(f"   {d_e} ⚡ {top['category']}: {top['headline'][:70]}")
         return "\n".join(lines)
 
     # Full mode
@@ -226,6 +491,13 @@ def format_sentiment_block(s: dict, mode: str = "full") -> str:
             lines.append(f"  • {ev}")
     if s.get("trading_implication"):
         lines += ["\n💡 *Trading Implication:*", f"_{s['trading_implication']}_"]
+
+    # High-impact events section
+    hi = s.get("high_impact", [])
+    if hi:
+        lines.append("")
+        lines.append(format_high_impact_block(hi))
+
     if s.get("articles"):
         lines.append(f"\n📄 *Artikel ({len(s['articles'])}):")
         for a in s["articles"]:

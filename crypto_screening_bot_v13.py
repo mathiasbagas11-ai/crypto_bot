@@ -74,12 +74,20 @@ except ImportError:
 
 # ── v9: Module imports ────────────────────────
 try:
-    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block
+    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block, get_news_gate
     NEWS_MODULE = True
 except ImportError:
     NEWS_MODULE = False
     log_tmp = logging.getLogger("v9")
     log_tmp.warning("news_sentiment.py tidak ditemukan — fitur news dinonaktifkan")
+
+# ── Market Context ─────────────────────────
+try:
+    from market_context import get_market_context, format_market_context_block
+    MARKET_CONTEXT_MODULE = True
+except ImportError:
+    MARKET_CONTEXT_MODULE = False
+    logging.getLogger("market_ctx").warning("market_context.py tidak ditemukan — market context dinonaktifkan")
 
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
@@ -5833,7 +5841,8 @@ def handle_help_command(chat_id: str):
         "📋 `/btresult` — Hasil backtest terakhir\n"
         "🔬 `/btcompare BTC 14` — Compare semua strategy untuk 1 coin\n"
         "📚 `/btstats` — History aggregate semua backtest session\n"
-        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n\n"
+        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n"
+        "🌐 `/marketstatus` — Fear&Greed + BTC Regime + Market Breadth + Dominance\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6156,6 +6165,28 @@ def process_update(update: dict):
         else:
             send_telegram("⚠️ Liquidation tracker tidak tersedia.", chat_id)
 
+    elif text_lower.startswith("/marketstatus"):
+        if MARKET_CONTEXT_MODULE:
+            send_telegram("🌐 Fetching market context... ⏳", chat_id)
+            try:
+                ctx = get_market_context()
+                block = format_market_context_block(ctx, compact=False)
+                fg    = ctx.get("fear_greed", {})
+                ts    = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+                msg   = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "🌐 *MARKET REGIME STATUS*\n"
+                    f"🕐 {ts}\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    + block +
+                    "\n\n⚠️ _Not financial advice. DYOR._"
+                )
+                send_telegram(msg, chat_id)
+            except Exception as _me:
+                send_telegram(f"❌ Error fetch market context: {_me}", chat_id)
+        else:
+            send_telegram("⚠️ market_context.py tidak tersedia.", chat_id)
+
     elif text_lower.startswith("/signals"):
         if TRACKER_MODULE:
             send_telegram(format_tracker_summary(), chat_id)
@@ -6420,6 +6451,15 @@ def _build_gated_signal_message(
         if oi_c is not None: lines.append(f"  OI      : {oi_c:+.1f}%")
         if ls   is not None: lines.append(f"  L/S     : {ls:.2f} ({oi_data.get('ls_bias','?')})")
 
+    # Market regime context (Fear&Greed + BTC Regime + Breadth)
+    if MARKET_CONTEXT_MODULE:
+        try:
+            _ctx = get_market_context()
+            lines.append("")
+            lines.append(format_market_context_block(_ctx, compact=True))
+        except Exception:
+            pass
+
     # ─── WHALE CONFLUENCE ───
     try:
         import whale_tracker as _wt
@@ -6499,6 +6539,16 @@ def _build_heartbeat_message(watchlist: dict, last_signal_ts: str) -> str:
         f"   {last_signal_ts if last_signal_ts else 'Bot baru start'}",
         "",
     ]
+
+    # Market context compact line
+    if MARKET_CONTEXT_MODULE:
+        try:
+            ctx = get_market_context()
+            lines.append(format_market_context_block(ctx, compact=True))
+            lines.append("")
+        except Exception:
+            pass
+
     if watchlist:
         lines.append("👀 <b>WATCHLIST</b> — mendekati threshold:")
         for sym, info in list(watchlist.items())[:5]:
