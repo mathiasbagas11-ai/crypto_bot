@@ -41,6 +41,21 @@ from typing import Optional
 
 log = logging.getLogger("confirmed_signal")
 
+# ── Market Context ──────────────────────────
+try:
+    from market_context import get_market_context, apply_market_context_to_score, format_market_context_block
+    MARKET_CONTEXT_MODULE = True
+except ImportError:
+    MARKET_CONTEXT_MODULE = False
+    log.warning("market_context.py tidak ditemukan — market context filter dinonaktifkan")
+
+# ── News Gate ───────────────────────────────
+try:
+    from news_sentiment import get_news_gate
+    NEWS_GATE_MODULE = True
+except ImportError:
+    NEWS_GATE_MODULE = False
+
 # ── Auto Validator ─────────────────────────
 try:
     from auto_validator import (
@@ -611,6 +626,52 @@ def generate_confirmed_signal(
     except Exception as _me:
         log.debug(f"Macro filter error {symbol}: {_me}")
 
+    # 3e. MARKET CONTEXT FILTER (Fear&Greed + BTC Regime + Breadth + Vol + Dominance)
+    if MARKET_CONTEXT_MODULE:
+        try:
+            ctx = get_market_context()
+            adj_score, ctx_blocked, ctx_reasons = apply_market_context_to_score(
+                direction, master["master_score"], ctx
+            )
+            if ctx_blocked:
+                log.info(f"  {symbol}: MARKET CONTEXT HARD BLOCK ({direction})")
+                return None
+            if adj_score != master["master_score"]:
+                penalty = master["master_score"] - adj_score
+                master["master_score"] = adj_score
+                master["conflict_reasons"].append(
+                    f"🌐 Market context penalty -{penalty}pt "
+                    f"(bias={ctx.get('overall_bias','?')})"
+                )
+                log.info(f"  {symbol}: market ctx penalty -{penalty}pt → score={master['master_score']}")
+                if master["master_score"] < MASTER_SCORE_CONFIRMED:
+                    log.info(f"  {symbol}: dropped below threshold after market context, skip")
+                    return None
+            # Store ctx in master for formatter
+            master["market_context"] = ctx
+        except Exception as _mce:
+            log.debug(f"Market context error {symbol}: {_mce}")
+
+    # 3f. NEWS GATE (high-impact event filter)
+    if NEWS_GATE_MODULE:
+        try:
+            news_pen, news_blocked, news_reasons = get_news_gate(symbol, direction)
+            if news_blocked:
+                log.info(f"  {symbol}: NEWS GATE HARD BLOCK — {news_reasons}")
+                return None
+            if news_pen > 0:
+                master["master_score"] = max(0, master["master_score"] - news_pen)
+                master["conflict_reasons"].append(
+                    f"📰 News gate penalty -{news_pen}pt"
+                )
+                master["conflict_reasons"].extend(news_reasons[:2])
+                log.info(f"  {symbol}: news gate penalty -{news_pen}pt → score={master['master_score']}")
+                if master["master_score"] < MASTER_SCORE_CONFIRMED:
+                    log.info(f"  {symbol}: dropped below threshold after news gate, skip")
+                    return None
+        except Exception as _nge:
+            log.debug(f"News gate error {symbol}: {_nge}")
+
     # 3b. AUTO MARKET CONTEXT VALIDATION (7-layer check)
     val_result = None
     if AUTO_VALIDATOR_ENABLED:
@@ -898,6 +959,15 @@ def format_confirmed_signal_message(signal: dict) -> str:
     if oi_c is not None:
         oi_e = "📈" if oi_c > 0 else "📉"
         lines.append(f"{oi_e} OI Change     : {oi_c:+.1f}%")
+
+    # Market context block (Fear&Greed + BTC Regime + Breadth + Vol + Dominance)
+    ctx = signal.get("market_context")
+    if ctx and MARKET_CONTEXT_MODULE:
+        try:
+            lines.append("")
+            lines.append(format_market_context_block(ctx, compact=False))
+        except Exception:
+            pass
 
     # Top reasons
     lines += ["", "─────── ALASAN UTAMA ───────"]

@@ -74,12 +74,31 @@ except ImportError:
 
 # ── v9: Module imports ────────────────────────
 try:
-    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block
+    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block, get_news_gate
     NEWS_MODULE = True
 except ImportError:
     NEWS_MODULE = False
     log_tmp = logging.getLogger("v9")
     log_tmp.warning("news_sentiment.py tidak ditemukan — fitur news dinonaktifkan")
+
+# ── Market Context ─────────────────────────
+try:
+    from market_context import get_market_context, format_market_context_block
+    MARKET_CONTEXT_MODULE = True
+except ImportError:
+    MARKET_CONTEXT_MODULE = False
+
+# ── X (Twitter) Sentiment ──────────────────
+try:
+    from x_sentiment import (
+        get_x_coin_analysis, get_dca_signal,
+        format_x_block, format_dca_block, get_x_source_status,
+    )
+    X_MODULE = True
+except ImportError:
+    X_MODULE = False
+    logging.getLogger("x_sent").warning("x_sentiment.py tidak ditemukan — fitur X/DCA dinonaktifkan")
+    logging.getLogger("market_ctx").warning("market_context.py tidak ditemukan — market context dinonaktifkan")
 
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
@@ -5435,6 +5454,95 @@ def handle_macro_command(chat_id: str):
         send_telegram(f"❌ Error fetch macro news: {e}", chat_id)
 
 
+def handle_dca_command(coin: str, chat_id: str):
+    """Handle /dca <COIN> — X sentiment + DCA signal analysis."""
+    if not X_MODULE:
+        send_telegram("❌ x_sentiment.py tidak tersedia.", chat_id)
+        return
+    sym = coin.upper().strip().replace("USDT", "")
+    if not sym:
+        send_telegram("❓ Format: `/dca BTC` atau `/dca SOL`", chat_id)
+        return
+
+    send_telegram(
+        f"🐦 Fetching X (Twitter) data untuk *{sym}*... ⏳\n"
+        f"_(ini butuh ~15-30 detik karena fetch dari X)_",
+        chat_id
+    )
+    try:
+        # Fetch price context from Binance
+        price_change_7d   = 0.0
+        price_from_low_30d = 0.0
+        current_price      = 0.0
+        try:
+            binance_sym = f"{sym}USDT"
+            # 7d change: 168 hourly candles
+            klines_7d = get_binance_klines(binance_sym, "1h", limit=168)
+            if klines_7d and len(klines_7d) >= 2:
+                open_7d     = float(klines_7d[0]["open"])
+                current_price = float(klines_7d[-1]["close"])
+                price_change_7d = (current_price - open_7d) / open_7d * 100 if open_7d else 0
+
+            # 30d low: 720 hourly candles
+            klines_30d = get_binance_klines(binance_sym, "4h", limit=180)
+            if klines_30d:
+                low_30d = min(float(c["low"]) for c in klines_30d)
+                if low_30d > 0:
+                    price_from_low_30d = (current_price - low_30d) / low_30d * 100
+        except Exception as _e:
+            log.debug(f"Price fetch for DCA {sym}: {_e}")
+
+        dca = get_dca_signal(
+            sym,
+            price=current_price,
+            price_change_7d=price_change_7d,
+            price_from_low_30d=price_from_low_30d,
+        )
+
+        if dca.get("_error"):
+            send_telegram(
+                f"⚠️ Tidak bisa fetch data X untuk *{sym}*.\n"
+                f"Coba lagi nanti atau cek koneksi ke nitter instances.\n\n"
+                f"_Source: {dca.get('x_source', '?')}_",
+                chat_id
+            )
+            return
+
+        msg = format_dca_block(dca)
+        send_telegram(msg, chat_id)
+
+        # Juga kirim X sentiment block
+        x_data = get_x_coin_analysis(sym)
+        if not x_data.get("_error") and x_data.get("analysis", {}).get("total_count", 0) > 0:
+            x_msg = format_x_block(x_data, mode="full")
+            send_telegram(x_msg, chat_id)
+
+    except Exception as e:
+        log.error(f"DCA command error {sym}: {e}", exc_info=True)
+        send_telegram(f"❌ Error saat analisa DCA {sym}: {str(e)[:150]}", chat_id)
+
+
+def handle_xsentiment_command(coin: str, chat_id: str):
+    """Handle /xsenti <COIN> — quick X sentiment without DCA."""
+    if not X_MODULE:
+        send_telegram("❌ x_sentiment.py tidak tersedia.", chat_id)
+        return
+    sym = coin.upper().strip().replace("USDT", "")
+    if not sym:
+        send_telegram("❓ Format: `/xsenti BTC`", chat_id)
+        return
+    send_telegram(f"🐦 Fetching X sentiment untuk *{sym}*... ⏳", chat_id)
+    try:
+        x_data = get_x_coin_analysis(sym)
+        if x_data.get("_error"):
+            send_telegram(f"⚠️ Tidak bisa fetch data X untuk {sym}. Coba lagi nanti.", chat_id)
+            return
+        msg = format_x_block(x_data, mode="full")
+        send_telegram(msg, chat_id)
+    except Exception as e:
+        send_telegram(f"❌ Error fetch X sentiment: {e}", chat_id)
+
+
 # ── v9: Risk handlers ────────────────────────
 
 def handle_risk_command(chat_id: str):
@@ -5833,7 +5941,14 @@ def handle_help_command(chat_id: str):
         "📋 `/btresult` — Hasil backtest terakhir\n"
         "🔬 `/btcompare BTC 14` — Compare semua strategy untuk 1 coin\n"
         "📚 `/btstats` — History aggregate semua backtest session\n"
-        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n\n"
+        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n"
+        "🌐 `/marketstatus` — Fear&Greed + BTC Regime + Market Breadth + Dominance\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🐦 *X (TWITTER) SENTIMENT & DCA*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💎 `/dca BTC` — DCA signal: KOL activity + narrative cycle + price context\n"
+        "   → Early Narrative = 💎 ACCUMULATE | Top Signal = 🚨 AVOID\n"
+        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -5987,6 +6102,17 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/macro"):
         threading.Thread(target=handle_macro_command, args=(chat_id,), daemon=True).start()
+
+    # ── X Sentiment / DCA ─────────────────────
+    elif text_lower.startswith("/dca"):
+        parts = text.split(maxsplit=1)
+        coin  = parts[1].strip() if len(parts) > 1 else ""
+        threading.Thread(target=handle_dca_command, args=(coin, chat_id), daemon=True).start()
+
+    elif text_lower.startswith("/xsenti"):
+        parts = text.split(maxsplit=1)
+        coin  = parts[1].strip() if len(parts) > 1 else ""
+        threading.Thread(target=handle_xsentiment_command, args=(coin, chat_id), daemon=True).start()
 
     # ── v9: Risk ──────────────────────────────
     elif text_lower.startswith("/risk"):
@@ -6155,6 +6281,28 @@ def process_update(update: dict):
             )
         else:
             send_telegram("⚠️ Liquidation tracker tidak tersedia.", chat_id)
+
+    elif text_lower.startswith("/marketstatus"):
+        if MARKET_CONTEXT_MODULE:
+            send_telegram("🌐 Fetching market context... ⏳", chat_id)
+            try:
+                ctx = get_market_context()
+                block = format_market_context_block(ctx, compact=False)
+                fg    = ctx.get("fear_greed", {})
+                ts    = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+                msg   = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "🌐 *MARKET REGIME STATUS*\n"
+                    f"🕐 {ts}\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    + block +
+                    "\n\n⚠️ _Not financial advice. DYOR._"
+                )
+                send_telegram(msg, chat_id)
+            except Exception as _me:
+                send_telegram(f"❌ Error fetch market context: {_me}", chat_id)
+        else:
+            send_telegram("⚠️ market_context.py tidak tersedia.", chat_id)
 
     elif text_lower.startswith("/signals"):
         if TRACKER_MODULE:
@@ -6420,6 +6568,15 @@ def _build_gated_signal_message(
         if oi_c is not None: lines.append(f"  OI      : {oi_c:+.1f}%")
         if ls   is not None: lines.append(f"  L/S     : {ls:.2f} ({oi_data.get('ls_bias','?')})")
 
+    # Market regime context (Fear&Greed + BTC Regime + Breadth)
+    if MARKET_CONTEXT_MODULE:
+        try:
+            _ctx = get_market_context()
+            lines.append("")
+            lines.append(format_market_context_block(_ctx, compact=True))
+        except Exception:
+            pass
+
     # ─── WHALE CONFLUENCE ───
     try:
         import whale_tracker as _wt
@@ -6499,6 +6656,16 @@ def _build_heartbeat_message(watchlist: dict, last_signal_ts: str) -> str:
         f"   {last_signal_ts if last_signal_ts else 'Bot baru start'}",
         "",
     ]
+
+    # Market context compact line
+    if MARKET_CONTEXT_MODULE:
+        try:
+            ctx = get_market_context()
+            lines.append(format_market_context_block(ctx, compact=True))
+            lines.append("")
+        except Exception:
+            pass
+
     if watchlist:
         lines.append("👀 <b>WATCHLIST</b> — mendekati threshold:")
         for sym, info in list(watchlist.items())[:5]:
@@ -7282,6 +7449,11 @@ if __name__ == "__main__":
     log.info(f"Backtest  : {'✅ Module loaded — /backtest /btresult /btcompare /btstats' if BACKTEST_MODULE else '⚠️ Module missing — /backtest disabled'}")
     log.info(f"Tracker   : {'✅ Module loaded — auto signal tracking aktif' if TRACKER_MODULE else '⚠️ Module missing — signal tracking disabled'}")
     log.info(f"Confirmed : {'✅ Module loaded — confirmed entry signal aktif (auto tiap scan)' if CONFIRMED_MODULE else '⚠️ Module missing — confirmed signal disabled'}")
+    if X_MODULE:
+        _x_src = get_x_source_status()
+        log.info(f"X/Twitter : ✅ Module loaded — {_x_src} (/dca /xsenti)")
+    else:
+        log.warning("⚠️ x_sentiment.py tidak ditemukan — /dca /xsenti disabled")
 
     # Start Telegram polling
     poll_thread = threading.Thread(target=polling_loop, daemon=True)
