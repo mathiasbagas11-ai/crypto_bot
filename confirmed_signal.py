@@ -755,7 +755,8 @@ def format_confirmed_signal_message(signal: dict) -> str:
     comp     = signal.get("component_scores", {})
     reasons  = signal.get("reasons", [])
     conflicts = signal.get("conflict_reasons", [])
-    ts       = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    _wib      = timezone(timedelta(hours=7))
+    ts        = datetime.now(_wib).strftime("%d %b %Y %H:%M WIB")
 
     dir_emoji  = "🟢" if direc == "LONG"  else "🔴"
     conf_emoji = "🔥" if conf == "HIGH"   else "✅" if conf == "MEDIUM" else "🟡"
