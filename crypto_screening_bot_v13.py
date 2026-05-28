@@ -529,7 +529,8 @@ DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
-- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
+- Basis: {oi_data.get('perp_spot_basis','N/A')}% | Taker: {oi_data.get('taker_bias','N/A')} | Vol 4H: {va4.get('multiplier',1):.1f}x
 - Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
 - OB: {ob_ctx.strip()}
 - Setup:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
@@ -684,7 +685,9 @@ DATA {coin_name} @ ${price}:
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - MF → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
-- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader L/S: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
+- Perp-Spot Basis: {oi_data.get('perp_spot_basis','N/A')}% | Taker: {oi_data.get('taker_bias','N/A')} ({oi_data.get('taker_buy_sell_ratio','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
+- EMA9/21 1H: {tf_1h.get('ema9',0):.4f} / {tf_1h.get('ema21',0):.4f} | EMA21 4H: {tf_4h.get('ema21',0):.4f}
 - Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
 - OB: {ob_ctx.strip()}
 - Setup:{prepump_ctx}{predump_ctx}{scalp_ctx}{swing_ctx}
@@ -883,7 +886,9 @@ DATA: {coin_name} @ ${price}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - Money Flow → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
 - Volume → 4H: {va4.get('multiplier',1):.1f}x | 1H: {va1.get('multiplier',1):.1f}x | 15M: {va15.get('multiplier',1):.1f}x
-- L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})
+- L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
+- Perp-Spot Basis: {oi_data.get('perp_spot_basis','N/A')}% | Taker: {oi_data.get('taker_bias','N/A')} ({oi_data.get('taker_buy_sell_ratio','N/A')})
+- EMA21 1H: {tf_1h.get('ema21',0):.5g} | EMA21 4H: {tf_4h.get('ema21',0):.5g}
 - Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
 - OB: {ob_ctx.strip()}{pp_ctx}{pd_ctx}{sc_ctx}{sw_ctx}{rt_ctx}
 - Confluence signals: {signals_summary}
@@ -964,7 +969,9 @@ def groq_signal_insight(
         f"MF 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
         f"MF 15M: {mf15.get('bias','?')} | "
         f"Funding: {oi_data.get('funding_rate','N/A')}% | OI: {oi_data.get('oi_change_pct','N/A')}% | "
-        f"L/S: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')})\n\n"
+        f"L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | "
+        f"Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')}) | "
+        f"Basis: {oi_data.get('perp_spot_basis','N/A')}%\n\n"
         f"Dalam 2-3 kalimat Bahasa Indonesia:\n"
         f"1. Kenapa sinyal ini valid dan layak dieksekusi sekarang (sebutkan alasan paling kuat)\n"
         f"2. Satu hal yang bisa bikin sinyal ini gagal / level invalidasi\n"
