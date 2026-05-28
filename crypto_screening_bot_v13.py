@@ -42,9 +42,11 @@ import logging
 import threading
 import requests
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
+
+_WIB = timezone(timedelta(hours=7))
 
 load_dotenv()
 
@@ -4703,7 +4705,7 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
     enriched_coins berisi tf data + semua detector results per coin
     untuk dipakai oleh confirmed_signal engine tanpa re-fetch.
     """
-    ts    = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts    = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     lines = []
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -4828,7 +4830,7 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
 
 def build_prepump_message(candidates: list) -> str:
     """v13: Pre-pump message dengan EXPLICIT ENTRY MODE (MOMENTUM_NOW/RETEST_WAIT)."""
-    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "🎯 *PRE-PUMP ALERT* 🔥",
              f"🕐 {ts}", "━━━━━━━━━━━━━━━━━━━━━━━━",
              "_Funding Squeeze + Momentum + OI Conviction_\n"]
@@ -4880,7 +4882,7 @@ def build_prepump_message(candidates: list) -> str:
 
 def build_predump_message(candidates: list) -> str:
     """v13: Pre-dump message dengan EXPLICIT ENTRY MODE."""
-    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "💀 *PRE-DUMP ALERT* 🔻",
              f"🕐 {ts}", "━━━━━━━━━━━━━━━━━━━━━━━━",
              "_Funding Bearish + Bearish Momentum + OI Distribution_\n"]
@@ -5087,7 +5089,7 @@ def handle_analyze_command(user_input: str, chat_id: str):
             news_s = get_coin_sentiment(binance_sym)
         except Exception as e:
             log.warning(f"News sentiment error: {e}")
-    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -5163,7 +5165,7 @@ def handle_chart_command(chat_id: str, photo_file_id: str):
             send_telegram("⚠️ Gemini tidak bisa menganalisa chart ini. Coba kirim gambar yang lebih jelas.", chat_id)
             return
 
-        ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+        ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
         msg = (
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📸 *ANALISA CHART AI*\n"
@@ -5199,7 +5201,7 @@ def handle_predump_command(chat_id: str):
 
 def build_scalp_message(candidates: list) -> str:
     """v13: Scalp message dengan EXPLICIT ENTRY MODE dan confirmation zone."""
-    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "⚡ *SCALP RADAR*",
              f"🕐 {ts}", "━━━━━━━━━━━━━━━━━━━━━━━━",
              "_Liquidity Sweep + Rejection + OB/FVG + HTF Bias (15M/1H)_\n"]
@@ -6148,7 +6150,6 @@ def _gate_cooldown_ok(symbol: str, state: dict) -> bool:
     last_ts = sent.get(symbol)
     if not last_ts:
         return True
-    from datetime import datetime, timezone, timedelta
     last = datetime.fromisoformat(last_ts)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 3600
     return elapsed >= GATE_COOLDOWN_HOURS
@@ -6165,12 +6166,17 @@ def _check_money_flow_gate(tf_4h: dict, tf_1h: dict, tf_15m: dict, direction: st
     PUMP → butuh INFLOW, DUMP → butuh OUTFLOW.
     Returns (passed, reason_str)
     """
-    expected = "INFLOW" if direction in ("LONG", "PUMP") else "OUTFLOW"
-    tfs = {"4H": tf_4h, "1H": tf_1h, "15M": tf_15m}
-    aligned = [name for name, tf in tfs.items()
-               if tf.get("money_flow", {}).get("bias") == expected]
-    passed = len(aligned) >= GATE_MONEYFLOW_TF_MIN
-    reason = f"MoneyFlow {expected}: {len(aligned)}/3 TF aligned ({', '.join(aligned) if aligned else 'none'})"
+    expected  = "INFLOW" if direction in ("LONG", "PUMP") else "OUTFLOW"
+    opposite  = "OUTFLOW" if expected == "INFLOW" else "INFLOW"
+    tfs       = {"4H": tf_4h, "1H": tf_1h, "15M": tf_15m}
+    aligned   = [name for name, tf in tfs.items()
+                 if tf.get("money_flow", {}).get("bias") == expected]
+    conflict  = [name for name, tf in tfs.items()
+                 if tf.get("money_flow", {}).get("bias") == opposite]
+    passed    = len(aligned) >= GATE_MONEYFLOW_TF_MIN
+    reason    = f"MoneyFlow {expected}: {len(aligned)}/3 TF aligned ({', '.join(aligned) if aligned else 'none'})"
+    if conflict:
+        reason += f" ⚠️ kontra di {', '.join(conflict)}"
     return passed, reason
 
 
@@ -6202,8 +6208,7 @@ def _build_gated_signal_message(
     alert_type SETUP = pertama kali setup terdeteksi
     alert_type ENTRY_NOW = price masuk retest zone (notif kedua)
     """
-    from datetime import datetime, timezone
-    ts  = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts  = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     sym = symbol.replace("USDT", "")
     dir_emoji = "🟢" if direction in ("LONG", "PUMP") else "🔴"
     dir_label = "LONG ▲" if direction in ("LONG", "PUMP") else "SHORT ▼"
@@ -6359,8 +6364,7 @@ def _build_gated_signal_message(
 
 def _build_heartbeat_message(watchlist: dict, last_signal_ts: str) -> str:
     """Build pesan heartbeat tiap 4 jam: status + watchlist."""
-    from datetime import datetime, timezone
-    ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "🤖 *SCREENER STATUS*",
@@ -6408,7 +6412,6 @@ def run_gated_scan():
 
     TIDAK ADA lagi kiriman Telegram tiap scan (kecuali gate lolos).
     """
-    from datetime import datetime, timezone, timedelta
 
     state = _load_gate_state()
 
@@ -6772,7 +6775,6 @@ def run_gated_scan():
 
 def _check_heartbeat(state: dict, signals_sent: int = 0):
     """Kirim heartbeat kalau sudah >= HEARTBEAT_INTERVAL_HRS jam tanpa signal."""
-    from datetime import datetime, timezone, timedelta
     now     = datetime.now(timezone.utc)
     last_hb = state.get(_LAST_HB_KEY, "")
     last_signal = max(state.get(_SENT_SIGNALS_KEY, {}).values(), default="") if state.get(_SENT_SIGNALS_KEY) else ""
