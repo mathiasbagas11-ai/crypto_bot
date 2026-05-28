@@ -74,6 +74,53 @@ WEIGHT = {
 SIGNAL_COOLDOWN_MINUTES = 60
 _last_signal_time: dict = {}  # symbol → datetime
 
+# ── Signal Persistence Cache ────────────────────────
+# Track skor sinyal dari scan sebelumnya.
+# Sinyal yang tiba-tiba muncul (score rendah → tinggi dalam 1 scan) = suspicious.
+# Sinyal yang konsisten dari scan sebelumnya = lebih dipercaya.
+_prev_scores: dict = {}   # symbol → {"score": int, "direction": str, "ts": datetime}
+
+
+def _update_prev_score(symbol: str, direction: str, score: int):
+    _prev_scores[symbol] = {
+        "score":     score,
+        "direction": direction,
+        "ts":        datetime.now(timezone.utc),
+    }
+
+
+def _persistence_adjustment(symbol: str, direction: str, current_score: int) -> int:
+    """
+    Cek konsistensi sinyal antar scan (signal persistence).
+    Professional systems hanya kirim sinyal yang muncul 2+ scan berturut-turut.
+
+    Return: adjustment integer
+      +5  → sinyal persisten (juga kuat di scan sebelumnya)
+      0   → scan pertama atau netral
+      -12 → sinyal tiba-tiba spike dari skor rendah (suspicious noise)
+      -5  → arah berubah dibanding scan sebelumnya
+    """
+    prev = _prev_scores.get(symbol)
+    if not prev:
+        return 0
+
+    age_min = (datetime.now(timezone.utc) - prev["ts"]).total_seconds() / 60
+    if age_min > 45:
+        return 0  # Cache terlalu lama, tidak relevan
+
+    prev_dir   = prev.get("direction", "NONE")
+    prev_score = prev.get("score", 0)
+
+    if prev_dir == direction:
+        if prev_score >= 70:
+            return +5   # Konsisten kuat → bonus kepercayaan
+        elif prev_score >= 50:
+            return 0    # Konsisten moderat → netral
+        else:
+            return -12  # Tiba-tiba muncul dari score rendah → suspicious spike
+    else:
+        return -5       # Arah flip → ketidakpastian
+
 
 def _is_in_cooldown(symbol: str) -> bool:
     last = _last_signal_time.get(symbol)
@@ -499,8 +546,30 @@ def generate_confirmed_signal(
              f"long={master['weighted_long']} short={master['weighted_short']}")
 
     # 2. Filter awal
+    # Selalu update persistence cache dulu (even jika score di bawah threshold)
+    _update_prev_score(symbol, direction, master_score)
+
     if direction == "NONE" or master_score < MASTER_SCORE_WATCH:
         return None
+
+    # Signal persistence adjustment
+    persist_adj = _persistence_adjustment(symbol, direction, master_score)
+    if persist_adj != 0:
+        master["master_score"] = max(0, min(100, master["master_score"] + persist_adj))
+        master_score = master["master_score"]
+        if persist_adj > 0:
+            master["reasons"].append(
+                f"✅ Sinyal persisten dari scan sebelumnya ({persist_adj:+d}pt)"
+            )
+        elif persist_adj == -12:
+            master["conflict_reasons"].append(
+                f"⚠️ Sinyal tiba-tiba spike — tidak ada di scan sebelumnya ({persist_adj:+d}pt)"
+            )
+        elif persist_adj == -5:
+            master["conflict_reasons"].append(
+                f"⚠️ Arah sinyal berubah dari scan sebelumnya ({persist_adj:+d}pt)"
+            )
+        log.info(f"  {symbol}: persistence adj={persist_adj:+d} → score={master_score}")
 
     if master_score < MASTER_SCORE_CONFIRMED:
         log.info(f"  {symbol}: WATCH zone ({master_score}) — below confirmed threshold {MASTER_SCORE_CONFIRMED}")

@@ -147,9 +147,15 @@ def download_ohlcv(symbol: str, interval: str, days: int = 30,
                 batch = r.json()
                 if not batch: break
                 for c in batch:
-                    all_candles.append({"time": int(c[0]), "open": float(c[1]),
-                        "high": float(c[2]), "low": float(c[3]),
-                        "close": float(c[4]), "volume": float(c[5])})
+                    candle = {"time": int(c[0]), "open": float(c[1]),
+                              "high": float(c[2]), "low": float(c[3]),
+                              "close": float(c[4]), "volume": float(c[5])}
+                    if len(c) > 9 and c[9] not in (None, ""):
+                        try:
+                            candle["taker_buy_vol"] = float(c[9])
+                        except (ValueError, TypeError):
+                            pass
+                    all_candles.append(candle)
                 cur = int(batch[-1][0]) + 1
                 if len(batch) < 1000: break
                 time.sleep(0.1)

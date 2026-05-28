@@ -183,6 +183,18 @@ except ImportError:
     EXCHANGE_RESOLVER = False
     logging.getLogger("v13").warning("exchange_resolver.py tidak ditemukan — fallback ke Binance saja")
 
+# ── Liquidation Cascade Tracker ───────────────
+try:
+    from liquidation_tracker import start_liq_tracker, get_liq_data
+    LIQ_TRACKER_MODULE = True
+except ImportError:
+    LIQ_TRACKER_MODULE = False
+    def get_liq_data(symbol): return {}
+
+# ── Glassnode Macro Filter ─────────────────────
+_GLASSNODE_API_KEY = os.environ.get("GLASSNODE_API_KEY", "")
+_glassnode_cache: dict = {}   # {"btc_netflow": {"z": 0.0, "ts": 0}}
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -1013,13 +1025,25 @@ def get_binance_klines(symbol: str, interval: str, limit: int = 100) -> list | N
     """
     Fetch klines — priority: Futures (fapi) → Spot (api) fallback.
     fapi lebih reliable dari server luar (Railway/VPS).
+    Captures taker_buy_vol (kolom [9]) untuk real CVD.
     """
     def _parse(raw):
-        return [{
-            "open": float(c[1]), "high": float(c[2]),
-            "low": float(c[3]),  "close": float(c[4]),
-            "volume": float(c[5]), "time": c[0]
-        } for c in raw]
+        result = []
+        for c in raw:
+            candle = {
+                "open":   float(c[1]), "high": float(c[2]),
+                "low":    float(c[3]), "close": float(c[4]),
+                "volume": float(c[5]), "time":  c[0],
+            }
+            # Real taker buy volume — Binance futures klines kolom [9]
+            # Jauh lebih akurat dari OHLC approximation untuk CVD
+            if len(c) > 9 and c[9] not in (None, ""):
+                try:
+                    candle["taker_buy_vol"] = float(c[9])
+                except (ValueError, TypeError):
+                    pass
+            result.append(candle)
+        return result
 
     # 1. Coba Futures endpoint dulu
     try:
@@ -1077,6 +1101,8 @@ def get_open_interest(symbol: str) -> dict:
     result = {
         "oi": None, "oi_change_pct": None,
         "ls_ratio": None, "ls_bias": "UNKNOWN",
+        "top_ls_ratio": None, "top_ls_bias": "UNKNOWN",
+        "perp_spot_basis": None,
         "funding_rate": None,
     }
 
@@ -1088,6 +1114,7 @@ def get_open_interest(symbol: str) -> dict:
     except Exception:
         pass
 
+    # Global L/S ratio (all accounts)
     try:
         r = requests.get(f"{BINANCE_FUTURES}/futures/data/globalLongShortAccountRatio",
                          params={"symbol": symbol, "period": "1h", "limit": 2}, timeout=8)
@@ -1098,6 +1125,35 @@ def get_open_interest(symbol: str) -> dict:
                 result["ls_ratio"] = ls
                 result["ls_bias"] = ("LONG_HEAVY" if ls > 1.3 else
                                      "SHORT_HEAVY" if ls < 0.7 else "BALANCED")
+    except Exception:
+        pass
+
+    # Top Trader L/S ratio (accounts in top 20% by volume = smart money proxy)
+    try:
+        r = requests.get(f"{BINANCE_FUTURES}/futures/data/topLongShortAccountRatio",
+                         params={"symbol": symbol, "period": "1h", "limit": 2}, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if data:
+                tls = float(data[0].get("longShortRatio", 1.0))
+                result["top_ls_ratio"] = round(tls, 3)
+                result["top_ls_bias"] = ("LONG_HEAVY"  if tls > 1.5 else
+                                         "SHORT_HEAVY" if tls < 0.67 else "BALANCED")
+    except Exception:
+        pass
+
+    # Perp-spot basis: (markPrice - indexPrice) / indexPrice × 100
+    # Positive basis = perp premium → crowded longs (dump fuel)
+    # Negative basis = perp discount → crowded shorts (squeeze fuel)
+    try:
+        r = requests.get(f"{BINANCE_FUTURES}/fapi/v1/premiumIndex",
+                         params={"symbol": symbol}, timeout=8)
+        if r.status_code == 200:
+            d = r.json()
+            mark  = float(d.get("markPrice", 0))
+            index = float(d.get("indexPrice", 0))
+            if index > 0:
+                result["perp_spot_basis"] = round((mark - index) / index * 100, 4)
     except Exception:
         pass
 
@@ -1114,17 +1170,84 @@ def get_open_interest(symbol: str) -> dict:
     except Exception:
         pass
 
+    # Funding Rate + Trend (3 periode terakhir)
     try:
         r = requests.get(f"{BINANCE_FUTURES}/fapi/v1/fundingRate",
-                         params={"symbol": symbol, "limit": 1}, timeout=8)
+                         params={"symbol": symbol, "limit": 3}, timeout=8)
         if r.status_code == 200:
             data = r.json()
             if data:
-                result["funding_rate"] = float(data[0].get("fundingRate", 0)) * 100  # konversi ke %
+                rates = [float(d.get("fundingRate", 0)) * 100 for d in data]
+                result["funding_rate"] = rates[-1]
+                if len(rates) >= 3:
+                    # Funding trend: apakah makin ekstrem ke satu arah?
+                    if rates[-1] < rates[-2] <= rates[0]:
+                        result["funding_trend"] = "MORE_NEGATIVE"   # menuju short squeeze
+                    elif rates[-1] > rates[-2] >= rates[0]:
+                        result["funding_trend"] = "MORE_POSITIVE"   # menuju long squeeze
+                    else:
+                        result["funding_trend"] = "STABLE"
+                else:
+                    result["funding_trend"] = "STABLE"
+    except Exception:
+        pass
+
+    # Taker Buy/Sell Ratio — actual aggressive order flow (bukan account ratio)
+    # Endpoint: /futures/data/takerlongshortRatio
+    # buySellRatio > 1.1 = buyer agresif | < 0.9 = seller agresif
+    try:
+        r = requests.get(f"{BINANCE_FUTURES}/futures/data/takerlongshortRatio",
+                         params={"symbol": symbol, "period": "5m", "limit": 3}, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if data:
+                bsr = float(data[-1].get("buySellRatio", 1.0))
+                result["taker_buy_sell_ratio"] = round(bsr, 3)
+                result["taker_bias"] = (
+                    "BUY_DOMINANT"  if bsr > 1.1 else
+                    "SELL_DOMINANT" if bsr < 0.9 else
+                    "BALANCED"
+                )
     except Exception:
         pass
 
     return result
+
+
+def get_glassnode_btc_netflow_zscore() -> float | None:
+    """
+    Fetch BTC exchange netflow Z-score from Glassnode (daily, free tier).
+    Returns Z-score of last value vs 30-day baseline, or None if unavailable.
+    Requires GLASSNODE_API_KEY env var. Result cached for 12 hours.
+    Z-score > 1.5 = unusual inflows (sell pressure) → suppress LONG signals.
+    """
+    global _glassnode_cache
+    cache = _glassnode_cache.get("btc_netflow", {})
+    if cache and time.time() - cache.get("ts", 0) < 43200:  # 12h TTL
+        return cache.get("z")
+
+    if not _GLASSNODE_API_KEY:
+        return None
+
+    try:
+        r = requests.get(
+            "https://api.glassnode.com/v1/metrics/transactions/transfers_volume_exchanges_net",
+            params={"a": "BTC", "i": "24h", "limit": 30, "api_key": _GLASSNODE_API_KEY},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data and len(data) >= 5:
+                values = [d.get("v", 0) for d in data]
+                last   = values[-1]
+                mean   = float(np.mean(values[:-1]))
+                std    = float(np.std(values[:-1]))
+                z      = round((last - mean) / std, 2) if std > 0 else 0.0
+                _glassnode_cache["btc_netflow"] = {"z": z, "ts": time.time()}
+                return z
+    except Exception as e:
+        log.debug(f"Glassnode fetch error: {e}")
+    return None
 
 
 def get_funding_rate_batch(symbols: list) -> dict:
@@ -1417,18 +1540,27 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     score_pts = 0   # >0 → inflow, <0 → outflow
 
     # ── 1. CVD (Cumulative Volume Delta) ──────────
+    # Prioritas: real taker_buy_vol dari Binance klines [9]
+    # Fallback:  OHLC approximation (kurang akurat, tapi tetap useful)
     buy_vols  = []
     sell_vols = []
+    using_real_taker = any("taker_buy_vol" in c for c in window)
+
     for c in window:
-        hl = c["high"] - c["low"]
-        if hl == 0:
-            buy_vols.append(c["volume"] * 0.5)
-            sell_vols.append(c["volume"] * 0.5)
+        if "taker_buy_vol" in c:
+            bv = min(float(c["taker_buy_vol"]), c["volume"])
+            buy_vols.append(bv)
+            sell_vols.append(c["volume"] - bv)
         else:
-            buy_ratio  = (c["close"] - c["low"]) / hl
-            sell_ratio = (c["high"] - c["close"]) / hl
-            buy_vols.append(c["volume"] * buy_ratio)
-            sell_vols.append(c["volume"] * sell_ratio)
+            hl = c["high"] - c["low"]
+            if hl == 0:
+                buy_vols.append(c["volume"] * 0.5)
+                sell_vols.append(c["volume"] * 0.5)
+            else:
+                buy_ratio  = (c["close"] - c["low"]) / hl
+                sell_ratio = (c["high"] - c["close"]) / hl
+                buy_vols.append(c["volume"] * buy_ratio)
+                sell_vols.append(c["volume"] * sell_ratio)
 
     total_vol  = sum(c["volume"] for c in window)
     net_buy    = sum(buy_vols)
@@ -2129,18 +2261,27 @@ def detect_scalp_setup(symbol: str, tf_15m: dict, tf_1h: dict, tf_4h: dict, oi_d
     result["entry_zone"] = entry_zone
 
     if price > 0:
+        # ATR-based SL: 1.5 × ATR_15m. Falls back to fixed % if ATR not available.
+        atr_15m = tf_15m.get("atr", 0)
+        if atr_15m > 0:
+            sl_dist = atr_15m * 1.5
+        else:
+            sl_dist = price * SCALP_SL_PCT
+        sl_dist = max(sl_dist, price * 0.003)  # floor: 0.3% to avoid tiny SL
+
         if direction == "LONG":
             tp = round(price * (1 + SCALP_TP_PCT), 8)
-            sl = round(price * (1 - SCALP_SL_PCT), 8)
+            sl = round(price - sl_dist, 8)
         elif direction == "SHORT":
             tp = round(price * (1 - SCALP_TP_PCT), 8)
-            sl = round(price * (1 + SCALP_SL_PCT), 8)
+            sl = round(price + sl_dist, 8)
         else:
             tp = sl = None
 
-        result["scalp_tp"] = tp
-        result["scalp_sl"] = sl
-        result["price"]    = price
+        result["scalp_tp"]   = tp
+        result["scalp_sl"]   = sl
+        result["scalp_sl_pct"] = round(sl_dist / price * 100, 3) if price > 0 else SCALP_SL_PCT * 100
+        result["price"]      = price
 
     # ── LABEL ────────────────────────────────────
     result["score"] = max(0, score)
@@ -2300,15 +2441,32 @@ def detect_swing_setup(symbol: str, tf_4h: dict, tf_1h: dict, tf_15m: dict,
                 score += 8
                 result["reasons"].append(f"🧲 Bearish FVG 1H ({d:.1f}% away)")
 
-    # ── 6. OI CONFLUENCE ─────────────────────────
-    ls_bias = oi_data.get("ls_bias", "UNKNOWN")
-    oi_chg  = oi_data.get("oi_change_pct")
-    if direction == "LONG" and ls_bias == "SHORT_HEAVY":
-        score += 8
-        result["reasons"].append(f"⚖️ L/S Short-heavy → squeeze fuel untuk swing long")
-    elif direction == "SHORT" and ls_bias == "LONG_HEAVY":
-        score += 8
-        result["reasons"].append(f"⚖️ L/S Long-heavy → liquidation fuel untuk swing short")
+    # ── 6. OI CONFLUENCE (with Top Trader ratio + Basis) ─────
+    top_ls_bias = oi_data.get("top_ls_bias", "UNKNOWN")
+    ls_bias     = oi_data.get("ls_bias", "UNKNOWN")
+    oi_chg      = oi_data.get("oi_change_pct")
+    _basis_sw   = oi_data.get("perp_spot_basis")
+
+    if direction == "LONG":
+        if top_ls_bias == "SHORT_HEAVY":
+            score += 10
+            result["reasons"].append(f"⚖️ Top Trader Short-heavy → smart money squeeze setup")
+        elif ls_bias == "SHORT_HEAVY":
+            score += 7
+            result["reasons"].append(f"⚖️ L/S Short-heavy → squeeze fuel untuk swing long")
+        if _basis_sw is not None and _basis_sw < -0.05:
+            score += 5
+            result["reasons"].append(f"📉 Basis negatif {_basis_sw:.3f}% → perp discount, shorts crowded")
+    elif direction == "SHORT":
+        if top_ls_bias == "LONG_HEAVY":
+            score += 10
+            result["reasons"].append(f"⚖️ Top Trader Long-heavy → smart money trapped long")
+        elif ls_bias == "LONG_HEAVY":
+            score += 7
+            result["reasons"].append(f"⚖️ L/S Long-heavy → liquidation fuel untuk swing short")
+        if _basis_sw is not None and _basis_sw > 0.1:
+            score += 5
+            result["reasons"].append(f"📈 Basis positif {_basis_sw:.3f}% → perp premium, longs crowded")
     if oi_chg and abs(oi_chg) > 5:
         score += 5
         result["reasons"].append(f"📊 OI Change: {oi_chg:+.1f}% — conviction tinggi")
@@ -2319,12 +2477,20 @@ def detect_swing_setup(symbol: str, tf_4h: dict, tf_1h: dict, tf_15m: dict,
     result["entry_zone"] = entry_zone
 
     if price > 0:
+        # ATR-based SL: 2.0 × ATR_1h. Falls back to fixed % if ATR not available.
+        atr_1h_sl = tf_1h.get("atr", 0)
+        if atr_1h_sl > 0:
+            sl_dist = atr_1h_sl * 2.0
+        else:
+            sl_dist = price * SWING_SL_PCT
+        sl_dist = max(sl_dist, price * 0.008)  # floor: 0.8% to avoid tiny SL
+
         if direction == "LONG":
             tp = round(price * (1 + SWING_TP_PCT), 8)
-            sl = round(price * (1 - SWING_SL_PCT), 8)
+            sl = round(price - sl_dist, 8)
         elif direction == "SHORT":
             tp = round(price * (1 - SWING_TP_PCT), 8)
-            sl = round(price * (1 + SWING_SL_PCT), 8)
+            sl = round(price + sl_dist, 8)
         else:
             tp = sl = None
 
@@ -2332,10 +2498,11 @@ def detect_swing_setup(symbol: str, tf_4h: dict, tf_1h: dict, tf_15m: dict,
         if tp and sl and price != sl:
             rr = round(abs(tp - price) / abs(sl - price), 2)
 
-        result["swing_tp"] = tp
-        result["swing_sl"] = sl
-        result["rr"]       = rr
-        result["price"]    = price
+        result["swing_tp"]   = tp
+        result["swing_sl"]   = sl
+        result["swing_sl_pct"] = round(sl_dist / price * 100, 3) if price > 0 else SWING_SL_PCT * 100
+        result["rr"]         = rr
+        result["price"]      = price
 
     # Estimasi hold time berdasarkan ATR dan target
     atr_1h = tf_1h.get("atr", 0)
@@ -2619,6 +2786,23 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             result["funding_score"] = 5
             result["reasons"].append(f"  Funding netral: {funding_rate:.3f}%")
 
+    # Taker flow + Funding Trend (dari get_open_interest)
+    _taker_bias     = oi_data.get("taker_bias", "BALANCED")
+    _funding_trend  = oi_data.get("funding_trend", "STABLE")
+    _fs_curr        = result["funding_score"]
+
+    if _taker_bias == "BUY_DOMINANT":
+        result["funding_score"] = min(_fs_curr + 5, 30)
+        result["reasons"].append(
+            f"📈 Taker flow: BUY dominant (ratio {oi_data.get('taker_buy_sell_ratio', 0):.2f}) "
+            f"— buyer agresif market-order masuk"
+        )
+    if _funding_trend == "MORE_NEGATIVE":
+        result["funding_score"] = min(result["funding_score"] + 5, 30)
+        result["reasons"].append(
+            "🔄 Funding trend makin negatif — short squeeze tekanan terus membangun"
+        )
+
     # ── 2. MOMENTUM RUNNER ──────────────────────
     rsi_1h = tf_1h.get("rsi", 50)
     rsi_4h = tf_4h.get("rsi", 50)
@@ -2691,14 +2875,38 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         elif oi_change < -5:
             result["reasons"].append(f"  OI falling: {oi_change:.1f}% — deleverage caution")
 
-    # L/S bias: short-heavy → squeeze potential
-    ls_bias = oi_data.get("ls_bias", "UNKNOWN")
-    ls_ratio = oi_data.get("ls_ratio")
-    if ls_bias == "SHORT_HEAVY" and ls_ratio:
-        oi_pa_score += 12
-        result["reasons"].append(f"🎯 L/S Short-heavy: {ls_ratio:.2f} → short squeeze fuel")
-    elif ls_bias == "BALANCED":
+    # Top Trader L/S ratio (smart money proxy — top 20% by volume accounts)
+    top_ls_bias  = oi_data.get("top_ls_bias", "UNKNOWN")
+    top_ls_ratio = oi_data.get("top_ls_ratio")
+    ls_bias      = oi_data.get("ls_bias", "UNKNOWN")
+    ls_ratio     = oi_data.get("ls_ratio")
+
+    if top_ls_bias == "SHORT_HEAVY" and top_ls_ratio:
+        oi_pa_score += 15
+        result["reasons"].append(
+            f"🎯 Top Trader SHORT-heavy: {top_ls_ratio:.2f} → smart money short = squeeze powder keg"
+        )
+    elif top_ls_bias == "BALANCED" and ls_bias == "SHORT_HEAVY":
+        oi_pa_score += 10
+        result["reasons"].append(f"⚖️ Top Trader balanced vs global short-heavy → mixed squeeze setup")
+    elif ls_bias == "SHORT_HEAVY" and ls_ratio:
+        oi_pa_score += 8
+        result["reasons"].append(f"🎯 L/S Short-heavy: {ls_ratio:.2f} → squeeze fuel (retail)")
+    elif top_ls_bias == "BALANCED" or ls_bias == "BALANCED":
         oi_pa_score += 4
+
+    # Perp-spot basis: negative basis = crowded shorts = potential squeeze
+    _basis = oi_data.get("perp_spot_basis")
+    if _basis is not None:
+        if _basis < -0.05:
+            oi_pa_score += 8
+            result["reasons"].append(
+                f"📉 Basis negatif: {_basis:.3f}% — perp di bawah spot, shorts crowded → squeeze setup"
+            )
+        elif _basis > 0.1:
+            result["reasons"].append(
+                f"⚠️ Basis positif tinggi: {_basis:.3f}% — perp premium, longs berat, hati-hati"
+            )
 
     # ATR coiling: price dalam range sempit = energy terakumulasi
     atr_1h = tf_1h.get("atr", 0)
@@ -2793,11 +3001,41 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
                 f"  OI +{oi_c_ew:.1f}% saat harga turun — akumulasi stealth"
             )
 
-    result["early_warning_score"] = min(early_score, 20)
+    # 4d. Liquidation cascade: LONG liq surge = oversold bounce potential
+    _liq = get_liq_data(symbol) if LIQ_TRACKER_MODULE else {}
+    if _liq.get("liq_surge_long"):
+        early_score += 8
+        _lusd = _liq.get("long_liq_usd", 0)
+        result["reasons"].append(
+            f"⚡ Long liq surge: ${_lusd/1e6:.1f}M liq'd (15m) — forced selling = bounce fuel"
+        )
+    elif _liq.get("liq_surge_short"):
+        # Short liq during prepump = price running UP = good continuation signal
+        early_score += 5
+        _susd = _liq.get("short_liq_usd", 0)
+        result["reasons"].append(
+            f"🚀 Short squeeze active: ${_susd/1e6:.1f}M shorts liq'd — momentum continuation"
+        )
+
+    result["early_warning_score"] = min(early_score, 25)
+
+    # ── GLASSNODE MACRO FILTER ───────────────────
+    # If BTC exchange netflow Z-score is extreme (big inflows = sell pressure),
+    # suppress pump signals for ALL coins (macro risk-off).
+    _gl_z = get_glassnode_btc_netflow_zscore()
+    _macro_suppressed = False
+    if _gl_z is not None and _gl_z > 1.5:
+        result["reasons"].append(
+            f"🚨 Glassnode BTC netflow Z={_gl_z:.1f} — massive inflows to exchanges "
+            f"(sell pressure macro) — LONG signal quality reduced"
+        )
+        _macro_suppressed = True
 
     # ── TOTAL SCORE & LABEL ──────────────────────
     total = (result["funding_score"] + result["momentum_score"] +
              result["oi_pa_score"] + result["early_warning_score"])
+    if _macro_suppressed:
+        total = int(total * 0.80)  # reduce score 20% in macro risk-off environment
     result["total_score"] = min(total, 100)
 
     if total >= 75:
@@ -2913,6 +3151,23 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             result["funding_score"] = 5
             result["reasons"].append(f"  Funding netral: {funding_rate:.3f}%")
 
+    # Taker flow + Funding Trend (dari get_open_interest)
+    _taker_bias_pd    = oi_data.get("taker_bias", "BALANCED")
+    _funding_trend_pd = oi_data.get("funding_trend", "STABLE")
+    _fs_curr_pd       = result["funding_score"]
+
+    if _taker_bias_pd == "SELL_DOMINANT":
+        result["funding_score"] = min(_fs_curr_pd + 5, 30)
+        result["reasons"].append(
+            f"📉 Taker flow: SELL dominant (ratio {oi_data.get('taker_buy_sell_ratio', 0):.2f}) "
+            f"— seller agresif market-order masuk"
+        )
+    if _funding_trend_pd == "MORE_POSITIVE":
+        result["funding_score"] = min(result["funding_score"] + 5, 30)
+        result["reasons"].append(
+            "🔄 Funding trend makin positif — long squeeze tekanan terus membangun"
+        )
+
     # ── 2. BEARISH MOMENTUM RUNNER ──────────────
     rsi_1h = tf_1h.get("rsi", 50)
     rsi_4h = tf_4h.get("rsi", 50)
@@ -3008,20 +3263,44 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             # OI turun = deleverage / shorts covering → kontra dump
             result["reasons"].append(f"  OI falling {oi_change:.1f}% — deleverage, shorts exiting")
 
-    # L/S long-heavy → longs crowded = dump fuel
-    ls_bias  = oi_data.get("ls_bias", "UNKNOWN")
-    ls_ratio = oi_data.get("ls_ratio")
-    if ls_bias == "LONG_HEAVY" and ls_ratio:
+    # Top Trader L/S ratio — smart money proxy
+    top_ls_bias  = oi_data.get("top_ls_bias", "UNKNOWN")
+    top_ls_ratio = oi_data.get("top_ls_ratio")
+    ls_bias      = oi_data.get("ls_bias", "UNKNOWN")
+    ls_ratio     = oi_data.get("ls_ratio")
+
+    if top_ls_bias == "LONG_HEAVY" and top_ls_ratio:
+        oi_pa_score += 15
+        result["reasons"].append(
+            f"🎯 Top Trader LONG-heavy: {top_ls_ratio:.2f} → smart money trapped long = cascade risk"
+        )
+    elif top_ls_bias == "BALANCED" and ls_bias == "LONG_HEAVY":
+        oi_pa_score += 10
+        result["reasons"].append(f"⚖️ Top Trader balanced vs global long-heavy → longs crowded (retail)")
+    elif ls_bias == "LONG_HEAVY" and ls_ratio:
         if ls_ratio >= LS_LONG_HEAVY_THRESH:
-            oi_pa_score += 15
+            oi_pa_score += 12
             result["reasons"].append(
                 f"🎯 L/S Long-heavy EXTREME: {ls_ratio:.2f} → long liquidation cascade risk"
             )
         else:
-            oi_pa_score += 8
+            oi_pa_score += 7
             result["reasons"].append(f"⚠️ L/S Long-heavy: {ls_ratio:.2f} → long liq risk")
-    elif ls_bias == "BALANCED":
+    elif top_ls_bias == "BALANCED" or ls_bias == "BALANCED":
         oi_pa_score += 3
+
+    # Perp-spot basis: positive = crowded longs = dump fuel
+    _basis_pd = oi_data.get("perp_spot_basis")
+    if _basis_pd is not None:
+        if _basis_pd > 0.1:
+            oi_pa_score += 8
+            result["reasons"].append(
+                f"📈 Basis positif tinggi: {_basis_pd:.3f}% — perp premium, longs crowded → dump setup"
+            )
+        elif _basis_pd < -0.05:
+            result["reasons"].append(
+                f"  Basis negatif: {_basis_pd:.3f}% — perp di bawah spot, shorts heavy (kontra dump)"
+            )
 
     # ATR expanding bearish — harga bergerak kencang ke bawah
     atr_1h    = tf_1h.get("atr", 0)
@@ -3133,11 +3412,40 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
                 f"  OI divergence: OI +{oi_c_ew:.1f}% vs harga flat — konsolidasi sebelum dump"
             )
 
-    result["early_warning_score"] = min(early_score, 20)
+    # 4d. Liquidation cascade: SHORT liq surge = overbought cascade potential
+    _liq_pd = get_liq_data(symbol) if LIQ_TRACKER_MODULE else {}
+    if _liq_pd.get("liq_surge_short"):
+        early_score += 8
+        _susd = _liq_pd.get("short_liq_usd", 0)
+        result["reasons"].append(
+            f"⚡ Short liq surge: ${_susd/1e6:.1f}M shorts liq'd (15m) — short squeeze = dump risk"
+        )
+    elif _liq_pd.get("liq_surge_long"):
+        # Long liq surge during predump = GREAT dump continuation signal
+        early_score += 8
+        _lusd = _liq_pd.get("long_liq_usd", 0)
+        result["reasons"].append(
+            f"🔥 Long cascade active: ${_lusd/1e6:.1f}M longs liq'd — momentum dump kuat"
+        )
+
+    result["early_warning_score"] = min(early_score, 25)
+
+    # ── GLASSNODE MACRO FILTER ───────────────────
+    # High BTC exchange inflows = selling pressure = amplifies dump signals.
+    _gl_z_pd = get_glassnode_btc_netflow_zscore()
+    _macro_amplified = False
+    if _gl_z_pd is not None and _gl_z_pd > 1.5:
+        result["reasons"].append(
+            f"🚨 Glassnode BTC netflow Z={_gl_z_pd:.1f} — massive inflows "
+            f"(macro sell pressure aktif) — SHORT signal quality boosted"
+        )
+        _macro_amplified = True
 
     # ── TOTAL SCORE & LABEL ──────────────────────
     total = (result["funding_score"] + result["momentum_score"] +
              result["oi_pa_score"] + result["early_warning_score"])
+    if _macro_amplified:
+        total = int(total * 1.10)  # boost 10% when macro confirms dump
     result["total_score"] = min(total, 100)
 
     if total >= 75:
@@ -3267,9 +3575,12 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         d = ob1["bearish_ob"].get("distance_pct", 999)
         if d < 3: dump_score += 5; reasons.append(f"🔴 1H: Price near Bearish OB ({d:.1f}% away)")
 
-    oi_chg = oi_data.get("oi_change_pct")
-    ls_bias = oi_data.get("ls_bias", "UNKNOWN")
-    ls_ratio = oi_data.get("ls_ratio")
+    oi_chg      = oi_data.get("oi_change_pct")
+    ls_bias     = oi_data.get("ls_bias", "UNKNOWN")
+    ls_ratio    = oi_data.get("ls_ratio")
+    top_ls_bias = oi_data.get("top_ls_bias", "UNKNOWN")
+    top_ls_ratio = oi_data.get("top_ls_ratio")
+    _basis_sc   = oi_data.get("perp_spot_basis")
 
     if oi_chg is not None:
         if oi_chg > 5:
@@ -3279,10 +3590,28 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         elif oi_chg < -5:
             reasons.append(f"📉 OI falling {oi_chg:.1f}% — deleverage")
 
-    if ls_bias == "SHORT_HEAVY" and ls_ratio:
-        pump_score += 7; reasons.append(f"🎯 L/S: {ls_ratio:.2f} (short-heavy) → squeeze potential → PUMP")
+    # Top Trader ratio takes precedence over global ratio
+    if top_ls_bias == "SHORT_HEAVY" and top_ls_ratio:
+        pump_score += 9
+        reasons.append(f"🎯 Top Trader short-heavy: {top_ls_ratio:.2f} → smart money squeeze → PUMP")
+    elif top_ls_bias == "LONG_HEAVY" and top_ls_ratio:
+        dump_score += 9
+        reasons.append(f"⚠️ Top Trader long-heavy: {top_ls_ratio:.2f} → smart money longs trapped → DUMP")
+    elif ls_bias == "SHORT_HEAVY" and ls_ratio:
+        pump_score += 6
+        reasons.append(f"🎯 L/S: {ls_ratio:.2f} (short-heavy) → squeeze potential → PUMP")
     elif ls_bias == "LONG_HEAVY" and ls_ratio:
-        dump_score += 7; reasons.append(f"⚠️ L/S: {ls_ratio:.2f} (long-heavy) → long liq risk → DUMP")
+        dump_score += 6
+        reasons.append(f"⚠️ L/S: {ls_ratio:.2f} (long-heavy) → long liq risk → DUMP")
+
+    # Perp-spot basis
+    if _basis_sc is not None:
+        if _basis_sc < -0.05:
+            pump_score += 5
+            reasons.append(f"📉 Basis {_basis_sc:.3f}% → shorts crowded → squeeze → PUMP")
+        elif _basis_sc > 0.1:
+            dump_score += 5
+            reasons.append(f"📈 Basis {_basis_sc:.3f}% → longs crowded → dump risk → SHORT")
 
     va4 = tf_4h.get("volume_anomaly", {})
     va1 = tf_1h.get("volume_anomaly", {})
@@ -4226,9 +4555,10 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             ez = scalp["entry_zone"]
             lines.append(f"  Entry: <code>{fmt_num(ez['bottom'])}</code> — <code>{fmt_num(ez['top'])}</code>  ({ez['width_pct']:.1f}%)")
         if scalp.get("scalp_tp"):
+            _sl_pct = scalp.get("scalp_sl_pct", SCALP_SL_PCT * 100)
             lines.append(
                 f"  TP: <code>{fmt_num(scalp['scalp_tp'])}</code>  (+{SCALP_TP_PCT*100:.1f}%)  "
-                f"SL: <code>{fmt_num(scalp['scalp_sl'])}</code>  (-{SCALP_SL_PCT*100:.1f}%)"
+                f"SL: <code>{fmt_num(scalp['scalp_sl'])}</code>  (-{_sl_pct:.2f}% ATR)"
             )
         for r in [r for r in scalp.get("reasons", []) if not r.startswith("  ")][:2]:
             lines.append(f"  {r}")
@@ -4242,9 +4572,10 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             ez = swing["entry_zone"]
             lines.append(f"  Entry: <code>{fmt_num(ez['bottom'])}</code> — <code>{fmt_num(ez['top'])}</code>")
         if swing.get("swing_tp"):
+            _sw_sl_pct = swing.get("swing_sl_pct", SWING_SL_PCT * 100)
             lines.append(
                 f"  TP: <code>{fmt_num(swing['swing_tp'])}</code>  (+{SWING_TP_PCT*100:.1f}%)  "
-                f"SL: <code>{fmt_num(swing['swing_sl'])}</code>  (-{SWING_SL_PCT*100:.1f}%)  "
+                f"SL: <code>{fmt_num(swing['swing_sl'])}</code>  (-{_sw_sl_pct:.2f}% ATR)  "
                 f"R:R {swing.get('rr',0):.1f}:1"
             )
         for r in [r for r in swing.get("reasons", []) if not r.startswith("  ")][:2]:
@@ -5670,6 +6001,35 @@ def process_update(update: dict):
                 chat_id
             )
 
+    elif text_lower.startswith("/liqstatus"):
+        parts = text.split(maxsplit=1)
+        sym_arg = parts[1].strip().upper() if len(parts) > 1 else "BTCUSDT"
+        if not sym_arg.endswith("USDT"):
+            sym_arg += "USDT"
+        if LIQ_TRACKER_MODULE:
+            d = get_liq_data(sym_arg)
+            surge_icon = ""
+            if d.get("liq_surge_long"):
+                surge_icon = "⚡ LONG SURGE"
+            elif d.get("liq_surge_short"):
+                surge_icon = "⚡ SHORT SURGE"
+            else:
+                surge_icon = "✅ Normal"
+            gl_z = get_glassnode_btc_netflow_zscore()
+            gl_line = f"\n🔗 Glassnode BTC netflow Z-score: {gl_z:.2f}" if gl_z is not None else ""
+            send_telegram(
+                f"⚡ <b>Liquidation Status: {sym_arg}</b>\n\n"
+                f"Status: {surge_icon}\n"
+                f"📉 Long liq (15m): ${d.get('long_liq_usd',0)/1e6:.2f}M\n"
+                f"📈 Short liq (15m): ${d.get('short_liq_usd',0)/1e6:.2f}M\n"
+                f"Bias: {d.get('net_liq_bias','—')}\n"
+                f"Events: {d.get('event_count',0)}"
+                + gl_line,
+                chat_id
+            )
+        else:
+            send_telegram("⚠️ Liquidation tracker tidak tersedia.", chat_id)
+
     elif text_lower.startswith("/signals"):
         if TRACKER_MODULE:
             send_telegram(format_tracker_summary(), chat_id)
@@ -6759,6 +7119,13 @@ if __name__ == "__main__":
     poll_thread = threading.Thread(target=polling_loop, daemon=True)
     poll_thread.start()
     log.info("📡 Telegram chat handler: RUNNING")
+
+    # Liquidation Cascade Tracker
+    if LIQ_TRACKER_MODULE:
+        start_liq_tracker()
+        log.info("⚡ Liquidation Cascade Tracker: RUNNING (wss://fstream.binance.com)")
+    else:
+        log.warning("⚠️ liquidation_tracker.py tidak ditemukan — liq cascade detection disabled")
 
     # Whale Tracker (opsional)
     try:
