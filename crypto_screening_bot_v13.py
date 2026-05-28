@@ -1480,6 +1480,31 @@ def calculate_atr(candles: list, period: int = 14) -> float:
     return np.mean(trs[-period:]) if trs else 0.0
 
 
+def calculate_ema(candles: list, period: int) -> float:
+    """Hitung EMA (Exponential Moving Average) dari candles."""
+    if len(candles) < period:
+        return 0.0
+    closes = [c["close"] for c in candles]
+    k = 2.0 / (period + 1)
+    ema = float(np.mean(closes[:period]))
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def calculate_ema_series(candles: list, period: int) -> list:
+    """Hitung EMA sebagai series (satu nilai per candle)."""
+    if len(candles) < period:
+        return []
+    closes = [c["close"] for c in candles]
+    k = 2.0 / (period + 1)
+    ema = float(np.mean(closes[:period]))
+    series = [ema]
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+        series.append(ema)
+    return series
+
 
 # ─────────────────────────────────────────────
 # v13: MONEY FLOW DETECTOR
@@ -1777,12 +1802,18 @@ def detect_realtime_momentum(symbol: str) -> dict:
         else:           result["short_bias"] = "RANGING"
 
         # ── 4. Breakout dari range 15 candle sebelumnya ──
+        # False breakout filter: butuh 2 candle close di luar range (bukan cuma wick)
         prev15 = candles_1m[-16:-1]
         if prev15:
             prev_high = max(c["high"] for c in prev15)
             prev_low  = min(c["low"]  for c in prev15)
-            result["breakout_up"]   = current_close > prev_high
-            result["breakout_down"] = current_close < prev_low
+            last2     = candles_1m[-2:] if len(candles_1m) >= 2 else candles_1m[-1:]
+            # Confirmed breakout: semua candle terakhir close di luar range
+            result["breakout_up"]   = all(c["close"] > prev_high for c in last2)
+            result["breakout_down"] = all(c["close"] < prev_low  for c in last2)
+            # Tentative: hanya 1 candle (bisa fake/wick)
+            result["breakout_up_tentative"]   = candles_1m[-1]["close"] > prev_high
+            result["breakout_down_tentative"] = candles_1m[-1]["close"] < prev_low
 
         # ── 5. Label ─────────────────────────────
         v = result["velocity_15m"]
@@ -2625,6 +2656,9 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "trendline_sup":  detect_trendline(closed_candles, "lows"),
         "trendline_res":  detect_trendline(closed_candles, "highs"),
         "money_flow":     detect_money_flow(closed_candles),     # v13: CVD+MFI+VWAP
+        "ema9":           calculate_ema(closed_candles, 9),
+        "ema21":          calculate_ema(closed_candles, 21),
+        "ema50":          calculate_ema(closed_candles, 50),
         "_anti_lookahead": True,
         "_closed_count":   len(closed_candles),
     }
@@ -3003,7 +3037,32 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
                 f"  OI +{oi_c_ew:.1f}% saat harga turun — akumulasi stealth"
             )
 
-    # 4d. Liquidation cascade: LONG liq surge = oversold bounce potential
+    # 4d. Pullback volume quality: harga turun (pullback) tapi volume kecil
+    # = smart money absorb diam-diam, bukan distribusi. Ideal setup sebelum pump.
+    if candles_1h and len(candles_1h) >= 20:
+        _pb_recent = candles_1h[-5:]
+        _pb_base   = candles_1h[-20:-5]
+        _pb_v_now  = float(np.mean([c["volume"] for c in _pb_recent]))
+        _pb_v_base = float(np.mean([c["volume"] for c in _pb_base]))
+        # Price direction: is it pulling back? (recent close < 5-bar-ago close)
+        _pb_p_start = _pb_recent[0]["close"]
+        _pb_p_end   = _pb_recent[-1]["close"]
+        _pb_p_chg   = (_pb_p_end - _pb_p_start) / _pb_p_start * 100 if _pb_p_start > 0 else 0
+        _pb_v_ratio = _pb_v_now / _pb_v_base if _pb_v_base > 0 else 1.0
+        if _pb_p_chg < -0.3 and _pb_v_ratio < 0.70:
+            # Price pulling back + volume below 70% baseline = weak pullback (smart money absorb)
+            early_score += 7
+            result["reasons"].append(
+                f"🔍 Pullback volume lemah: vol {_pb_v_ratio*100:.0f}% baseline saat harga pullback "
+                f"({_pb_p_chg:.1f}%) — smart money absorb, pump potential"
+            )
+        elif _pb_p_chg < -0.3 and _pb_v_ratio < 0.85:
+            early_score += 3
+            result["reasons"].append(
+                f"  Pullback low-vol ({_pb_v_ratio*100:.0f}% baseline) — mild absorption"
+            )
+
+    # 4e. Liquidation cascade: LONG liq surge = oversold bounce potential
     _liq = get_liq_data(symbol) if LIQ_TRACKER_MODULE else {}
     if _liq.get("liq_surge_long"):
         early_score += 8
@@ -3012,14 +3071,13 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             f"⚡ Long liq surge: ${_lusd/1e6:.1f}M liq'd (15m) — forced selling = bounce fuel"
         )
     elif _liq.get("liq_surge_short"):
-        # Short liq during prepump = price running UP = good continuation signal
         early_score += 5
         _susd = _liq.get("short_liq_usd", 0)
         result["reasons"].append(
             f"🚀 Short squeeze active: ${_susd/1e6:.1f}M shorts liq'd — momentum continuation"
         )
 
-    result["early_warning_score"] = min(early_score, 25)
+    result["early_warning_score"] = min(early_score, 30)
 
     # ── GLASSNODE MACRO FILTER ───────────────────
     # If BTC exchange netflow Z-score is extreme (big inflows = sell pressure),
@@ -3414,7 +3472,33 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
                 f"  OI divergence: OI +{oi_c_ew:.1f}% vs harga flat — konsolidasi sebelum dump"
             )
 
-    # 4d. Liquidation cascade: SHORT liq surge = overbought cascade potential
+    # 4d. Pullback volume quality (bearish): harga naik tapi volume kecil
+    # = bearish pullback (dead cat bounce) bukan pembalikan nyata.
+    # Rally saat volume rendah di downtrend = distribusi tersembunyi.
+    _candles_1h_pd = tf_1h.get("candles", [])
+    if _candles_1h_pd and len(_candles_1h_pd) >= 20:
+        _pb_r_pd  = _candles_1h_pd[-5:]
+        _pb_b_pd  = _candles_1h_pd[-20:-5]
+        _pb_vn_pd = float(np.mean([c["volume"] for c in _pb_r_pd]))
+        _pb_vb_pd = float(np.mean([c["volume"] for c in _pb_b_pd]))
+        _pb_ps_pd = _pb_r_pd[0]["close"]
+        _pb_pe_pd = _pb_r_pd[-1]["close"]
+        _pb_pc_pd = (_pb_pe_pd - _pb_ps_pd) / _pb_ps_pd * 100 if _pb_ps_pd > 0 else 0
+        _pb_vr_pd = _pb_vn_pd / _pb_vb_pd if _pb_vb_pd > 0 else 1.0
+        if _pb_pc_pd > 0.3 and _pb_vr_pd < 0.70:
+            # Price rallying + volume below 70% baseline = weak rally (dead cat, distribution)
+            early_score += 7
+            result["reasons"].append(
+                f"🔍 Rally volume lemah: vol {_pb_vr_pd*100:.0f}% baseline saat harga naik "
+                f"({_pb_pc_pd:.1f}%) — rally palsu, dump imminent"
+            )
+        elif _pb_pc_pd > 0.3 and _pb_vr_pd < 0.85:
+            early_score += 3
+            result["reasons"].append(
+                f"  Low-vol rally ({_pb_vr_pd*100:.0f}% baseline) — distribusi potential"
+            )
+
+    # 4e. Liquidation cascade: SHORT liq surge = overbought cascade potential
     _liq_pd = get_liq_data(symbol) if LIQ_TRACKER_MODULE else {}
     if _liq_pd.get("liq_surge_short"):
         early_score += 8
@@ -3423,14 +3507,13 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             f"⚡ Short liq surge: ${_susd/1e6:.1f}M shorts liq'd (15m) — short squeeze = dump risk"
         )
     elif _liq_pd.get("liq_surge_long"):
-        # Long liq surge during predump = GREAT dump continuation signal
         early_score += 8
         _lusd = _liq_pd.get("long_liq_usd", 0)
         result["reasons"].append(
             f"🔥 Long cascade active: ${_lusd/1e6:.1f}M longs liq'd — momentum dump kuat"
         )
 
-    result["early_warning_score"] = min(early_score, 25)
+    result["early_warning_score"] = min(early_score, 30)
 
     # ── GLASSNODE MACRO FILTER ───────────────────
     # High BTC exchange inflows = selling pressure = amplifies dump signals.
@@ -4060,6 +4143,24 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             if 0.5 < dist < 5:
                 entry_candidates.append(("1H_SwingLow", round(last_sl*1.003,8), last_sl, 1, last_sl, round(last_sl*1.01,8)))
 
+        # EMA pullback entry: price pulling back to EMA21 (1H) or EMA21 (4H)
+        # EMA21 = strong dynamic support in uptrend — common pro entry zone
+        ema21_1h = tf_1h.get("ema21", 0)
+        ema9_1h  = tf_1h.get("ema9", 0)
+        ema21_4h = tf_4h.get("ema21", 0)
+        t4_pump  = struct4.get("trend", "UNKNOWN")
+        t1_pump  = struct1.get("trend", "UNKNOWN")
+        if ema21_1h > 0 and t1_pump == "BULLISH":
+            dist_ema = (price - ema21_1h) / price * 100
+            if 0.1 < dist_ema < 3.0:  # price 0.1–3% above EMA21 1H = near support
+                entry_candidates.append(("1H_EMA21", round(ema21_1h * 1.001, 8), round(ema21_1h * 0.997, 8), 2,
+                                         round(ema21_1h * 0.997, 8), round(ema21_1h * 1.003, 8)))
+        if ema21_4h > 0 and t4_pump == "BULLISH":
+            dist_ema4 = (price - ema21_4h) / price * 100
+            if 0.1 < dist_ema4 < 5.0:  # 4H EMA21 = macro pullback zone
+                entry_candidates.append(("4H_EMA21", round(ema21_4h * 1.001, 8), round(ema21_4h * 0.995, 8), 3,
+                                         round(ema21_4h * 0.995, 8), round(ema21_4h * 1.005, 8)))
+
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "PUMP", entry_candidates, tf_1h, tf_15m, oi_data)
 
@@ -4130,6 +4231,22 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             dist = ((last_sh - price) / price) * 100
             if 0.5 < dist < 5:
                 entry_candidates.append(("1H_SwingHigh", round(last_sh*0.997,8), last_sh, 1, round(last_sh*0.99,8), last_sh))
+
+        # EMA pullback entry for DUMP: price rallying back to EMA21 (dynamic resistance)
+        ema21_1h_d = tf_1h.get("ema21", 0)
+        ema21_4h_d = tf_4h.get("ema21", 0)
+        t4_dump    = struct4.get("trend", "UNKNOWN")
+        t1_dump    = struct1.get("trend", "UNKNOWN")
+        if ema21_1h_d > 0 and t1_dump == "BEARISH":
+            dist_ema_d = (ema21_1h_d - price) / price * 100
+            if 0.1 < dist_ema_d < 3.0:  # price 0.1–3% below EMA21 1H = near resistance
+                entry_candidates.append(("1H_EMA21", round(ema21_1h_d * 0.999, 8), round(ema21_1h_d * 1.003, 8), 2,
+                                         round(ema21_1h_d * 0.997, 8), round(ema21_1h_d * 1.003, 8)))
+        if ema21_4h_d > 0 and t4_dump == "BEARISH":
+            dist_ema4_d = (ema21_4h_d - price) / price * 100
+            if 0.1 < dist_ema4_d < 5.0:
+                entry_candidates.append(("4H_EMA21", round(ema21_4h_d * 0.999, 8), round(ema21_4h_d * 1.005, 8), 3,
+                                         round(ema21_4h_d * 0.995, 8), round(ema21_4h_d * 1.005, 8)))
 
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "DUMP", entry_candidates, tf_1h, tf_15m, oi_data)
@@ -6727,7 +6844,44 @@ def run_gated_scan():
             if ticker:
                 cur_price = float(ticker.get("lastPrice", 0))
                 if _is_price_in_zone(cur_price, entry["zone"]):
-                    # PRICE IN ZONE → send ENTRY_NOW notification
+                    # Rejection candle check: fetch latest 15M candles to look for
+                    # pin bar / engulfing AT the zone before firing ENTRY_NOW.
+                    # This prevents entry on first touch without reversal confirmation.
+                    rejection_ok = True
+                    rejection_note = ""
+                    try:
+                        fresh_15m = get_binance_klines(entry["symbol"], "15m", limit=6)
+                        if fresh_15m and len(fresh_15m) >= 3:
+                            rej = detect_candle_rejection(fresh_15m)
+                            dir_ = entry.get("direction", "LONG")
+                            if dir_ in ("LONG", "PUMP"):
+                                # Need BULLISH_REJECTION (lower wick / hammer) at support
+                                if rej["type"] == "BULLISH_REJECTION" and rej["strength"] >= 40:
+                                    rejection_note = f"✅ Rejection candle: {rej['detail']}"
+                                elif rej["type"] == "BEARISH_REJECTION":
+                                    # Bearish wick at support = sellers still strong, skip
+                                    rejection_ok = False
+                                    rejection_note = f"⏳ Bearish wick di zona — tunggu konfirmasi"
+                                else:
+                                    rejection_note = "  No rejection candle yet — watching"
+                            else:
+                                # SHORT: need BEARISH_REJECTION at resistance
+                                if rej["type"] == "BEARISH_REJECTION" and rej["strength"] >= 40:
+                                    rejection_note = f"✅ Rejection candle: {rej['detail']}"
+                                elif rej["type"] == "BULLISH_REJECTION":
+                                    rejection_ok = False
+                                    rejection_note = f"⏳ Bullish wick di zona — tunggu konfirmasi"
+                                else:
+                                    rejection_note = "  No rejection candle yet — watching"
+                    except Exception:
+                        pass  # If candle fetch fails, proceed with entry anyway
+
+                    if not rejection_ok:
+                        log.info(f"⏳ Retest zone entry but no rejection candle: {entry['symbol']} — {rejection_note}")
+                        new_queue.append(entry)
+                        continue
+
+                    # PRICE IN ZONE + REJECTION OK → send ENTRY_NOW notification
                     trade_snap = {
                         "entry_mode":        "RETEST_WAIT",
                         "entry":             entry["entry"],
@@ -6740,6 +6894,11 @@ def run_gated_scan():
                         "confirmation_zone": entry["zone"],
                         "momentum_context":  [],
                     }
+                    gate_reasons_entry = [
+                        f"Price {cur_price:.6f} masuk zona {_fmt_zone(entry['zone']['bottom'], entry['zone']['top'])}",
+                    ]
+                    if rejection_note:
+                        gate_reasons_entry.append(rejection_note)
                     msg2 = _build_gated_signal_message(
                         symbol    = entry["symbol"],
                         price     = cur_price,
@@ -6750,7 +6909,7 @@ def run_gated_scan():
                         oi_data      = {},
                         confluence   = {},
                         mf_reasons   = [],
-                        gate_reasons = [f"Price {cur_price:.6f} masuk zona {_fmt_zone(entry['zone']['bottom'], entry['zone']['top'])}"],
+                        gate_reasons = gate_reasons_entry,
                         alert_type   = "ENTRY_NOW",
                     )
                     send_telegram(msg2)
