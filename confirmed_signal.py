@@ -544,7 +544,17 @@ def generate_confirmed_signal(
 
     if not bt_result["valid"]:
         log.info(f"  {symbol}: BT validation FAILED — {bt_result['reason']}")
-        return None
+        # Cek apakah ada cached signal accuracy yang bisa jadi override
+        # (run /signalbt untuk update cache)
+        cached_acc = _load_signal_bt_cache(symbol)
+        if cached_acc and cached_acc.get("accuracy_4h", 0) >= 60 and bt_result.get("profit_factor", 0) >= 0.85:
+            log.info(f"  {symbol}: Trade BT borderline tapi signal accuracy {cached_acc['accuracy_4h']:.0f}% >= 60% — allow")
+            master["bt_validated"]     = True
+            master["bt_profit_factor"] = bt_result.get("profit_factor", 0)
+            master["bt_win_rate"]      = bt_result.get("win_rate", 0)
+            master["bt_reason"]        = bt_result.get("reason", "") + f" | Signal acc {cached_acc['accuracy_4h']:.0f}%@4H"
+        else:
+            return None
 
     # 4b. Feedback-derived rules check
     try:
@@ -610,6 +620,51 @@ def generate_confirmed_signal(
     log.info(f"🚀 CONFIRMED SIGNAL: {symbol} {direction} "
              f"score={master_score} BT-PF={bt_result.get('profit_factor', 0):.2f}")
     return signal
+
+
+SIGNAL_BT_CACHE_FILE = "signal_bt_cache.json"
+
+
+def _load_signal_bt_cache(symbol: str) -> Optional[dict]:
+    """Load cached signal backtest accuracy for a symbol (saved by /signalbt)."""
+    try:
+        if not os.path.exists(SIGNAL_BT_CACHE_FILE):
+            return None
+        with open(SIGNAL_BT_CACHE_FILE) as f:
+            cache = json.load(f)
+        entry = cache.get(symbol)
+        if not entry:
+            return None
+        # Cache expires after 48h
+        cached_at = datetime.fromisoformat(entry.get("cached_at", "2000-01-01T00:00:00+00:00"))
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
+        if age_h > 48:
+            return None
+        return entry
+    except Exception:
+        return None
+
+
+def save_signal_bt_cache(symbol: str, stats: dict):
+    """Save signal backtest result to cache (called from backtest_engine after /signalbt)."""
+    try:
+        cache = {}
+        if os.path.exists(SIGNAL_BT_CACHE_FILE):
+            with open(SIGNAL_BT_CACHE_FILE) as f:
+                cache = json.load(f)
+        cache[symbol] = {
+            "accuracy_4h":  stats.get("accuracy_4h", 0),
+            "accuracy_24h": stats.get("accuracy_24h", 0),
+            "signals_fired": stats.get("signals_fired", 0),
+            "avg_score":    stats.get("avg_score", 0),
+            "cached_at":    datetime.now(timezone.utc).isoformat(),
+        }
+        with open(SIGNAL_BT_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        log.debug(f"Signal BT cache save error: {e}")
 
 
 def _save_confirmed_signal(signal: dict):
@@ -769,6 +824,25 @@ def format_confirmed_signal_message(signal: dict) -> str:
     val = signal.get("val_result")
     if val and AUTO_VALIDATOR_ENABLED:
         lines += ["", format_validation_summary(val)]
+
+    # Signal accuracy cache (from /signalbt)
+    sym_key = signal.get("symbol", "")
+    sig_cache = _load_signal_bt_cache(sym_key)
+    if sig_cache and sig_cache.get("signals_fired", 0) >= 3:
+        acc4  = sig_cache.get("accuracy_4h",  0)
+        acc24 = sig_cache.get("accuracy_24h", 0)
+        acc_emoji = "✅" if acc4 >= 60 else "🟡"
+        lines += [
+            "",
+            "─────── SIGNAL ACCURACY ───────",
+            f"{acc_emoji} Historical accuracy: {acc4:.0f}%@4H | {acc24:.0f}%@24H",
+            f"   (dari {sig_cache['signals_fired']} sinyal serupa, avg score {sig_cache.get('avg_score', 0):.0f})",
+        ]
+    else:
+        lines += [
+            "",
+            f"💡 _Jalankan `/signalbt {sym_key.replace('USDT', '')} 30` untuk lihat historical signal accuracy_",
+        ]
 
     lines += [
         "",

@@ -786,6 +786,315 @@ def compare_strategies(symbol: str, days: int = 14) -> list:
     return results
 
 
+# ─────────────────────────────────────────────
+# SIGNAL-BASED BACKTEST
+# Freqtrade-inspired "export:signals" approach:
+# ukur akurasi SINYAL, bukan profitabilitas TRADE
+# ─────────────────────────────────────────────
+
+def _run_all_detectors_on_bar(symbol: str, h4: list, h1: list, h15: list, oi: dict) -> Optional[dict]:
+    """Jalankan semua detector pada satu bar historis. Return dict atau None."""
+    try:
+        from crypto_screening_bot_v13 import (
+            detect_prepump, detect_predump, detect_scalp_setup, detect_swing_setup,
+            calculate_confluence_v4,
+        )
+    except ImportError:
+        return None
+
+    tf4  = _build_tf_data(h4,  "4h")
+    tf1  = _build_tf_data(h1,  "1h")
+    tf15 = _build_tf_data(h15, "1h")  # 15m proxy — 1h candles (acknowledged limitation)
+
+    if tf4.get("error") or tf1.get("error"):
+        return None
+
+    try:
+        eql = tf1.get("liquidity", {})
+        return {
+            "prepump":    detect_prepump(symbol, tf1, tf4, oi),
+            "predump":    detect_predump(symbol, tf1, tf4, oi),
+            "scalp":      detect_scalp_setup(symbol, tf15, tf1, tf4, oi),
+            "swing":      detect_swing_setup(symbol, tf4, tf1, tf15, oi, eql),
+            "confluence": calculate_confluence_v4(tf4, tf1, tf15, oi),
+        }
+    except Exception as e:
+        log.debug(f"Detector bar error: {e}")
+        return None
+
+
+def run_signal_backtest(symbol: str, days: int = 30,
+                        score_threshold: int = 75) -> dict:
+    """
+    Backtest berbasis SINYAL — apakah confirmed signal score >= threshold
+    memprediksi arah price dengan benar setelah N jam?
+
+    Berbeda dari run_backtest() yang ukur TP/SL hit:
+      run_signal_backtest → ukur: "apakah ARAH sinyal benar setelah 4h/12h/24h?"
+
+    Menjawab: "dari semua confirmed signal yang dikirim, berapa % yang benar?"
+    """
+    exchange = "binance_futures"
+    resolved = symbol
+    if _EXCHANGE_RESOLVER:
+        exc_info = _exc_resolve(symbol.replace("USDT", ""))
+        if exc_info:
+            resolved = exc_info["symbol"]
+            exchange  = exc_info["exchange"]
+        else:
+            return {"error": f"Symbol {symbol} tidak ditemukan di exchange manapun"}
+
+    log.info(f"Signal BT START: {resolved} | {days}d | threshold={score_threshold}")
+    c1h = download_ohlcv(resolved, "1h", days=days, exchange=exchange)
+    if len(c1h) < 80:
+        return {"error": f"Data kurang: {len(c1h)} candles. Minimal 80."}
+
+    c4h = resample_to_tf(c1h, "4h")
+
+    try:
+        from confirmed_signal import compute_master_score
+    except ImportError:
+        return {"error": "confirmed_signal.py tidak tersedia — pastikan ada di folder yang sama"}
+
+    signal_events  = []
+    warmup         = 60
+    last_sig_bar   = -(score_threshold)   # initial cooldown sentinel
+    horizons       = [4, 12, 24]
+
+    for i in range(warmup, len(c1h)):
+        if i - last_sig_bar < 4:   # 4h cooldown antar sinyal
+            continue
+
+        cur = c1h[i]
+        h1  = c1h[max(0, i - 100):i + 1]
+        h4  = [c for c in c4h if c["time"] <= cur["time"]][-50:]
+        h15 = h1  # 15m proxy
+
+        if len(h4) < 20 or len(h1) < 20:
+            continue
+
+        oi  = _mock_oi(h1)
+        det = _run_all_detectors_on_bar(resolved, h4, h1, h15, oi)
+        if det is None:
+            continue
+
+        master = compute_master_score(
+            resolved,
+            det["confluence"], det["prepump"], det["predump"],
+            det["scalp"], det["swing"], oi,
+        )
+
+        direction = master["direction"]
+        score     = master["master_score"]
+
+        if direction == "NONE" or score < score_threshold:
+            continue
+
+        last_sig_bar = i
+        entry_price  = cur["close"]
+        bar_time     = datetime.fromtimestamp(cur["time"] / 1000, tz=timezone.utc)
+
+        event: dict = {
+            "time":      bar_time.isoformat(),
+            "direction": direction,
+            "score":     score,
+            "entry":     entry_price,
+        }
+
+        for h in horizons:
+            fut_idx   = min(i + h, len(c1h) - 1)
+            fut_price = c1h[fut_idx]["close"]
+            pct_chg   = (fut_price - entry_price) / entry_price * 100
+
+            move    = pct_chg  if direction == "LONG" else -pct_chg
+            correct = move > 0.5   # min 0.5% move in predicted direction
+
+            event[f"h{h}"] = {
+                "ok":   correct,
+                "chg":  round(pct_chg, 3),
+                "move": round(move, 3),
+            }
+
+        signal_events.append(event)
+
+    n = len(signal_events)
+    if n == 0:
+        return {
+            "symbol": resolved, "days": days, "threshold": score_threshold,
+            "signals_fired": 0,
+            "error": (
+                f"Tidak ada sinyal dengan score >= {score_threshold} dalam {days} hari. "
+                f"Coba turunkan threshold atau extend days."
+            ),
+        }
+
+    # ── Aggregate stats per horizon ──
+    h_stats: dict = {}
+    for h in horizons:
+        ok_ev    = [e for e in signal_events if e.get(f"h{h}", {}).get("ok")]
+        wrong_ev = [e for e in signal_events if not e.get(f"h{h}", {}).get("ok", True)]
+        acc      = len(ok_ev) / n * 100
+        moves_ok    = [e[f"h{h}"]["move"] for e in ok_ev    if f"h{h}" in e]
+        moves_wrong = [abs(e[f"h{h}"]["move"]) for e in wrong_ev if f"h{h}" in e]
+        h_stats[f"accuracy_{h}h"]          = round(acc, 1)
+        h_stats[f"avg_move_correct_{h}h"]  = round(float(np.mean(moves_ok)),    2) if moves_ok    else 0.0
+        h_stats[f"avg_move_wrong_{h}h"]    = round(float(np.mean(moves_wrong)), 2) if moves_wrong else 0.0
+
+    long_n  = sum(1 for e in signal_events if e["direction"] == "LONG")
+    short_n = n - long_n
+
+    return {
+        "symbol":          resolved,
+        "days":            days,
+        "threshold":       score_threshold,
+        "signals_fired":   n,
+        "long_signals":    long_n,
+        "short_signals":   short_n,
+        "avg_score":       round(float(np.mean([e["score"] for e in signal_events])), 1),
+        "signals_per_day": round(n / days, 2),
+        **h_stats,
+        "signal_events":   signal_events[-20:],
+        "run_time":        datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def format_signal_backtest_result(stats: dict) -> str:
+    """Format hasil signal backtest untuk Telegram."""
+    if "error" in stats and stats.get("signals_fired", 0) == 0:
+        return f"❌ Signal Backtest Error\n{stats['error']}"
+
+    n      = stats["signals_fired"]
+    sym    = stats["symbol"].replace("USDT", "")
+    days   = stats["days"]
+    thresh = stats["threshold"]
+    acc4   = stats.get("accuracy_4h",  0)
+    acc12  = stats.get("accuracy_12h", 0)
+    acc24  = stats.get("accuracy_24h", 0)
+    ok4    = stats.get("avg_move_correct_4h", 0)
+    bad4   = stats.get("avg_move_wrong_4h",   0)
+    ts     = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+
+    def _grade(acc: float) -> str:
+        if acc >= 70: return "🔥 Excellent"
+        if acc >= 60: return "✅ Good"
+        if acc >= 50: return "🟡 Fair"
+        return "🔴 Poor"
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📡 *SIGNAL ACCURACY BACKTEST*",
+        f"🕐 {ts}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"💎 *{sym}* | {days} hari | Threshold: *{thresh}/100*",
+        f"📊 Sinyal fired: *{n}* ({stats.get('signals_per_day', 0):.1f}/hari)",
+        f"🟢 LONG: {stats.get('long_signals', 0)} | 🔴 SHORT: {stats.get('short_signals', 0)}",
+        f"🎯 Avg master score: *{stats.get('avg_score', 0):.1f}/100*",
+        "",
+        "─────── AKURASI ARAH SINYAL ───────",
+        f"📊 @4H  : *{acc4:.1f}%*  {_grade(acc4)}",
+        f"   ↳ Avg move saat benar : +{ok4:.2f}%",
+        f"   ↳ Avg move saat salah : -{bad4:.2f}%",
+        f"📊 @12H : *{acc12:.1f}%*",
+        f"📊 @24H : *{acc24:.1f}%*",
+        "",
+        "─────── INTERPRETASI ───────",
+    ]
+
+    tips = []
+    if n < 5:
+        tips.append("⚠️ Sample kecil (<5 sinyal). Extend period ke 60+ hari untuk hasil signifikan.")
+    if acc4 >= 65:
+        tips.append(f"✅ Akurasi {acc4:.0f}% di 4H — sinyal memiliki predictive value yang solid")
+    elif acc4 >= 55:
+        tips.append(f"🟡 Akurasi {acc4:.0f}% di 4H — decent, tapi tune threshold atau detector weight")
+    else:
+        tips.append(f"⚠️ Akurasi hanya {acc4:.0f}% di 4H — perlu improvement di detector / weight")
+    if ok4 > 0 and bad4 > 0:
+        edge = ok4 / bad4
+        if edge >= 1.5:
+            tips.append(f"✅ Edge ratio {edge:.1f}x — move saat benar >> saat salah (asimetri bagus)")
+        elif edge < 0.8:
+            tips.append(f"⚠️ Edge ratio {edge:.1f}x — move saat salah > saat benar (asimetri buruk)")
+    if acc4 < acc24 - 5:
+        tips.append("💡 Akurasi naik di 24H — sinyal butuh waktu terbukti (hold lebih lama = lebih akurat)")
+    if not tips:
+        tips.append("📊 Statistik dalam range normal")
+
+    lines.extend(tips)
+    lines += ["", "─────── 5 SINYAL TERAKHIR ───────"]
+
+    for ev in reversed(stats.get("signal_events", [])[-5:]):
+        t     = ev["time"][:16].replace("T", " ")
+        d_e   = "🟢" if ev["direction"] == "LONG" else "🔴"
+        ok4e  = "✅" if ev.get("h4",  {}).get("ok") else "❌"
+        ok24e = "✅" if ev.get("h24", {}).get("ok") else "❌"
+        chg4e = ev.get("h4", {}).get("chg", 0)
+        lines.append(
+            f"  {d_e} {t} | Score {ev['score']} | "
+            f"4H {ok4e}({chg4e:+.1f}%) | 24H {ok24e}"
+        )
+
+    lines += [
+        "",
+        "💡 _Signal accuracy ≠ trade profitability. Gunakan /backtest untuk PF/WR._",
+        "⚠️ _15M data diproxy dari 1H — scalp signal accuracy mungkin lebih rendah dari live._",
+    ]
+    return "\n".join(lines)
+
+
+def handle_signal_bt_command(user_input: str, chat_id: str, send_tg):
+    """
+    /signalbt <COIN> [DAYS] [THRESHOLD]
+    Ukur akurasi SINYAL confirmed (bukan profitabilitas trade).
+    Contoh: /signalbt BTC 30
+            /signalbt ETH 14 70
+    """
+    parts = user_input.strip().split()
+    if not parts:
+        send_tg(
+            "❓ *Format:* `/signalbt <COIN> [DAYS] [THRESHOLD]`\n\n"
+            "Contoh:\n"
+            "• `/signalbt BTC 30` — backtest sinyal BTC 30 hari, score >= 75\n"
+            "• `/signalbt ETH 14 70` — threshold 70\n\n"
+            "📡 *Berbeda dari /backtest:*\n"
+            "  /backtest  → ukur profit factor TP/SL trade\n"
+            "  /signalbt  → ukur akurasi ARAH sinyal (benar ke mana?)\n\n"
+            "_Ini menjawab: 'sinyal confirmed yang dikirim bot, berapa % arahnya benar?'_",
+            chat_id,
+        )
+        return
+
+    coin_raw = parts[0].upper().replace("USDT", "").replace("/", "")
+    try:   days   = max(7,  min(int(parts[1]), 90)) if len(parts) > 1 else 30
+    except ValueError: days = 30
+    try:   thresh = max(50, min(int(parts[2]), 95)) if len(parts) > 2 else 75
+    except ValueError: thresh = 75
+
+    symbol = coin_raw + "USDT"
+    send_tg(
+        f"📡 *Signal Accuracy Backtest*\n"
+        f"💎 Coin    : *{coin_raw}*\n"
+        f"📅 Period  : *{days} hari*\n"
+        f"🎯 Threshold: *{thresh}/100* (master score min)\n\n"
+        f"⏳ _Replay semua confirmed signal historis... harap tunggu_",
+        chat_id,
+    )
+    try:
+        stats = run_signal_backtest(symbol, days=days, score_threshold=thresh)
+        # Cache result untuk confirmed_signal.py (dipakai saat validasi live)
+        if "error" not in stats or stats.get("signals_fired", 0) > 0:
+            try:
+                from confirmed_signal import save_signal_bt_cache
+                save_signal_bt_cache(symbol, stats)
+            except Exception:
+                pass
+        send_tg(format_signal_backtest_result(stats), chat_id)
+    except Exception as e:
+        log.error(f"Signal BT command error: {e}", exc_info=True)
+        send_tg(f"❌ Error saat signal backtest: `{str(e)[:300]}`", chat_id)
+
+
 # ─── Formatters ──────────────────────────────
 
 def _fp(v: float) -> str:
