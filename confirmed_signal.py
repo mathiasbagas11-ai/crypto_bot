@@ -511,18 +511,6 @@ def generate_confirmed_signal(
         log.info(f"  {symbol}: in cooldown, skip")
         return None
 
-    # 3c. Time-of-day filter — hindari jam low-liquidity (Asia dead zone)
-    # Best hours: London 08-12 UTC, NY 13-17 UTC, overlap 13-16 UTC
-    _hour = datetime.now(timezone.utc).hour
-    _dead_zone = _hour >= 22 or _hour < 6   # 22:00-06:00 UTC
-    if _dead_zone:
-        _tz_penalty = 12
-        master["master_score"] = max(0, master["master_score"] - _tz_penalty)
-        if master["master_score"] < MASTER_SCORE_CONFIRMED:
-            log.info(f"  {symbol}: dead-zone {_hour}:xx UTC — score -{_tz_penalty} → below threshold, skip")
-            return None
-        log.info(f"  {symbol}: dead-zone -{_tz_penalty}pt → score={master['master_score']}")
-
     # 3d. Macro trend filter — EMA9 vs EMA21 pada 4H candles
     # Sinyal yang berlawanan dengan macro trend kena penalty besar
     try:
