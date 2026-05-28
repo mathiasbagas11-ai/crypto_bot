@@ -2461,6 +2461,115 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
     }
 
 # ─────────────────────────────────────────────
+# RSI DIVERGENCE DETECTOR
+# ─────────────────────────────────────────────
+
+def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -> dict:
+    """
+    Deteksi RSI divergence — salah satu sinyal reversal momentum paling reliable.
+
+    Regular Bullish : price LL + RSI HL → akumulasi tersembunyi, pump likely
+    Regular Bearish : price HH + RSI LH → distribusi tersembunyi, dump likely
+
+    Digunakan sebagai bonus score di prepump/predump detector untuk sinyal
+    yang muncul SEBELUM price action terlihat jelas.
+
+    Return:
+      type: REGULAR_BULLISH | REGULAR_BEARISH | NONE
+      bull_score: 0-15  (boost ke prepump momentum)
+      bear_score: 0-15  (boost ke predump momentum)
+      details: list reason strings
+    """
+    empty = {"type": "NONE", "strength": "NONE", "bull_score": 0, "bear_score": 0, "details": []}
+
+    if not candles or len(candles) < period + lookback + 5:
+        return empty
+
+    work   = candles[-(period + lookback + 5):]
+    cls    = [c["close"] for c in work]
+    h_arr  = [c["high"]  for c in work]
+    l_arr  = [c["low"]   for c in work]
+
+    # RSI series (Wilder smoothing)
+    gains  = [max(cls[i] - cls[i-1], 0) for i in range(1, len(cls))]
+    losses = [max(cls[i-1] - cls[i], 0) for i in range(1, len(cls))]
+    if len(gains) < period:
+        return empty
+
+    avg_g = float(np.mean(gains[:period]))
+    avg_l = float(np.mean(losses[:period]))
+    rsi_s = []
+    for i in range(period, len(gains)):
+        avg_g = (avg_g * (period - 1) + gains[i]) / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+        rs    = avg_g / avg_l if avg_l > 0 else 100
+        rsi_s.append(100 - 100 / (1 + rs))
+
+    if len(rsi_s) < lookback:
+        return empty
+
+    rsi_w = rsi_s[-lookback:]
+    h_w   = h_arr[-lookback:]
+    l_w   = l_arr[-lookback:]
+    n     = lookback
+
+    # Find 2-bar confirmed swing pivots
+    swing_highs: list = []
+    swing_lows:  list = []
+
+    for i in range(2, n - 2):
+        if (h_w[i] >= h_w[i-1] and h_w[i] >= h_w[i-2] and
+                h_w[i] >= h_w[i+1] and h_w[i] >= h_w[i+2]):
+            swing_highs.append((i, h_w[i], rsi_w[i]))
+        if (l_w[i] <= l_w[i-1] and l_w[i] <= l_w[i-2] and
+                l_w[i] <= l_w[i+1] and l_w[i] <= l_w[i+2]):
+            swing_lows.append((i, l_w[i], rsi_w[i]))
+
+    bull_score = 0
+    bear_score = 0
+    details: list = []
+    div_type   = "NONE"
+
+    # Regular Bearish: price HH + RSI LH (momentum melemah di puncak)
+    if len(swing_highs) >= 2:
+        ph, lh = swing_highs[-2], swing_highs[-1]
+        p_diff = (lh[1] - ph[1]) / ph[1] * 100  if ph[1] > 0 else 0
+        r_diff = lh[2] - ph[2]
+        if p_diff > 0.5 and r_diff < -3:
+            bear_score = min(15, int(abs(r_diff) * 1.1))
+            strength   = "HIGH" if abs(r_diff) >= 8 else "MEDIUM"
+            details.append(
+                f"⚡ RSI Bearish Div ({strength}): price +{p_diff:.1f}% HH "
+                f"tapi RSI {r_diff:.0f}pt LH — distribusi tersembunyi, dump imminent"
+            )
+            div_type = "REGULAR_BEARISH"
+
+    # Regular Bullish: price LL + RSI HL (momentum membangun di bawah)
+    if len(swing_lows) >= 2:
+        pl, ll_p = swing_lows[-2], swing_lows[-1]
+        p_diff = (ll_p[1] - pl[1]) / pl[1] * 100  if pl[1] > 0 else 0  # negative = LL
+        r_diff = ll_p[2] - pl[2]                                          # positive = HL
+        if p_diff < -0.5 and r_diff > 3:
+            bull_score = min(15, int(r_diff * 1.1))
+            strength   = "HIGH" if r_diff >= 8 else "MEDIUM"
+            details.append(
+                f"⚡ RSI Bullish Div ({strength}): price {p_diff:.1f}% LL "
+                f"tapi RSI +{r_diff:.0f}pt HL — akumulasi tersembunyi, pump imminent"
+            )
+            if div_type == "NONE":
+                div_type = "REGULAR_BULLISH"
+
+    max_s = max(bull_score, bear_score)
+    return {
+        "type":       div_type,
+        "strength":   "HIGH" if max_s >= 12 else ("MEDIUM" if max_s >= 7 else "LOW"),
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "details":    details,
+    }
+
+
+# ─────────────────────────────────────────────
 # PRE-PUMP DETECTOR
 # ─────────────────────────────────────────────
 
@@ -2554,6 +2663,16 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mom_score += 5
         mult = vol_4h.get("multiplier", 1)
         result["reasons"].append(f"  Volume spike 4H: {mult:.1f}x normal")
+
+    # RSI Divergence — akumulasi tersembunyi yang muncul SEBELUM pump terlihat
+    _div_pp = detect_rsi_divergence(tf_1h.get("candles", []), lookback=25)
+    if _div_pp["bull_score"] >= 7:
+        _pp_bonus = min(_div_pp["bull_score"], 12)
+        mom_score += _pp_bonus
+        result["reasons"].extend(_div_pp["details"])
+    elif _div_pp["bear_score"] >= 7:
+        mom_score = max(0, mom_score - 5)
+        result["reasons"].append("⚠️ RSI Bearish Div — momentum downside lebih kuat dari upside")
 
     result["momentum_score"] = min(mom_score, 35)
 
@@ -2858,6 +2977,16 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
     elif vol_4h.get("is_anomaly"):
         mult = vol_4h.get("multiplier", 1)
         result["reasons"].append(f"  Volume spike 4H: {mult:.1f}x — perlu konfirmasi arah")
+
+    # RSI Divergence — distribusi tersembunyi yang muncul SEBELUM dump terlihat
+    _div_pd = detect_rsi_divergence(tf_1h.get("candles", []), lookback=25)
+    if _div_pd["bear_score"] >= 7:
+        _pd_bonus = min(_div_pd["bear_score"], 12)
+        mom_score += _pd_bonus
+        result["reasons"].extend(_div_pd["details"])
+    elif _div_pd["bull_score"] >= 7:
+        mom_score = max(0, mom_score - 5)
+        result["reasons"].append("⚠️ RSI Bullish Div — potensi bounce lebih besar dari dump")
 
     result["momentum_score"] = min(mom_score, 35)
 

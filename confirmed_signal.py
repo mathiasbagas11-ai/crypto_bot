@@ -345,6 +345,24 @@ def compute_master_score(
     if conflict_r:
         master_score = int(master_score * 0.75)
 
+    # Minimum strong component requirement
+    # Mencegah 1 sinyal lemah yang sendirian trigger confirmed signal via ratio dominance
+    if direction in ("LONG", "SHORT"):
+        strong_comps = sum(
+            1 for c in components.values()
+            if c.get("score", 0) >= 50
+            and (
+                (direction == "LONG"  and "LONG"  in c.get("direction", ""))
+             or (direction == "SHORT" and "SHORT" in c.get("direction", ""))
+            )
+        )
+        if strong_comps < 2:
+            master_score = int(master_score * 0.65)
+            conflict_r.append(
+                f"⚠️ Hanya {strong_comps}/5 komponen score ≥50 — "
+                f"sinyal kurang solid, score dikurangi 35%"
+            )
+
     # Agreement bonus: semua detector agree → bonus
     total_votes = long_votes + short_votes
     if direction == "LONG":
@@ -492,6 +510,49 @@ def generate_confirmed_signal(
     if _is_in_cooldown(symbol):
         log.info(f"  {symbol}: in cooldown, skip")
         return None
+
+    # 3c. Time-of-day filter — hindari jam low-liquidity (Asia dead zone)
+    # Best hours: London 08-12 UTC, NY 13-17 UTC, overlap 13-16 UTC
+    _hour = datetime.now(timezone.utc).hour
+    _dead_zone = _hour >= 22 or _hour < 6   # 22:00-06:00 UTC
+    if _dead_zone:
+        _tz_penalty = 12
+        master["master_score"] = max(0, master["master_score"] - _tz_penalty)
+        if master["master_score"] < MASTER_SCORE_CONFIRMED:
+            log.info(f"  {symbol}: dead-zone {_hour}:xx UTC — score -{_tz_penalty} → below threshold, skip")
+            return None
+        log.info(f"  {symbol}: dead-zone -{_tz_penalty}pt → score={master['master_score']}")
+
+    # 3d. Macro trend filter — EMA9 vs EMA21 pada 4H candles
+    # Sinyal yang berlawanan dengan macro trend kena penalty besar
+    try:
+        _c4h = tf_4h.get("candles", [])
+        if _c4h and len(_c4h) >= 22:
+            _cls = [c["close"] for c in _c4h]
+            # EMA9
+            _k9 = 2 / 10; _e9 = sum(_cls[:9]) / 9
+            for _v in _cls[9:]:
+                _e9 = _v * _k9 + _e9 * (1 - _k9)
+            # EMA21
+            _k21 = 2 / 22; _e21 = sum(_cls[:21]) / 21
+            for _v in _cls[21:]:
+                _e21 = _v * _k21 + _e21 * (1 - _k21)
+            _macro_bull  = _e9 > _e21
+            _macro_label = "BULLISH" if _macro_bull else "BEARISH"
+            _contra = (direction == "LONG" and not _macro_bull) or \
+                      (direction == "SHORT" and _macro_bull)
+            if _contra:
+                _m_penalty = 15
+                master["master_score"] = max(0, master["master_score"] - _m_penalty)
+                master["conflict_reasons"].append(
+                    f"📉 Macro 4H EMA: {_macro_label} — sinyal {direction} melawan macro trend (-{_m_penalty}pt)"
+                )
+                log.info(f"  {symbol}: macro contra {_macro_label} -{_m_penalty}pt → score={master['master_score']}")
+                if master["master_score"] < MASTER_SCORE_CONFIRMED:
+                    log.info(f"  {symbol}: dropped below threshold after macro filter, skip")
+                    return None
+    except Exception as _me:
+        log.debug(f"Macro filter error {symbol}: {_me}")
 
     # 3b. AUTO MARKET CONTEXT VALIDATION (7-layer check)
     val_result = None
@@ -934,8 +995,8 @@ def run_confirmed_signal_scan(
                 except Exception as e:
                     log.debug(f"Tracker record error: {e}")
 
-            # Jangan spam — max 2 confirmed signals per scan
-            if confirmed_count >= 2:
+            # Max 1 confirmed signal per scan — quality over quantity
+            if confirmed_count >= 1:
                 break
 
         except Exception as e:
