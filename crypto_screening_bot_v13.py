@@ -1013,13 +1013,25 @@ def get_binance_klines(symbol: str, interval: str, limit: int = 100) -> list | N
     """
     Fetch klines — priority: Futures (fapi) → Spot (api) fallback.
     fapi lebih reliable dari server luar (Railway/VPS).
+    Captures taker_buy_vol (kolom [9]) untuk real CVD.
     """
     def _parse(raw):
-        return [{
-            "open": float(c[1]), "high": float(c[2]),
-            "low": float(c[3]),  "close": float(c[4]),
-            "volume": float(c[5]), "time": c[0]
-        } for c in raw]
+        result = []
+        for c in raw:
+            candle = {
+                "open":   float(c[1]), "high": float(c[2]),
+                "low":    float(c[3]), "close": float(c[4]),
+                "volume": float(c[5]), "time":  c[0],
+            }
+            # Real taker buy volume — Binance futures klines kolom [9]
+            # Jauh lebih akurat dari OHLC approximation untuk CVD
+            if len(c) > 9 and c[9] not in (None, ""):
+                try:
+                    candle["taker_buy_vol"] = float(c[9])
+                except (ValueError, TypeError):
+                    pass
+            result.append(candle)
+        return result
 
     # 1. Coba Futures endpoint dulu
     try:
@@ -1114,13 +1126,44 @@ def get_open_interest(symbol: str) -> dict:
     except Exception:
         pass
 
+    # Funding Rate + Trend (3 periode terakhir)
     try:
         r = requests.get(f"{BINANCE_FUTURES}/fapi/v1/fundingRate",
-                         params={"symbol": symbol, "limit": 1}, timeout=8)
+                         params={"symbol": symbol, "limit": 3}, timeout=8)
         if r.status_code == 200:
             data = r.json()
             if data:
-                result["funding_rate"] = float(data[0].get("fundingRate", 0)) * 100  # konversi ke %
+                rates = [float(d.get("fundingRate", 0)) * 100 for d in data]
+                result["funding_rate"] = rates[-1]
+                if len(rates) >= 3:
+                    # Funding trend: apakah makin ekstrem ke satu arah?
+                    if rates[-1] < rates[-2] <= rates[0]:
+                        result["funding_trend"] = "MORE_NEGATIVE"   # menuju short squeeze
+                    elif rates[-1] > rates[-2] >= rates[0]:
+                        result["funding_trend"] = "MORE_POSITIVE"   # menuju long squeeze
+                    else:
+                        result["funding_trend"] = "STABLE"
+                else:
+                    result["funding_trend"] = "STABLE"
+    except Exception:
+        pass
+
+    # Taker Buy/Sell Ratio — actual aggressive order flow (bukan account ratio)
+    # Endpoint: /futures/data/takerlongshortRatio
+    # buySellRatio > 1.1 = buyer agresif | < 0.9 = seller agresif
+    try:
+        r = requests.get(f"{BINANCE_FUTURES}/futures/data/takerlongshortRatio",
+                         params={"symbol": symbol, "period": "5m", "limit": 3}, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if data:
+                bsr = float(data[-1].get("buySellRatio", 1.0))
+                result["taker_buy_sell_ratio"] = round(bsr, 3)
+                result["taker_bias"] = (
+                    "BUY_DOMINANT"  if bsr > 1.1 else
+                    "SELL_DOMINANT" if bsr < 0.9 else
+                    "BALANCED"
+                )
     except Exception:
         pass
 
@@ -1417,18 +1460,27 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     score_pts = 0   # >0 → inflow, <0 → outflow
 
     # ── 1. CVD (Cumulative Volume Delta) ──────────
+    # Prioritas: real taker_buy_vol dari Binance klines [9]
+    # Fallback:  OHLC approximation (kurang akurat, tapi tetap useful)
     buy_vols  = []
     sell_vols = []
+    using_real_taker = any("taker_buy_vol" in c for c in window)
+
     for c in window:
-        hl = c["high"] - c["low"]
-        if hl == 0:
-            buy_vols.append(c["volume"] * 0.5)
-            sell_vols.append(c["volume"] * 0.5)
+        if "taker_buy_vol" in c:
+            bv = min(float(c["taker_buy_vol"]), c["volume"])
+            buy_vols.append(bv)
+            sell_vols.append(c["volume"] - bv)
         else:
-            buy_ratio  = (c["close"] - c["low"]) / hl
-            sell_ratio = (c["high"] - c["close"]) / hl
-            buy_vols.append(c["volume"] * buy_ratio)
-            sell_vols.append(c["volume"] * sell_ratio)
+            hl = c["high"] - c["low"]
+            if hl == 0:
+                buy_vols.append(c["volume"] * 0.5)
+                sell_vols.append(c["volume"] * 0.5)
+            else:
+                buy_ratio  = (c["close"] - c["low"]) / hl
+                sell_ratio = (c["high"] - c["close"]) / hl
+                buy_vols.append(c["volume"] * buy_ratio)
+                sell_vols.append(c["volume"] * sell_ratio)
 
     total_vol  = sum(c["volume"] for c in window)
     net_buy    = sum(buy_vols)
@@ -2619,6 +2671,23 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             result["funding_score"] = 5
             result["reasons"].append(f"  Funding netral: {funding_rate:.3f}%")
 
+    # Taker flow + Funding Trend (dari get_open_interest)
+    _taker_bias     = oi_data.get("taker_bias", "BALANCED")
+    _funding_trend  = oi_data.get("funding_trend", "STABLE")
+    _fs_curr        = result["funding_score"]
+
+    if _taker_bias == "BUY_DOMINANT":
+        result["funding_score"] = min(_fs_curr + 5, 30)
+        result["reasons"].append(
+            f"📈 Taker flow: BUY dominant (ratio {oi_data.get('taker_buy_sell_ratio', 0):.2f}) "
+            f"— buyer agresif market-order masuk"
+        )
+    if _funding_trend == "MORE_NEGATIVE":
+        result["funding_score"] = min(result["funding_score"] + 5, 30)
+        result["reasons"].append(
+            "🔄 Funding trend makin negatif — short squeeze tekanan terus membangun"
+        )
+
     # ── 2. MOMENTUM RUNNER ──────────────────────
     rsi_1h = tf_1h.get("rsi", 50)
     rsi_4h = tf_4h.get("rsi", 50)
@@ -2912,6 +2981,23 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         else:
             result["funding_score"] = 5
             result["reasons"].append(f"  Funding netral: {funding_rate:.3f}%")
+
+    # Taker flow + Funding Trend (dari get_open_interest)
+    _taker_bias_pd    = oi_data.get("taker_bias", "BALANCED")
+    _funding_trend_pd = oi_data.get("funding_trend", "STABLE")
+    _fs_curr_pd       = result["funding_score"]
+
+    if _taker_bias_pd == "SELL_DOMINANT":
+        result["funding_score"] = min(_fs_curr_pd + 5, 30)
+        result["reasons"].append(
+            f"📉 Taker flow: SELL dominant (ratio {oi_data.get('taker_buy_sell_ratio', 0):.2f}) "
+            f"— seller agresif market-order masuk"
+        )
+    if _funding_trend_pd == "MORE_POSITIVE":
+        result["funding_score"] = min(result["funding_score"] + 5, 30)
+        result["reasons"].append(
+            "🔄 Funding trend makin positif — long squeeze tekanan terus membangun"
+        )
 
     # ── 2. BEARISH MOMENTUM RUNNER ──────────────
     rsi_1h = tf_1h.get("rsi", 50)
