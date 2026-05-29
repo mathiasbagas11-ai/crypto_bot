@@ -2345,6 +2345,63 @@ def detect_scalp_setup(symbol: str, tf_15m: dict, tf_1h: dict, tf_4h: dict, oi_d
         score += 5
         result["reasons"].append(f"📊 RSI 15M: {rsi_15m:.0f} — overbought (extreme)")
 
+    # ── 7. v14: MARKET REGIME GATE ───────────────
+    if MARKET_REGIME_MODULE:
+        regime_4h = tf_4h.get("market_regime", {})
+        regime_15m = tf_15m.get("market_regime", {})
+        regime_str = regime_4h.get("regime", "UNKNOWN")
+        if regime_str == "RANGING":
+            score = int(score * 0.75)
+            result["reasons"].append("⚠️ 4H RANGING — score dipotong 25%")
+        elif regime_str in ("BREAKOUT_UP",) and direction == "LONG":
+            score += 10
+            result["reasons"].append(f"🟢 4H BREAKOUT_UP — long confluence")
+        elif regime_str in ("BREAKOUT_DOWN",) and direction == "SHORT":
+            score += 10
+            result["reasons"].append(f"🔴 4H BREAKOUT_DOWN — short confluence")
+        elif regime_str == "BB_SQUEEZE":
+            score += 5
+            result["reasons"].append(f"🔵 4H BB_SQUEEZE — setup potential")
+
+        # v14: Candle pattern boost
+        cp15 = tf_15m.get("candle_patterns", {})
+        cp1h = tf_1h.get("candle_patterns", {})
+        _cp_pts = {
+            "BULLISH_ENGULFING": (12, 0), "BEARISH_ENGULFING": (0, 12),
+            "MORNING_STAR": (10, 0), "EVENING_STAR": (0, 10),
+            "THREE_WHITE_SOLDIERS": (8, 0), "THREE_BLACK_CROWS": (0, 8),
+            "BULLISH_MARUBOZU": (7, 0), "BEARISH_MARUBOZU": (0, 7),
+        }
+        best_pattern = None
+        for _cp, _src in [(cp15, "15M"), (cp1h, "1H")]:
+            _pat = _cp.get("pattern", "NONE")
+            if _pat in _cp_pts:
+                _lpts, _spts = _cp_pts[_pat]
+                if direction == "LONG" and _lpts > 0:
+                    score += _lpts
+                    result["reasons"].append(f"🕯️ {_src} {_pat} (+{_lpts})")
+                    if best_pattern is None:
+                        best_pattern = f"{_pat} {_src}"
+                elif direction == "SHORT" and _spts > 0:
+                    score += _spts
+                    result["reasons"].append(f"🕯️ {_src} {_pat} (+{_spts})")
+                    if best_pattern is None:
+                        best_pattern = f"{_pat} {_src}"
+        if best_pattern:
+            result["candle_pattern"] = best_pattern.replace("_", " ").title()
+
+        # v14: Volume coil / sudden breakout
+        vc15 = tf_15m.get("volume_coil", {})
+        sb15 = tf_15m.get("sudden_breakout", {})
+        if vc15.get("spike_detected") and vc15.get("vol_ratio", 0) >= 2.5:
+            score += 8
+            result["reasons"].append(f"🌊 Volume spike release 15M ({vc15['vol_ratio']:.1f}x)")
+        if sb15.get("sudden_breakout"):
+            sb_dir = sb15.get("direction", "")
+            if (sb_dir == "UP" and direction == "LONG") or (sb_dir == "DOWN" and direction == "SHORT"):
+                score += 12
+                result["reasons"].append(f"💥 Sudden breakout {sb_dir} 15M — momentum explosive")
+
     # ── ENTRY ZONE & TRADE PLAN ───────────────────
     ob_for_zone = ob_15m if direction == "LONG" else ob_15m
     entry_zone  = calculate_entry_zone(ob_for_zone, fvg_15m, result["sweep"], price, direction)
@@ -2660,11 +2717,14 @@ def scan_scalp_candidates(symbols: list = None) -> list:
                 atr_1h  = tf_1h.get("atr", 0)
                 direc_s = scalp.get("direction", "NONE")
                 if direc_s in ("LONG", "SHORT"):
-                    scalp["trade"] = calculate_trade_plan(
+                    trade_plan = calculate_trade_plan(
                         price_s,
                         "PUMP" if direc_s == "LONG" else "DUMP",
                         atr_1h, tf_4h, tf_1h, tf_15m, oi
                     )
+                    if scalp.get("candle_pattern"):
+                        trade_plan["candle_pattern"] = scalp["candle_pattern"]
+                    scalp["trade"] = trade_plan
                 candidates.append(scalp)
 
             time.sleep(0.3)
@@ -4916,6 +4976,63 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
         lines.append("🧱 <b>Order Blocks:</b>")
         lines.extend(ob_lines)
 
+    # ── v14: Market Structure (Regime + Candle Pattern + BB Squeeze) ──
+    regime_4h  = tf_4h.get("market_regime", {})
+    regime_1h  = tf_1h.get("market_regime", {})
+    cp15       = tf_15m.get("candle_patterns", {})
+    cp1h       = tf_1h.get("candle_patterns", {})
+    bb_4h      = tf_4h.get("bb_squeeze", {})
+    vc_1h      = tf_1h.get("volume_coil", {})
+    sb_4h      = tf_4h.get("sudden_breakout", {})
+    sb_1h      = tf_1h.get("sudden_breakout", {})
+    _ext       = confluence.get("entry_extended", False)
+    _near_zone = confluence.get("nearest_zone_pct")
+
+    _regime_str = regime_4h.get("regime", "UNKNOWN")
+    _regime_emoji_map = {
+        "BULLISH_TREND": "📈", "BEARISH_TREND": "📉", "BB_SQUEEZE": "🔵",
+        "RANGING": "↔️", "BREAKOUT_UP": "🚀", "BREAKOUT_DOWN": "🔻",
+        "VOLATILE": "⚡", "WEAK_TREND": "〰️",
+    }
+    _re = _regime_emoji_map.get(_regime_str, "❓")
+    _adx_4h = regime_4h.get("adx", 0)
+    _re_1h  = regime_1h.get("regime", "?")
+
+    struct_block = []
+    if _regime_str and _regime_str != "UNKNOWN":
+        struct_block.append(
+            f"  {_re} 4H Regime: <b>{_regime_str}</b>"
+            + (f"  (ADX {_adx_4h:.0f})" if _adx_4h else "")
+            + (f"  | 1H: {_re_1h}" if _re_1h and _re_1h != "UNKNOWN" else "")
+        )
+    if cp15.get("pattern") not in (None, "NONE"):
+        p_emoji = "🟢" if cp15.get("direction") == "BULLISH" else "🔴" if cp15.get("direction") == "BEARISH" else "⚪"
+        struct_block.append(f"  {p_emoji} 15M Candle: <b>{cp15['pattern']}</b> — {cp15['detail']}")
+    if cp1h.get("pattern") not in (None, "NONE"):
+        p1_emoji = "🟢" if cp1h.get("direction") == "BULLISH" else "🔴" if cp1h.get("direction") == "BEARISH" else "⚪"
+        struct_block.append(f"  {p1_emoji} 1H Candle : {cp1h['pattern']}")
+    if bb_4h.get("squeeze"):
+        struct_block.append(f"  🔵 BB Squeeze 4H: {bb_4h.get('squeeze_bars',0)} bar — coiling, breakout imminent")
+    if vc_1h.get("coiling") and vc_1h.get("spike_detected"):
+        struct_block.append(f"  🌊 Vol Coil Release 1H: {vc_1h.get('vol_ratio',1):.1f}x spike")
+    elif vc_1h.get("coiling"):
+        struct_block.append(f"  🔍 Vol Coil 1H: {vc_1h.get('compression_bars',0)} bar declining — akumulasi silent")
+    if sb_4h.get("sudden_breakout"):
+        sb_d = "🚀" if sb_4h.get("direction") == "UP" else "🔻"
+        struct_block.append(f"  {sb_d} Sudden Breakout 4H: vol {sb_4h.get('vol_spike',1):.1f}x")
+    elif sb_1h.get("sudden_breakout"):
+        sb_d = "🚀" if sb_1h.get("direction") == "UP" else "🔻"
+        struct_block.append(f"  {sb_d} Sudden Breakout 1H: vol {sb_1h.get('vol_spike',1):.1f}x")
+    if _ext:
+        struct_block.append(f"  ⚠️ Entry Extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
+    elif _near_zone is not None and _near_zone <= 1.0:
+        struct_block.append(f"  🎯 Sniper Zone: {_near_zone:.1f}% dari key level")
+
+    if struct_block:
+        lines.append("")
+        lines.append("🔬 <b>MARKET STRUCTURE (v14):</b>")
+        lines.extend(struct_block)
+
     # ── Volume Anomaly ──
     va4 = tf_4h.get("volume_anomaly", {})
     va1 = tf_1h.get("volume_anomaly", {})
@@ -5314,8 +5431,8 @@ def build_prepump_message(candidates: list) -> str:
         trade = pp.get("trade", {})
         lines.append(f"{'🔥' if i==1 else f'#{i}'} <b>{sym}</b> — {pp['label']}")
         lines.append(f"  Score: <b>{pp['total_score']}/100</b> | Price: {fmt_num(pp.get('price',0))}")
-        lines.append(f"  💰 F:{pp['funding_score']}/30  ⚡ M:{pp['momentum_score']}/35  📊 OI:{pp['oi_pa_score']}/35")
-        for r in [r for r in pp.get("reasons",[]) if not r.startswith("  ")][:2]:
+        lines.append(f"  💰 F:{pp['funding_score']}/30  ⚡ M:{pp['momentum_score']}/35  📊 OI:{pp['oi_pa_score']}/35  🔔 EW:{pp.get('early_warning_score',0)}/30")
+        for r in [r for r in pp.get("reasons",[]) if not r.startswith("  ")][:4]:
             lines.append(f"  {r}")
         if pp.get("funding_rate") is not None:
             lines.append(f"  Funding: {pp['funding_rate']:+.3f}% | RSI 1H: {pp.get('rsi',0):.0f}")
@@ -5325,7 +5442,12 @@ def build_prepump_message(candidates: list) -> str:
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
             lines.append(f"\n  📍 <b>Trade Plan LONG:</b>")
-            if entry_mode == "MOMENTUM_NOW":
+            if entry_mode == "SNIPER_ENTRY":
+                lines.append(f"  🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
+                for ctx in trade.get("momentum_context", [])[:2]:
+                    lines.append(f"  ↳ {ctx}")
+                lines.append(f"  ⚡ Entry : <b>{fmt_num(trade['entry'])}</b>  ← SEKARANG")
+            elif entry_mode == "MOMENTUM_NOW":
                 lines.append(f"  🚀 <b>ENTRY NOW</b> — Breakout confirmed, trend bullish aktif")
                 for ctx in trade.get("momentum_context", [])[:2]:
                     lines.append(f"  ↳ {ctx}")
@@ -5335,7 +5457,7 @@ def build_prepump_message(candidates: list) -> str:
                 if cz:
                     lines.append(f"  ⏳ <b>TUNGGU RETEST</b> → zona: <b>{_fmt_zone(cz['bottom'], cz['top'])}</b>  [{cz.get('source','?')}]")
                 lines.append(f"  🎯 Entry : <b>{fmt_num(trade['entry'])}</b>  ← LIMIT order")
-                lines.append(f"  ✅ Konfirmasi: candle 15M close di atas zona + volume spike")
+                lines.append(f"  ✅ Konfirmasi: bullish engulfing/pin bar 15M + volume spike")
             lines.append(f"  🔴 SL    : {fmt_num(trade['sl'])}")
             if trade.get("tp1"):
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
@@ -5366,8 +5488,8 @@ def build_predump_message(candidates: list) -> str:
         trade = pd_c.get("trade", {})
         lines.append(f"{'💀' if i==1 else f'#{i}'} <b>{sym}</b> — {pd_c['label']}")
         lines.append(f"  Score: <b>{pd_c['total_score']}/100</b> | Price: {fmt_num(pd_c.get('price',0))}")
-        lines.append(f"  💸 F:{pd_c['funding_score']}/30  🔴 M:{pd_c['momentum_score']}/35  📉 OI:{pd_c['oi_pa_score']}/35")
-        for r in [r for r in pd_c.get("reasons",[]) if not r.startswith("  ")][:2]:
+        lines.append(f"  💸 F:{pd_c['funding_score']}/30  🔴 M:{pd_c['momentum_score']}/35  📉 OI:{pd_c['oi_pa_score']}/35  🔔 EW:{pd_c.get('early_warning_score',0)}/30")
+        for r in [r for r in pd_c.get("reasons",[]) if not r.startswith("  ")][:4]:
             lines.append(f"  {r}")
         if pd_c.get("funding_rate") is not None:
             lines.append(f"  Funding: {pd_c['funding_rate']:+.3f}% | RSI 1H: {pd_c.get('rsi',0):.0f}")
@@ -5377,7 +5499,12 @@ def build_predump_message(candidates: list) -> str:
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
             lines.append(f"\n  📍 <b>Trade Plan SHORT:</b>")
-            if entry_mode == "MOMENTUM_NOW":
+            if entry_mode == "SNIPER_ENTRY":
+                lines.append(f"  🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
+                for ctx in trade.get("momentum_context", [])[:2]:
+                    lines.append(f"  ↳ {ctx}")
+                lines.append(f"  ⚡ Entry : <b>{fmt_num(trade['entry'])}</b>  ← SEKARANG")
+            elif entry_mode == "MOMENTUM_NOW":
                 lines.append(f"  🔻 <b>ENTRY NOW</b> — Breakdown confirmed, trend bearish aktif")
                 for ctx in trade.get("momentum_context", [])[:2]:
                     lines.append(f"  ↳ {ctx}")
@@ -5387,7 +5514,8 @@ def build_predump_message(candidates: list) -> str:
                 if cz:
                     lines.append(f"  ⏳ <b>TUNGGU RETEST</b> → zona: <b>{_fmt_zone(cz['bottom'], cz['top'])}</b>  [{cz.get('source','?')}]")
                 lines.append(f"  🎯 Entry : <b>{fmt_num(trade['entry'])}</b>  ← LIMIT order")
-                lines.append(f"  ✅ Konfirmasi: candle 15M close di bawah zona + volume spike")
+                cp = trade.get("candle_pattern", "bearish engulfing/pin bar 15M")
+                lines.append(f"  ✅ Konfirmasi: {cp} + candle 15M close di bawah zona + volume spike")
             lines.append(f"  🔴 SL    : {fmt_num(trade['sl'])}")
             if trade.get("tp1"):
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
@@ -5691,7 +5819,13 @@ def build_scalp_message(candidates: list) -> str:
 
         entry_mode = trade.get("entry_mode", "RETEST_WAIT") if trade else "RETEST_WAIT"
 
-        if entry_mode == "MOMENTUM_NOW":
+        if entry_mode == "SNIPER_ENTRY":
+            lines.append(f"  🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
+            for ctx in (trade.get("momentum_context",[]) if trade else [])[:2]:
+                lines.append(f"  ↳ {ctx}")
+            if trade and trade.get("entry"):
+                lines.append(f"  ⚡ Entry : <b>{fmt_num(trade['entry'])}</b> ← SEKARANG")
+        elif entry_mode == "MOMENTUM_NOW":
             lines.append(f"  🚀 <b>ENTRY NOW</b> — Trend {'bullish' if direc=='LONG' else 'bearish'} aktif")
             for ctx in (trade.get("momentum_context",[]) if trade else [])[:2]:
                 lines.append(f"  ↳ {ctx}")
@@ -5706,8 +5840,10 @@ def build_scalp_message(candidates: list) -> str:
                 lines.append(f"  ⏳ <b>TUNGGU ke zona</b>: <b>{fmt_num(ez['bottom'])} – {fmt_num(ez['top'])}</b>")
             if trade and trade.get("entry"):
                 lines.append(f"  🎯 Entry  : <b>{fmt_num(trade['entry'])}</b> ← LIMIT")
-            conf_word = "bullish engulfing/pin bar 15M" if direc == "LONG" else "bearish engulfing/pin bar 15M"
-            lines.append(f"  ✅ Konfirmasi: {conf_word} + vol ≥1.5x")
+            cp = (trade.get("candle_pattern") if trade else None) or (
+                "bullish engulfing/pin bar 15M" if direc == "LONG" else "bearish engulfing/pin bar 15M"
+            )
+            lines.append(f"  ✅ Konfirmasi: {cp} + vol ≥1.5x")
 
         if trade and trade.get("sl"):
             lines.append(f"  🔴 SL     : {fmt_num(trade['sl'])}")
