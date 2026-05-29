@@ -190,6 +190,27 @@ except ImportError:
     SYMBOL_MEMORY_MODULE = False
     logging.getLogger("v13").warning("symbol_memory.py tidak ditemukan — fitur symbol memory dinonaktifkan")
 
+# ── v14: Market Regime & Advanced Candle Patterns ─
+try:
+    from market_regime import (
+        detect_candle_patterns,
+        detect_market_regime,
+        calculate_bb_squeeze,
+        detect_volume_coil,
+        detect_sudden_breakout,
+        calculate_adx,
+    )
+    MARKET_REGIME_MODULE = True
+except ImportError:
+    MARKET_REGIME_MODULE = False
+    logging.getLogger("v14").warning("market_regime.py tidak ditemukan — candle patterns & regime dinonaktifkan")
+    def detect_candle_patterns(c): return {"pattern": "NONE", "direction": "NEUTRAL", "strength": 0, "detail": "", "patterns_found": []}
+    def detect_market_regime(c): return {"regime": "UNKNOWN", "adx": 0, "squeeze": False, "detail": "", "is_trending": False, "is_ranging": False, "breakout_confirmed": False, "breakout_direction": "NONE"}
+    def calculate_bb_squeeze(c): return {"squeeze": False, "width_pct": 50, "bb_width": 0, "expanding": False, "squeeze_bars": 0}
+    def detect_volume_coil(c, lookback=10): return {"coiling": False, "spike_detected": False, "compression_bars": 0, "vol_ratio": 1.0, "detail": ""}
+    def detect_sudden_breakout(c, **kw): return {"sudden_breakout": False, "direction": "NONE", "vol_spike": 1.0, "range_break_pct": 0.0, "detail": "", "was_consolidating": False}
+    def calculate_adx(c, period=14): return {"adx": 0.0, "plus_di": 0.0, "minus_di": 0.0}
+
 # ── v15: Signal Chat / Discussion + Trading-Style Learning ──────
 try:
     import signal_chat
@@ -2695,6 +2716,13 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "ema9":           calculate_ema(closed_candles, 9),
         "ema21":          calculate_ema(closed_candles, 21),
         "ema50":          calculate_ema(closed_candles, 50),
+        # v14: advanced structure
+        "candle_patterns": detect_candle_patterns(closed_candles),
+        "market_regime":   detect_market_regime(closed_candles),
+        "bb_squeeze":      calculate_bb_squeeze(closed_candles),
+        "volume_coil":     detect_volume_coil(closed_candles),
+        "sudden_breakout": detect_sudden_breakout(closed_candles),
+        "adx":             calculate_adx(closed_candles).get("adx", 0),
         "_anti_lookahead": True,
         "_closed_count":   len(closed_candles),
     }
@@ -2812,14 +2840,17 @@ def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -
 # PRE-PUMP DETECTOR
 # ─────────────────────────────────────────────
 
-def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict:
+def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
+                   tf_15m: dict = None) -> dict:
     """
-    Deteksi pre-pump setup berdasarkan 3 indikator utama:
-    1. Funding Squeeze  (max 30 poin)
-    2. Momentum Runner  (max 35 poin)
-    3. OI + PA + ATR    (max 35 poin)
+    Deteksi pre-pump setup berdasarkan 4 indikator utama:
+    1. Funding Squeeze       (max 30 poin)
+    2. Momentum Runner       (max 35 poin)
+    3. OI + PA + ATR         (max 35 poin)
+    4. Early Warning + v14:  (max 30 poin)  BB Squeeze / Volume Coil / Sudden Breakout
     Total max = 100 poin
     """
+    tf_15m = tf_15m or {}
     result = {
         "symbol": symbol,
         "funding_score": 0,
@@ -3113,6 +3144,85 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
             f"🚀 Short squeeze active: ${_susd/1e6:.1f}M shorts liq'd — momentum continuation"
         )
 
+    # ── v14: BB SQUEEZE / VOLUME COIL / SUDDEN BREAKOUT ──────────
+    # Detect "compressed spring" setup — ciri khas pump tiba-tiba (ALLO-type)
+
+    # BB Squeeze dari 1H / 4H → coiling sebelum explosion
+    bb_4h = tf_4h.get("bb_squeeze", {})
+    if not bb_4h and tf_4h.get("candles"):
+        bb_4h = calculate_bb_squeeze(tf_4h["candles"])
+    bb_1h = tf_1h.get("bb_squeeze", {})
+    if not bb_1h and tf_1h.get("candles"):
+        bb_1h = calculate_bb_squeeze(tf_1h["candles"])
+
+    if bb_4h.get("squeeze"):
+        sq_bars = bb_4h.get("squeeze_bars", 0)
+        early_score += 15
+        result["reasons"].append(
+            f"🔵 BB SQUEEZE 4H ({sq_bars} bar, width {bb_4h.get('bb_width',0):.1f}%) "
+            f"— harga coiling, spring load imminent!"
+        )
+    elif bb_1h.get("squeeze"):
+        sq_bars_1h = bb_1h.get("squeeze_bars", 0)
+        early_score += 8
+        result["reasons"].append(
+            f"🔵 BB Squeeze 1H ({sq_bars_1h} bar) — kompresi volatilitas, potensi breakout"
+        )
+
+    # Volume Coil dari 1H → declining volume = akumulasi silent, spring terload
+    vc_1h = tf_1h.get("volume_coil", {})
+    if not vc_1h and tf_1h.get("candles"):
+        vc_1h = detect_volume_coil(tf_1h["candles"])
+    vc_15m = tf_15m.get("volume_coil", {})
+    if not vc_15m and tf_15m.get("candles"):
+        vc_15m = detect_volume_coil(tf_15m["candles"])
+
+    if vc_1h.get("coiling") and vc_1h.get("spike_detected"):
+        early_score += 15
+        result["reasons"].append(
+            f"🌊 Volume Coil RELEASE 1H: spike {vc_1h.get('vol_ratio',1):.1f}x setelah "
+            f"{vc_1h.get('compression_bars',0)} bar declining — spring terlepas!"
+        )
+    elif vc_1h.get("coiling"):
+        early_score += 7
+        result["reasons"].append(
+            f"🔍 Volume Coil 1H: {vc_1h.get('compression_bars',0)} bar declining "
+            f"— silent accumulation, pre-pump loading"
+        )
+
+    # Sudden Breakout detector (ALLO-type) — explosive dari konsolidasi
+    sb_4h = tf_4h.get("sudden_breakout", {})
+    if not sb_4h and tf_4h.get("candles"):
+        sb_4h = detect_sudden_breakout(tf_4h["candles"])
+    sb_1h = tf_1h.get("sudden_breakout", {})
+    if not sb_1h and tf_1h.get("candles"):
+        sb_1h = detect_sudden_breakout(tf_1h["candles"])
+    sb_15m = tf_15m.get("sudden_breakout", {})
+    if not sb_15m and tf_15m.get("candles"):
+        sb_15m = detect_sudden_breakout(tf_15m["candles"])
+
+    if sb_4h.get("sudden_breakout") and sb_4h.get("direction") == "UP":
+        early_score += 25
+        result["reasons"].append(
+            f"🚀 SUDDEN BREAKOUT UP 4H: vol {sb_4h.get('vol_spike',1):.1f}x, "
+            f"+{sb_4h.get('range_break_pct',0):.1f}% range break — momentum explosive!"
+        )
+    elif sb_1h.get("sudden_breakout") and sb_1h.get("direction") == "UP":
+        early_score += 18
+        result["reasons"].append(
+            f"⚡ Sudden Breakout UP 1H: vol {sb_1h.get('vol_spike',1):.1f}x — pump rally starting"
+        )
+    elif sb_15m.get("sudden_breakout") and sb_15m.get("direction") == "UP":
+        early_score += 10
+        result["reasons"].append(
+            f"💥 Sudden Breakout UP 15M: vol {sb_15m.get('vol_spike',1):.1f}x — scalp momentum aktif"
+        )
+    elif sb_1h.get("was_consolidating") and sb_1h.get("vol_spike", 1) >= 1.8:
+        early_score += 5
+        result["reasons"].append(
+            f"  Volume building {sb_1h.get('vol_spike',1):.1f}x di zona konsolidasi — watch for breakout"
+        )
+
     result["early_warning_score"] = min(early_score, 30)
 
     # ── GLASSNODE MACRO FILTER ───────────────────
@@ -3181,7 +3291,7 @@ def scan_prepump_candidates(symbols: list = None) -> list:
                     log.info(f"⛔ {sym} blacklisted, skip prepump scan: {bl_r}")
                     continue
 
-            pp = detect_prepump(sym, tf_1h, tf_4h, oi)
+            pp = detect_prepump(sym, tf_1h, tf_4h, oi, tf_15m)
             if pp["total_score"] >= 35:
                 price = tf_1h.get("price", 0)
                 pp["price"] = price
@@ -3665,6 +3775,64 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         if t1 == "BULLISH": pump_score += 7; reasons.append("✅ 1H: BoS UP — momentum bullish")
         elif t1 == "BEARISH": dump_score += 7; reasons.append("🔴 1H: BoS DOWN — momentum bearish")
 
+    # ── v14: MARKET REGIME GATE ─────────────────
+    # Cek regime dari 4H dan 1H. RANGING tanpa breakout = sinyal noise.
+    # BB_SQUEEZE = watch, BREAKOUT = strong boost, TRENDING = moderate boost.
+    regime_4h = tf_4h.get("market_regime", {})
+    regime_1h = tf_1h.get("market_regime", {})
+    regime_str = regime_4h.get("regime", "UNKNOWN")
+    regime_detail = regime_4h.get("detail", "")
+
+    if regime_str == "RANGING":
+        # Ranging market: kurangi confidence keduanya — sinyal sering fakeout
+        pump_score = int(pump_score * 0.70)
+        dump_score = int(dump_score * 0.70)
+        reasons.append(f"⚠️ REGIME 4H: RANGING (ADX={regime_4h.get('adx',0):.0f}) — sinyal noise tinggi, hati-hati fakeout")
+    elif regime_str == "BB_SQUEEZE":
+        # Squeeze = coiling — siapkan diri untuk breakout explosive
+        sq_bars = regime_4h.get("bb_width_pct", 50)
+        reasons.append(f"🔵 REGIME 4H: BB SQUEEZE (width {sq_bars:.0f}%ile) — coiling! Tunggu arah breakout")
+        # Belum boost — tunggu konfirmasi arah
+    elif regime_str == "BREAKOUT_UP":
+        pump_score += 18
+        reasons.append(f"🚀 REGIME 4H: BREAKOUT UP — harga menembus range, momentum kuat!")
+    elif regime_str == "BREAKOUT_DOWN":
+        dump_score += 18
+        reasons.append(f"🔻 REGIME 4H: BREAKOUT DOWN — harga breakdown range, bearish confirmed!")
+    elif regime_str == "BULLISH_TREND":
+        pump_score += 8
+        reasons.append(f"📈 REGIME 4H: BULLISH TREND (ADX={regime_4h.get('adx',0):.0f}) — trend filter GREEN untuk LONG")
+    elif regime_str == "BEARISH_TREND":
+        dump_score += 8
+        reasons.append(f"📉 REGIME 4H: BEARISH TREND (ADX={regime_4h.get('adx',0):.0f}) — trend filter GREEN untuk SHORT")
+
+    # 1H regime alignment bonus
+    regime_1h_str = regime_1h.get("regime", "UNKNOWN")
+    if regime_str == "BULLISH_TREND" and regime_1h_str in ("BULLISH_TREND", "BREAKOUT_UP"):
+        pump_score += 5
+        reasons.append("✅ REGIME 1H+4H aligned BULLISH — double confirmation")
+    elif regime_str == "BEARISH_TREND" and regime_1h_str in ("BEARISH_TREND", "BREAKOUT_DOWN"):
+        dump_score += 5
+        reasons.append("✅ REGIME 1H+4H aligned BEARISH — double confirmation")
+
+    # Sudden breakout detector: ALLO-type pumps (explosive dari nowhere)
+    sb_4h = tf_4h.get("sudden_breakout", {})
+    sb_1h = tf_1h.get("sudden_breakout", {})
+    if sb_4h.get("sudden_breakout"):
+        if sb_4h.get("direction") == "UP":
+            pump_score += 20
+            reasons.append(f"🔥 SUDDEN BREAKOUT UP (4H): vol {sb_4h['vol_spike']:.1f}x, +{sb_4h['range_break_pct']:.1f}% range break!")
+        else:
+            dump_score += 20
+            reasons.append(f"🔥 SUDDEN BREAKOUT DOWN (4H): vol {sb_4h['vol_spike']:.1f}x, -{sb_4h['range_break_pct']:.1f}% range break!")
+    elif sb_1h.get("sudden_breakout"):
+        if sb_1h.get("direction") == "UP":
+            pump_score += 12
+            reasons.append(f"⚡ Sudden breakout UP (1H): vol {sb_1h['vol_spike']:.1f}x — momentum aktif")
+        else:
+            dump_score += 12
+            reasons.append(f"⚡ Sudden breakout DOWN (1H): vol {sb_1h['vol_spike']:.1f}x — momentum aktif")
+
     rej = tf_15m.get("rejection", {})
     fvg = tf_15m.get("fvg", {})
 
@@ -3672,6 +3840,43 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         pump_score += 12; reasons.append(f"✅ 15M: Bullish pin bar ({rej['detail']})")
     elif rej.get("type") == "BEARISH_REJECTION":
         dump_score += 12; reasons.append(f"🔴 15M: Bearish pin bar ({rej['detail']})")
+
+    # ── v14: CANDLE STRUCTURE PATTERNS ───────────
+    # 15M patterns (scalp entry precision)
+    cp15 = tf_15m.get("candle_patterns", {})
+    cp1h = tf_1h.get("candle_patterns", {})
+
+    # Pattern score table: (pump_pts, dump_pts) keyed by pattern name
+    _pattern_pts = {
+        "BULLISH_ENGULFING":   (18, 0),
+        "BEARISH_ENGULFING":   (0, 18),
+        "MORNING_STAR":        (15, 0),
+        "EVENING_STAR":        (0, 15),
+        "THREE_WHITE_SOLDIERS":(12, 0),
+        "THREE_BLACK_CROWS":   (0, 12),
+        "BULLISH_MARUBOZU":    (10, 0),
+        "BEARISH_MARUBOZU":    (0, 10),
+        "DOJI":                (0,  0),   # neutral — no score
+        "INSIDE_BAR":          (0,  0),   # neutral — no score
+    }
+
+    p15 = cp15.get("pattern", "NONE")
+    if p15 in _pattern_pts:
+        pp, dp = _pattern_pts[p15]
+        if pp: pump_score += pp; reasons.append(f"🕯️ 15M Candle: {cp15['detail']} (+{pp}pts PUMP)")
+        if dp: dump_score += dp; reasons.append(f"🕯️ 15M Candle: {cp15['detail']} (+{dp}pts DUMP)")
+
+    p1h = cp1h.get("pattern", "NONE")
+    if p1h in _pattern_pts:
+        pp1, dp1 = _pattern_pts[p1h]
+        # 1H patterns: half weight (trend-level context, not scalp entry)
+        pp1h, dp1h = pp1 // 2, dp1 // 2
+        if pp1h: pump_score += pp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{pp1h}pts PUMP)")
+        if dp1h: dump_score += dp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{dp1h}pts DUMP)")
+
+    # INSIDE BAR on 15M = breakout setup — flag direction warning
+    if p15 == "INSIDE_BAR":
+        reasons.append("📦 15M: Inside Bar — kompresi, tunggu breakout konfirmasi sebelum entry")
 
     if fvg.get("fvg_type") == "BULLISH":
         d = fvg.get("bullish_fvg", {}).get("distance_pct", 999)
@@ -3814,6 +4019,42 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
             dump_score += 8
             reasons.append(f"💥 RT: Breakout DOWN dari range 15 menit terakhir — momentum")
 
+    # ── v14: ENTRY ZONE PROXIMITY CHECK ─────────────
+    # Kalau price sudah extended jauh dari semua key zones, sinyal berisiko tinggi (SL-prone).
+    price_now = tf_1h.get("price", 0)
+    ob1       = tf_1h.get("order_blocks", {})
+    ob4       = tf_4h.get("order_blocks", {})
+    fvg1      = tf_1h.get("fvg", {})
+    fvg15_chk = tf_15m.get("fvg", {})
+
+    _zone_distances = []
+    if ob1.get("bullish_ob"): _zone_distances.append(abs(ob1["bullish_ob"].get("distance_pct", 999)))
+    if ob1.get("bearish_ob"): _zone_distances.append(abs(ob1["bearish_ob"].get("distance_pct", 999)))
+    if ob4.get("bullish_ob"): _zone_distances.append(abs(ob4["bullish_ob"].get("distance_pct", 999)))
+    if ob4.get("bearish_ob"): _zone_distances.append(abs(ob4["bearish_ob"].get("distance_pct", 999)))
+    if fvg1.get("bullish_fvg"): _zone_distances.append(abs(fvg1["bullish_fvg"].get("distance_pct", 999)))
+    if fvg1.get("bearish_fvg"): _zone_distances.append(abs(fvg1["bearish_fvg"].get("distance_pct", 999)))
+    if fvg15_chk.get("bullish_fvg"): _zone_distances.append(abs(fvg15_chk["bullish_fvg"].get("distance_pct", 999)))
+    if fvg15_chk.get("bearish_fvg"): _zone_distances.append(abs(fvg15_chk["bearish_fvg"].get("distance_pct", 999)))
+
+    _nearest_zone = min(_zone_distances) if _zone_distances else 999
+    entry_extended = _nearest_zone > 3.5  # price >3.5% dari semua zones = extended/chasing
+
+    if entry_extended and _nearest_zone < 999:
+        # Extended entry: kurangi score, flag ke user
+        pump_score = int(pump_score * 0.80)
+        dump_score = int(dump_score * 0.80)
+        reasons.append(
+            f"⚠️ ENTRY EXTENDED: price {_nearest_zone:.1f}% dari nearest zone — "
+            f"risiko entry di puncak/bottom, tunggu pullback ke OB/FVG"
+        )
+    elif _nearest_zone <= 1.0:
+        # Sniper zone: price at key level — bonus
+        reasons.append(
+            f"🎯 SNIPER ZONE: price {_nearest_zone:.1f}% dari key zone — "
+            f"ini entry presisi, konfirmasi candle 15M!"
+        )
+
     total = pump_score + dump_score
     if total == 0:
         direction = "NEUTRAL"; score = 0
@@ -3829,7 +4070,9 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
 
     return {
         "direction": direction, "score": score, "level": level,
-        "pump_score": pump_score, "dump_score": dump_score, "reasons": reasons
+        "pump_score": pump_score, "dump_score": dump_score, "reasons": reasons,
+        "regime": regime_str, "entry_extended": entry_extended,
+        "nearest_zone_pct": round(_nearest_zone, 2) if _nearest_zone < 999 else None,
     }
 
 # ─────────────────────────────────────────────
@@ -4115,15 +4358,75 @@ def _determine_entry_mode(price: float, direction: str, entry_candidates: list,
     strong_momentum  = momentum_signals >= 4
     moderate_no_zone = momentum_signals >= 3 and no_retest_zone
 
+    # ── v14: SNIPER ZONE CHECK ────────────────────────
+    # Periksa apakah candle 15M sudah konfirmasi di zona (engulfing/pin bar at zone)
+    cp15 = tf_15m.get("candle_patterns", {}) if tf_15m else {}
+    rej15 = tf_15m.get("rejection", {}) if tf_15m else {}
+    sniper_patterns = {"BULLISH_ENGULFING", "MORNING_STAR", "BULLISH_MARUBOZU", "THREE_WHITE_SOLDIERS"}
+    sniper_patterns_short = {"BEARISH_ENGULFING", "EVENING_STAR", "BEARISH_MARUBOZU", "THREE_BLACK_CROWS"}
+    has_sniper_candle = (
+        (direction == "PUMP" and (
+            cp15.get("pattern") in sniper_patterns or
+            rej15.get("type") == "BULLISH_REJECTION"))
+        or
+        (direction == "DUMP" and (
+            cp15.get("pattern") in sniper_patterns_short or
+            rej15.get("type") == "BEARISH_REJECTION"))
+    )
+
+    # ── v14: EXTENDED ENTRY CHECK ─────────────────────
+    # Cek apakah price sudah jauh dari semua zones (chasing = SL-prone)
+    _all_zone_dist = []
+    for cand in entry_candidates:
+        _all_zone_dist.append(abs(cand[1] - price) / price * 100 if price > 0 else 999)
+    nearest_zone_dist = min(_all_zone_dist) if _all_zone_dist else 999
+    price_extended = nearest_zone_dist > 2.5 and not no_retest_zone  # ada zone tapi price jauh
+
+    # Check regime: di RANGING market, butuh breakout konfirmasi
+    regime_1h_mode = tf_1h.get("market_regime", {}) if tf_1h else {}
+    is_ranging      = regime_1h_mode.get("regime") == "RANGING"
+    bb_sq_1h        = tf_1h.get("bb_squeeze", {}) if tf_1h else {}
+    is_squeeze      = bb_sq_1h.get("squeeze", False)
+
     if strong_momentum or moderate_no_zone:
+        if price_extended:
+            # Momentum ada tapi price extended — downgrade ke RETEST_WAIT
+            hints_ext = (
+                [f"Price {nearest_zone_dist:.1f}% dari nearest zone — TUNGGU pullback ke OB/FVG",
+                 "Jangan chasing — entry di zone = SL lebih kecil",
+                 "Konfirmasi: bullish engulfing/pin bar saat retest"]
+                if direction == "PUMP" else
+                [f"Price {nearest_zone_dist:.1f}% dari nearest zone — TUNGGU rally ke OB/FVG",
+                 "Jangan chasing — entry di zone = SL lebih kecil",
+                 "Konfirmasi: bearish engulfing/pin bar saat retest"]
+            )
+            return {"mode": "RETEST_WAIT", "momentum_signals": momentum_signals,
+                    "momentum_reasons": momentum_reasons + [f"⚠️ Extended {nearest_zone_dist:.1f}% dari zone"],
+                    "confirmation_hints": hints_ext}
         return {"mode": "MOMENTUM_NOW", "momentum_signals": momentum_signals,
                 "momentum_reasons": momentum_reasons, "confirmation_hints": []}
 
-    hints = (["Candle 15M close di atas zona (bullish engulfing/pin bar)",
-              "Volume >= 1.5x rata-rata saat konfirmasi", "RSI 15M masih < 65"]
+    # SNIPER_ENTRY: price at zone + candle confirms → immediate entry
+    if has_sniper_candle and entry_candidates and nearest_zone_dist <= 1.0:
+        sniper_candle_name = cp15.get("pattern", rej15.get("type", "rejection"))
+        return {
+            "mode": "SNIPER_ENTRY",
+            "momentum_signals": momentum_signals,
+            "momentum_reasons": momentum_reasons + [f"🎯 {sniper_candle_name} confirmed at zone"],
+            "confirmation_hints": [
+                f"🎯 SNIPER: {cp15.get('detail', rej15.get('detail', 'candle confirmed at zone'))}",
+                "Entry NOW — zone + candle confluence terpenuhi",
+                "SL ketat: 1x ATR di bawah zone bottom",
+            ]
+        }
+
+    hints = (["Candle 15M close di atas zona (bullish engulfing/pin bar at OB/FVG)",
+              "Volume >= 1.5x saat konfirmasi — buyer commitment",
+              "RSI 15M masih < 65 — tidak overbought"]
              if direction == "PUMP" else
-             ["Candle 15M close di bawah zona (bearish engulfing/pin bar)",
-              "Volume >= 1.5x rata-rata saat konfirmasi", "RSI 15M masih > 35"])
+             ["Candle 15M close di bawah zona (bearish engulfing/pin bar at OB/FVG)",
+              "Volume >= 1.5x saat konfirmasi — seller commitment",
+              "RSI 15M masih > 35 — tidak oversold"])
     return {"mode": "RETEST_WAIT", "momentum_signals": momentum_signals,
             "momentum_reasons": momentum_reasons, "confirmation_hints": hints}
 
@@ -4961,7 +5264,7 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
         analysis_sym = binance_sym or sym + "USDT"
 
         confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi)
-        prepump    = detect_prepump(analysis_sym, tf_1h, tf_4h, oi)
+        prepump    = detect_prepump(analysis_sym, tf_1h, tf_4h, oi, tf_15m)
         predump    = detect_predump(analysis_sym, tf_1h, tf_4h, oi)
         eqh_eql    = tf_1h.get("liquidity", {})
         scalp      = detect_scalp_setup(analysis_sym, tf_15m, tf_1h, tf_4h, oi)
@@ -5243,7 +5546,7 @@ def handle_analyze_command(user_input: str, chat_id: str):
     realtime_momentum = detect_realtime_momentum(binance_sym)
 
     confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi, realtime_momentum)
-    prepump    = detect_prepump(binance_sym, tf_1h, tf_4h, oi)
+    prepump    = detect_prepump(binance_sym, tf_1h, tf_4h, oi, tf_15m)
     predump    = detect_predump(binance_sym, tf_1h, tf_4h, oi)
     eqh_eql    = tf_1h.get("liquidity", {})
     scalp      = detect_scalp_setup(binance_sym, tf_15m, tf_1h, tf_4h, oi)
@@ -6913,7 +7216,7 @@ def run_gated_scan():
             continue
 
         # Detectors
-        prepump = detect_prepump(analysis_sym, tf_1h, tf_4h, oi)
+        prepump = detect_prepump(analysis_sym, tf_1h, tf_4h, oi, tf_15m)
         predump = detect_predump(analysis_sym, tf_1h, tf_4h, oi)
         eqh_eql = tf_1h.get("liquidity", {})
         scalp   = detect_scalp_setup(analysis_sym, tf_15m, tf_1h, tf_4h, oi)
