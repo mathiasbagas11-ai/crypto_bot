@@ -4,3 +4,9 @@ __pycache__/
 *.pyd
 .env
 *.enc
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
