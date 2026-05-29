@@ -40,6 +40,8 @@ def only_bybit(monkeypatch):
     ("ETH/USDT", "ETHUSDT"),
     ("sol-usdt", "SOLUSDT"),
     ("DOGEUSD", "DOGEUSDT"),
+    ("xrpperp", "XRPUSDT"),   # PERP suffix stripped cleanly (regression: was XRPUSDTT)
+    ("ETHUSD", "ETHUSDT"),
 ])
 def test_resolve_symbol_normalization(only_bybit, user_input, expected):
     r = er.resolve_symbol(user_input)
@@ -47,14 +49,6 @@ def test_resolve_symbol_normalization(only_bybit, user_input, expected):
     assert r["exchange"] == "bybit"
     assert r["exchange_label"] == "Bybit"
     assert r["has_futures"] is True
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: resolve_symbol chains .replace('PERP','USDT').replace('USD','USDT'); "
-    "for PERP input the second replace also matches the 'USD' inside 'USDT', "
-    "so 'XRPPERP' -> 'XRPUSDT' -> 'XRPUSDTT' and never resolves."))
-def test_resolve_symbol_perp_normalization(only_bybit):
-    assert er.resolve_symbol("xrpperp")["symbol"] == "XRPUSDT"
 
 
 def test_resolve_symbol_not_found(monkeypatch):

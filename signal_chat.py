@@ -441,6 +441,166 @@ def format_style_list() -> str:
 
 
 # ─────────────────────────────────────────────
+# STYLE ENGINE — terjemahkan aturan gaya → penyesuaian sinyal (deterministik)
+# ─────────────────────────────────────────────
+# Aturan gaya yang berupa teks bebas diparse jadi preferensi terstruktur, lalu
+# diterapkan ke SALINAN rencana trade secara deterministik & transparan.
+# Tujuannya bikin sinyal terasa "hasil analisa berdua" TANPA diam-diam menimpa
+# angka mekanis bot (angka asli tetap ditampilkan; penyesuaian dijelaskan).
+
+_RR_RE   = re.compile(r"(?:r[:\s/]*r|risk[\s:-]*reward)\D{0,15}(\d+(?:[.,]\d+)?)", re.I)
+_SCORE_RE = re.compile(r"(?:score|skor|konviksi|conviction)\D{0,10}(\d{2,3})", re.I)
+_INDMIN_RE = re.compile(r"(?:minimal|min|setidaknya|at\s*least)\s*(\d+)\s*"
+                        r"(?:indikator|konfirmasi|indicator|confirmation)", re.I)
+_INDNO1_RE = re.compile(r"(?:jangan|bukan|hindari|no|gak|nggak|cuma|hanya)"
+                        r"[^\d]{0,15}(?:1|satu)\s*(?:indikator|konfirmasi)", re.I)
+
+
+def _to_float(s: str) -> Optional[float]:
+    try:
+        return float(s.replace(",", "."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_style_to_prefs(rules: list) -> dict:
+    """Parse aturan gaya (teks bebas) → preferensi terstruktur + catatan AI."""
+    prefs = {
+        "min_rr": None, "min_score": None, "min_indicators": None,
+        "entry_style": None, "notes": list(rules or []),
+    }
+    blob = "  ".join(rules or []).lower()
+
+    m = _RR_RE.search(blob)
+    if m:
+        v = _to_float(m.group(1))
+        if v and 0.5 <= v <= 10:
+            prefs["min_rr"] = v
+
+    m = _SCORE_RE.search(blob)
+    if m:
+        v = int(m.group(1))
+        if 1 <= v <= 100:
+            prefs["min_score"] = v
+
+    if _INDMIN_RE.search(blob):
+        prefs["min_indicators"] = int(_INDMIN_RE.search(blob).group(1))
+    elif _INDNO1_RE.search(blob):
+        prefs["min_indicators"] = 2
+
+    if "retest" in blob or "pullback" in blob:
+        prefs["entry_style"] = "RETEST"
+    elif "market" in blob or "langsung" in blob or "chase" in blob:
+        prefs["entry_style"] = "MARKET"
+
+    return prefs
+
+
+def _round_like(value: float, ref: float) -> float:
+    """Bulatkan `value` mengikuti presisi harga `ref`."""
+    if ref >= 100:
+        return round(value, 2)
+    if ref >= 1:
+        return round(value, 4)
+    return round(value, 8)
+
+
+def apply_style_to_signal(signal: dict, prefs: dict) -> dict:
+    """
+    Terapkan preferensi ke salinan rencana trade. Deterministik & konservatif:
+      - min_rr  → geser TP supaya R:R memenuhi target (math eksak)
+      - min_score / min_indicators → warning + flag 'skip' (advisory, tidak memblok)
+      - entry_style → catatan cara entry
+    Return: {adjusted_trade, changes, warnings, suppress, entry_note}
+    """
+    direction = signal.get("direction") or signal.get("trade", {}).get("direction", "LONG")
+    trade = signal.get("trade", {}) or {}
+    entry = _to_float(str(trade.get("entry", signal.get("price", 0)))) or 0.0
+    sl = _to_float(str(trade.get("sl", 0))) or 0.0
+
+    out = {"adjusted_trade": {}, "changes": [], "warnings": [],
+           "suppress": False, "entry_note": None}
+
+    # ── min R:R → geser TP ───────────────────────
+    risk = abs(entry - sl)
+    if prefs.get("min_rr") and entry > 0 and sl > 0 and risk > 0:
+        min_rr = prefs["min_rr"]
+        for tp_key in ("tp1", "tp2"):
+            tp = _to_float(str(trade.get(tp_key, 0))) or 0.0
+            if tp <= 0:
+                continue
+            cur_rr = (tp - entry) / risk if direction == "LONG" else (entry - tp) / risk
+            if cur_rr < min_rr - 0.01:
+                new_tp = entry + min_rr * risk if direction == "LONG" else entry - min_rr * risk
+                new_tp = _round_like(new_tp, entry)
+                out["adjusted_trade"][tp_key] = new_tp
+                out["changes"].append(
+                    f"{tp_key.upper()} {tp} → <b>{new_tp}</b> "
+                    f"(R:R {cur_rr:.2f} → {min_rr:.1f}, sesuai gaya kamu)")
+
+    # ── min score ────────────────────────────────
+    if prefs.get("min_score"):
+        ms = signal.get("master_score", 0)
+        if ms < prefs["min_score"]:
+            out["warnings"].append(
+                f"Master score {ms} di bawah ambang gaya kamu ({prefs['min_score']}) "
+                f"— biasanya kamu skip yang segini.")
+            out["suppress"] = True
+
+    # ── min indikator pendorong ──────────────────
+    if prefs.get("min_indicators"):
+        n_drivers = len(classify_components(signal).get("drivers", []))
+        if n_drivers < prefs["min_indicators"]:
+            out["warnings"].append(
+                f"Cuma {n_drivers} indikator pendorong, gaya kamu minta minimal "
+                f"{prefs['min_indicators']} — konfirmasi kurang buat kamu.")
+            out["suppress"] = True
+
+    # ── entry style ──────────────────────────────
+    if prefs.get("entry_style") == "RETEST" and entry > 0:
+        out["entry_note"] = (f"Kamu suka entry retest: tunggu harga pullback ke "
+                             f"zona <code>{entry}</code>, jangan market-chase.")
+    elif prefs.get("entry_style") == "MARKET":
+        out["entry_note"] = "Kamu suka entry cepat: boleh masuk di harga sekarang kalau setup masih valid."
+
+    return out
+
+
+def format_personalized_block(signal: dict, prefs: dict, res: dict) -> str:
+    """Susun blok 'disesuaikan gaya kamu'. Return '' kalau tidak ada penyesuaian."""
+    if not (res["changes"] or res["warnings"] or res["entry_note"]):
+        return ""
+    lines = ["🤝 <b>Disesuaikan gaya trading kamu</b>"]
+
+    if res["suppress"]:
+        lines.append("⛔ <b>Menurut gaya kamu, sinyal ini sebaiknya di-SKIP:</b>")
+    for w in res["warnings"]:
+        lines.append(f"  ⚠️ {w}")
+
+    if res["changes"]:
+        lines.append("\n🎯 <b>Rencana disesuaikan:</b>")
+        for c in res["changes"]:
+            lines.append(f"  • {c}")
+
+    if res["entry_note"]:
+        lines.append(f"\n📍 {res['entry_note']}")
+
+    lines.append("\n<i>Penyesuaian dari aturan /style kamu — angka mekanis bot tetap di atas. "
+                 "Keputusan akhir tetap di kamu.</i>")
+    return "\n".join(lines)
+
+
+def build_signal_personalization(signal: dict) -> str:
+    """Helper untuk bot: load gaya → parse → apply → format. '' kalau tidak ada."""
+    rules = get_style_rules()
+    if not rules:
+        return ""
+    prefs = parse_style_to_prefs(rules)
+    res = apply_style_to_signal(signal, prefs)
+    return format_personalized_block(signal, prefs, res)
+
+
+# ─────────────────────────────────────────────
 # Orchestration handlers (pakai ai_fn & send_fn yang di-inject)
 # ─────────────────────────────────────────────
 
@@ -529,6 +689,13 @@ def handle_why(symbol: Optional[str], chat_id: str,
     send_fn(explain_signal(signal), chat_id)
 
     style_rules = get_style_rules()
+
+    # Penyesuaian deterministik (angka entry/TP) dari gaya tersimpan
+    det_block = build_signal_personalization(signal)
+    if det_block:
+        send_fn(det_block, chat_id)
+
+    # Saran naratif dari AI (opsional, kalau ada AI key)
     if style_rules and ai_fn:
         try:
             take = ai_fn(build_personalize_prompt(signal, style_rules))

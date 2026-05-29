@@ -40,7 +40,7 @@ The suite targets the high-value, pure-logic units across three tiers.
 ### Feature — signal discussion & trading-style learning (v15)
 | Module | File | What's covered |
 |--------|------|----------------|
-| `signal_chat.py` | `test_signal_chat.py` | component classification & `explain_signal`, prompt building, `[STYLE:]` marker parsing, signal↔message mapping, style store add/dedup/remove, discussion-reply orchestration, confirm-to-save flow |
+| `signal_chat.py` | `test_signal_chat.py` | component classification & `explain_signal`, prompt building, `[STYLE:]` marker parsing, signal↔message mapping, style store add/dedup/remove, discussion-reply orchestration, confirm-to-save flow, **style engine** (parse rules → prefs, deterministic R:R/score/indicator/entry adjustments, personalization block) |
 
 ## Conventions
 
@@ -50,9 +50,9 @@ The suite targets the high-value, pure-logic units across three tiers.
   structure zig-zag), they were captured from the implementation on a clearly
   shaped input and locked in as a regression guard.
 
-## Known bug surfaced by the suite
+## Bugs surfaced & fixed by the suite
 
-- `exchange_resolver.resolve_symbol` mis-normalizes `*PERP` input
-  (`"XRPPERP"` → `"XRPUSDTT"`). Documented as a strict `xfail` in
-  `test_exchange_resolver.py::test_resolve_symbol_perp_normalization`; when the
-  chained `.replace()` is fixed, that test will start passing and flag itself.
+- `exchange_resolver.resolve_symbol` mis-normalized `*PERP` input
+  (`"XRPPERP"` → `"XRPUSDTT"`, which never resolved). The chained `.replace()`
+  was replaced with explicit suffix stripping; covered by
+  `test_exchange_resolver.py::test_resolve_symbol_normalization`.

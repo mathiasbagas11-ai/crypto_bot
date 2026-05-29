@@ -7255,9 +7255,10 @@ def run_scan(manual: bool = False, chat_id: str = None):
         # Kirim confirmed signal ke chat yang sama dengan peminta scan
         _confirmed_send = (lambda msg, cid=chat_id: send_telegram(msg, cid)) if (manual and chat_id) else send_telegram
         _register_fn = signal_chat.register_signal_message if SIGNAL_CHAT_MODULE else None
+        _personalize_fn = signal_chat.build_signal_personalization if SIGNAL_CHAT_MODULE else None
         threading.Thread(
             target=run_confirmed_signal_scan,
-            args=(enriched_coins, _confirmed_send, tracker_fn, _register_fn),
+            args=(enriched_coins, _confirmed_send, tracker_fn, _register_fn, _personalize_fn),
             daemon=True
         ).start()
         log.info(f"🔬 Confirmed signal scan started ({len(enriched_coins)} coins) in background")

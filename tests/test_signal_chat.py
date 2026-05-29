@@ -224,3 +224,86 @@ def test_confirm_skip_discards_rule(store):
 def test_confirm_without_pending_not_handled(store):
     handled = sc.handle_confirm("ya", "chatZ", lambda m, c=None: None)
     assert handled is False
+
+
+# ── style engine: parse_style_to_prefs ───────────────────────────
+
+@pytest.mark.parametrize("rule,key,expected", [
+    ("mau R:R minimal 2.5", "min_rr", 2.5),
+    ("rr minimal 3", "min_rr", 3.0),
+    ("risk reward minimal 2", "min_rr", 2.0),
+    ("cuma mau sinyal dengan score minimal 85", "min_score", 85),
+    ("minimal 2 konfirmasi indikator", "min_indicators", 2),
+    ("jangan entry kalau cuma 1 indikator", "min_indicators", 2),
+    ("gue suka entry retest bukan market", "entry_style", "RETEST"),
+    ("suka masuk market langsung", "entry_style", "MARKET"),
+])
+def test_parse_style_to_prefs(rule, key, expected):
+    assert sc.parse_style_to_prefs([rule])[key] == expected
+
+
+def test_parse_keeps_notes():
+    rules = ["skip kalau btc lagi turun", "suka TP bertahap"]
+    assert sc.parse_style_to_prefs(rules)["notes"] == rules
+
+
+# ── style engine: apply_style_to_signal ──────────────────────────
+
+def _trade_signal(direction="LONG", **trade):
+    base = {"direction": direction, "entry": 100.0, "sl": 95.0,
+            "tp1": 110.0, "tp2": 130.0}
+    base.update(trade)
+    return _signal(direction=direction, trade=base, master_score=72)
+
+
+def test_apply_min_rr_extends_tp_long():
+    sig = _trade_signal("LONG")  # risk 5, tp1 rr=2.0
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["R:R minimal 2.5"]))
+    # 100 + 2.5*5 = 112.5; tp2 (rr 6) left alone.
+    assert res["adjusted_trade"] == {"tp1": 112.5}
+
+
+def test_apply_min_rr_extends_tp_short():
+    sig = _trade_signal("SHORT", entry=100.0, sl=105.0, tp1=92.0, tp2=70.0)  # risk 5, tp1 rr=1.6
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["R:R minimal 2.5"]))
+    # 100 - 2.5*5 = 87.5
+    assert res["adjusted_trade"]["tp1"] == 87.5
+
+
+def test_apply_min_rr_no_change_when_already_met():
+    sig = _trade_signal("LONG", tp1=120.0)  # rr 4.0 already > 2.5
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["R:R minimal 2.5"]))
+    assert "tp1" not in res["adjusted_trade"]
+
+
+def test_apply_min_score_flags_skip():
+    sig = _trade_signal("LONG")  # master_score 72
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["score minimal 80"]))
+    assert res["suppress"] is True
+    assert any("di bawah ambang" in w for w in res["warnings"])
+
+
+def test_apply_min_indicators_flags_skip():
+    sig = _trade_signal("LONG")  # single driver (confluence)
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["minimal 2 konfirmasi indikator"]))
+    assert res["suppress"] is True
+
+
+def test_apply_entry_style_retest_note():
+    sig = _trade_signal("LONG")
+    res = sc.apply_style_to_signal(sig, sc.parse_style_to_prefs(["suka entry retest"]))
+    assert res["entry_note"] and "retest" in res["entry_note"].lower()
+
+
+# ── style engine: build_signal_personalization (integration) ─────
+
+def test_build_personalization_empty_without_rules(store):
+    assert sc.build_signal_personalization(_trade_signal()) == ""
+
+
+def test_build_personalization_with_rules(store):
+    sc.add_style_rule("R:R minimal 2.5")
+    block = sc.build_signal_personalization(_trade_signal("LONG"))
+    assert "Disesuaikan gaya trading kamu" in block
+    assert "112.5" in block  # adjusted TP shown
+    assert "angka mekanis bot tetap di atas" in block

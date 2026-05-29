@@ -1054,6 +1054,7 @@ def run_confirmed_signal_scan(
     send_telegram_fn,
     tracker_on_signal_sent=None,
     register_signal_fn=None,
+    personalize_fn=None,
 ):
     """
     Dipanggil di run_scan() setelah screen_coins().
@@ -1103,6 +1104,16 @@ def run_confirmed_signal_scan(
 
             # Kirim ke Telegram
             msg = format_confirmed_signal_message(signal)
+
+            # v15: tempel penyesuaian gaya trading user (kalau ada)
+            if personalize_fn:
+                try:
+                    extra = personalize_fn(signal)
+                    if extra:
+                        msg += "\n\n" + extra
+                except Exception as e:
+                    log.debug(f"personalize_fn error: {e}")
+
             msg_id = send_telegram_fn(msg)
             confirmed_count += 1
 
