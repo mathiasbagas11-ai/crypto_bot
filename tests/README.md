@@ -8,18 +8,46 @@ pytest                  # run everything
 pytest --cov=. --cov-report=term-missing   # with coverage
 ```
 
-## Coverage status
+CI runs the same suite on every push to `main` and on pull requests
+(`.github/workflows/tests.yml`).
 
-This is the **Tier 1** test suite — the highest-risk, pure-logic units:
+## Coverage map
 
-| Area | Module | What's covered |
-|------|--------|----------------|
-| Money math | `risk_manager.py` | position sizing, 30% cap, leverage, personal trade plan, daily loss-limit halt, risk summary |
-| Backtest stats | `backtest_engine.py` | `LocalTrade.close()` P&L (long/short, fees), `_calc_stats()` win rate / profit factor / drawdown / expectancy |
-| Auth & crypto | `security.py` | whitelist build/membership, Fernet key derivation, encrypt→decrypt round-trip, plaintext backward-compat & migration |
+The suite targets the high-value, pure-logic units across three tiers.
 
-These functions are pure (no live network) and are exercised by monkeypatching
-state I/O, so the suite runs fast and offline.
+### Tier 1 — money, stats & security
+| Module | File | What's covered |
+|--------|------|----------------|
+| `risk_manager.py` | `test_risk_manager.py` | position sizing, 30% cap, leverage, personal trade plan, daily loss-limit halt, risk summary |
+| `backtest_engine.py` | `test_backtest_stats.py` | `LocalTrade.close()` P&L (long/short, fees), `_calc_stats()` win rate / profit factor / drawdown / expectancy |
+| `security.py` | `test_security.py` | whitelist build/membership, Fernet key derivation, encrypt→decrypt round-trip, plaintext backward-compat & migration |
 
-Later tiers (signal scoring, indicator primitives, exchange parsing, state
-trackers) are not yet covered — see the analysis in the PR/issue thread.
+### Tier 2 — signal correctness & indicators
+| Module | File | What's covered |
+|--------|------|----------------|
+| `auto_validator.py` | `test_indicators.py` | `_ema`, `_rsi`, `_trend_from_candles`, `_choch_bos` |
+| `confirmed_signal.py` | `test_master_score.py` | `compute_master_score` weighting / conflict / confidence, `_persistence_adjustment` |
+| `crypto_screening_bot_v13.py` | `test_detectors.py` | `detect_market_structure`, `detect_fvg`, `calculate_quality_score` |
+
+### Tier 3 — state, parsing & learning
+| Module | File | What's covered |
+|--------|------|----------------|
+| `symbol_memory.py` | `test_symbol_memory.py` | `_compute_stats`, `_check_blacklist`, `is_blacklisted` |
+| `feedback_engine.py` | `test_feedback_parser.py` | `_parse_feedback_rule_based` outcome/direction/condition extraction |
+| `exchange_resolver.py` | `test_exchange_resolver.py` | `resolve_symbol` normalization + fallback, `_klines_*` parsing/normalization |
+| `signal_tracker.py` | `test_signal_tracker.py` | `check_pending_signals` TP/SL/timeout, conservative SL-first resolution |
+
+## Conventions
+
+- Tests are offline: network (`requests`, exchange/price fetches) and state
+  files are monkeypatched, so the suite runs in well under a second.
+- Where exact expected values were hard to hand-derive (e.g. the market
+  structure zig-zag), they were captured from the implementation on a clearly
+  shaped input and locked in as a regression guard.
+
+## Known bug surfaced by the suite
+
+- `exchange_resolver.resolve_symbol` mis-normalizes `*PERP` input
+  (`"XRPPERP"` → `"XRPUSDTT"`). Documented as a strict `xfail` in
+  `test_exchange_resolver.py::test_resolve_symbol_perp_normalization`; when the
+  chained `.replace()` is fixed, that test will start passing and flag itself.
