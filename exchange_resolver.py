@@ -425,11 +425,14 @@ def resolve_symbol(user_input: str) -> Optional[dict]:
     """
     inp = user_input.strip().upper().replace("/", "").replace("-", "")
 
-    # Normalize ke USDT pair
+    # Normalize ke USDT pair (strip suffix eksplisit — hindari chained replace
+    # yang bisa double-append, mis. "XRPPERP" → "XRPUSDTT")
     if inp.endswith("USDT"):
         symbol = inp
-    elif inp.endswith("PERP") or inp.endswith("USD"):
-        symbol = inp.replace("PERP", "USDT").replace("USD", "USDT")
+    elif inp.endswith("PERP"):
+        symbol = inp[:-4] + "USDT"
+    elif inp.endswith("USD"):
+        symbol = inp[:-3] + "USDT"
     else:
         symbol = inp + "USDT"
 

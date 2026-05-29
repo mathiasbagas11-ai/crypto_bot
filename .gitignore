@@ -4,3 +4,14 @@ __pycache__/
 *.pyd
 .env
 *.enc
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# v15 signal-chat runtime state
+signal_chat_map.json
+signal_chat_convos.json
+trading_style.json
