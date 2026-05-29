@@ -7865,6 +7865,40 @@ if __name__ == "__main__":
     poll_thread.start()
     log.info("📡 Telegram chat handler: RUNNING")
 
+    # ── Startup Telegram notification ────────────
+    _regime_status  = "✅" if MARKET_REGIME_MODULE else "⚠️ missing"
+    _risk_status    = "✅" if RISK_MODULE else "⚠️"
+    _news_status    = "✅" if NEWS_MODULE else "⚠️"
+    _liq_status_str = "✅" if LIQ_TRACKER_MODULE else "⚠️"
+    _mem_status     = "✅" if SYMBOL_MEMORY_MODULE else "⚠️"
+    _startup_msg = (
+        "🤖 <b>CRYPTO BOT v14 — ONLINE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🆕 <b>Fitur Baru v14:</b>\n"
+        "🔵 <b>Market Regime Classifier</b> — Bot sekarang bisa bedain:\n"
+        "   RANGING / BULLISH_TREND / BEARISH_TREND\n"
+        "   BB_SQUEEZE / BREAKOUT_UP / BREAKOUT_DOWN\n"
+        "   → Sinyal di RANGING = score dipotong 30% (filter fakeout)\n\n"
+        "🕯️ <b>Full Candle Structure</b> — Bukan cuma pin bar:\n"
+        "   Engulfing, Morning/Evening Star, Marubozu,\n"
+        "   Three Soldiers/Crows, Inside Bar, Doji\n\n"
+        "🌊 <b>Pre-pump Spring Detector</b> — Tangkap pump tiba-tiba:\n"
+        "   BB Squeeze + Volume Coil + Sudden Breakout\n"
+        "   (ALLO-type pump sekarang ketangkep)\n\n"
+        "🎯 <b>Sniper Entry Mode</b> — 3 mode entry:\n"
+        "   MOMENTUM_NOW | RETEST_WAIT | SNIPER_ENTRY\n"
+        "   → Price extended >2.5% dari zone = warning otomatis\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Modules: Regime {_regime_status} | Risk {_risk_status} | "
+        f"News {_news_status} | Liq {_liq_status_str} | Memory {_mem_status}\n"
+        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n\n"
+        "Ketik /help untuk list command lengkap."
+    )
+    try:
+        send_telegram(_startup_msg)
+    except Exception as _e:
+        log.warning(f"Startup Telegram notification failed: {_e}")
+
     # Liquidation Cascade Tracker
     if LIQ_TRACKER_MODULE:
         start_liq_tracker()
