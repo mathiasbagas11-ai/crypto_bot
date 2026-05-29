@@ -266,22 +266,46 @@ _STYLE_INSTRUCTION = (
 )
 
 
+_PERSONA = (
+    "Lo asisten trading crypto pribadi-nya user — ngobrol santai kayak temen yang jago "
+    "trading, BUKAN textbook. Pakai Bahasa Indonesia santai (boleh 'gue/lo'), langsung ke "
+    "poin, maksimal ~5 kalimat. ATURAN PENTING:\n"
+    "- Jawab SPESIFIK soal sinyal/coin yang lagi dibahas. JANGAN kasih definisi umum atau "
+    "teori dasar (mis. 'apa itu short selling') kecuali diminta.\n"
+    "- INGAT: bot ini (lo) yang ngasih sinyal. Kalau user nanya 'kenapa disuruh short/long', "
+    "jawab kenapa LO ngasih call itu berdasarkan indikator/alasan di data — bukan ngomong "
+    "soal 'orang lain' atau definisi.\n"
+    "- Kalau harga keliatan lawan arah sinyal, jelasin logikanya (mis. short karena overextended/"
+    "resistance/funding, bukan karena 'harga bakal turun' doang).\n"
+    "- Jujur: kalau sinyalnya emang lemah/cuma 1 indikator, ngaku. Boleh koreksi user kalau keliru."
+)
+
+
 def build_discussion_prompt(signal: dict, history: list, user_msg: str,
-                            style_rules: list) -> str:
-    """Susun prompt diskusi untuk AI (mentor untuk trader pemula, Bahasa Indonesia)."""
+                            style_rules: list, replied_text: str = None) -> str:
+    """Susun prompt diskusi untuk AI dengan persona santai & grounded ke data."""
     style_txt = "\n".join(f"- {r}" for r in style_rules) if style_rules else "(belum ada)"
     convo = "\n".join(
         f"{'User' if t.get('role') == 'user' else 'Bot'}: {t.get('text', '')}"
         for t in history[-MAX_HISTORY_TURN:]
     ) or "(belum ada)"
 
+    if signal and signal.get("component_scores"):
+        sig_ctx = _signal_context_text(signal)
+    elif signal:
+        sig_ctx = (f"Symbol: {signal.get('symbol', '?')} | Arah: {signal.get('direction', '?')} "
+                   f"(data ringkas)")
+    else:
+        sig_ctx = "(tidak ada data sinyal terstruktur — pakai isi pesan bot yang di-reply)"
+
+    replied_block = (f"\n=== PESAN BOT YANG DI-REPLY USER (konteks utama!) ===\n{replied_text}\n"
+                     if replied_text else "")
+
     return (
-        "Kamu adalah mentor trading crypto yang sabar untuk seorang PEMULA. "
-        "Jawab dalam Bahasa Indonesia, ringkas, konkret, dan jujur (boleh tidak setuju "
-        "dengan user kalau memang keliru — koreksi dengan sopan dan jelaskan alasannya). "
-        "Selalu grounding ke DATA sinyal di bawah, jangan mengarang indikator yang tidak ada.\n\n"
-        f"=== DATA SINYAL ===\n{_signal_context_text(signal)}\n\n"
-        f"=== GAYA TRADING USER (yang sudah tersimpan) ===\n{style_txt}\n\n"
+        f"{_PERSONA}\n\n"
+        f"=== DATA SINYAL ===\n{sig_ctx}\n"
+        f"{replied_block}\n"
+        f"=== GAYA TRADING USER (tersimpan) ===\n{style_txt}\n\n"
         f"=== RIWAYAT DISKUSI ===\n{convo}\n\n"
         f"=== PESAN USER SEKARANG ===\n{user_msg}\n\n"
         f"{_STYLE_INSTRUCTION}"
@@ -292,11 +316,10 @@ def build_personalize_prompt(signal: dict, style_rules: list) -> str:
     """Prompt untuk saran penyesuaian entry/TP berdasarkan gaya user (advisory)."""
     style_txt = "\n".join(f"- {r}" for r in style_rules)
     return (
-        "Kamu mentor trading crypto untuk pemula. Berdasarkan DATA sinyal dan GAYA "
-        "TRADING user, beri saran penyesuaian rencana entry/SL/TP yang lebih cocok "
-        "dengan gaya user. Ini SARAN di atas angka mekanis bot — jelaskan alasan tiap "
-        "penyesuaian, maksimal 6 kalimat, Bahasa Indonesia. Jangan menyuruh all-in / "
-        "over-leverage.\n\n"
+        "Lo asisten trading pribadi user, ngobrol santai (boleh 'gue/lo'). Berdasarkan DATA "
+        "sinyal dan GAYA TRADING user, kasih saran penyesuaian entry/SL/TP yang lebih cocok "
+        "buat gaya dia. Ini SARAN di atas angka mekanis bot — jelasin alasan tiap penyesuaian, "
+        "spesifik & singkat (maks 5 kalimat). Jangan nyuruh all-in / over-leverage / nambah risiko.\n\n"
         f"=== DATA SINYAL ===\n{_signal_context_text(signal)}\n\n"
         f"=== GAYA TRADING USER ===\n{style_txt}\n"
     )
@@ -336,15 +359,47 @@ def _get_convo(chat_id: str) -> dict:
     return _load_convos().get(str(chat_id), {})
 
 
-def start_convo(chat_id: str, message_id, signal: dict) -> None:
+DISCUSSION_WINDOW_MIN = 25   # follow-up tanpa reply masih lanjut dalam window ini
+
+
+def start_convo(chat_id: str, message_id, context: dict) -> None:
     data = _load_convos()
     data[str(chat_id)] = {
         "message_id": str(message_id) if message_id else None,
-        "symbol": signal.get("symbol"),
+        "symbol": (context or {}).get("symbol"),
+        "context": context or {},
         "history": [],
         "pending_rule": None,
+        "last_active": datetime.now(timezone.utc).isoformat(),
     }
     _save_convos(data)
+
+
+def get_context(chat_id: str) -> dict:
+    return _get_convo(chat_id).get("context", {})
+
+
+def is_discussion_active(chat_id: str) -> bool:
+    """True kalau ada diskusi yang masih hangat (dalam window) untuk chat ini."""
+    convo = _get_convo(chat_id)
+    if not convo.get("context"):
+        return False
+    last = convo.get("last_active")
+    if not last:
+        return False
+    try:
+        age_min = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 60
+    except Exception:
+        return False
+    return age_min <= DISCUSSION_WINDOW_MIN
+
+
+def end_convo(chat_id: str) -> None:
+    data = _load_convos()
+    if str(chat_id) in data:
+        data[str(chat_id)]["context"] = {}
+        data[str(chat_id)]["last_active"] = None
+        _save_convos(data)
 
 
 def append_turn(chat_id: str, role: str, text: str) -> None:
@@ -352,6 +407,7 @@ def append_turn(chat_id: str, role: str, text: str) -> None:
     convo = data.setdefault(str(chat_id), {"history": [], "pending_rule": None})
     convo.setdefault("history", []).append({"role": role, "text": text})
     convo["history"] = convo["history"][-(MAX_HISTORY_TURN * 2):]
+    convo["last_active"] = datetime.now(timezone.utc).isoformat()
     _save_convos(data)
 
 
@@ -604,54 +660,117 @@ def build_signal_personalization(signal: dict) -> str:
 # Orchestration handlers (pakai ai_fn & send_fn yang di-inject)
 # ─────────────────────────────────────────────
 
-def handle_discussion_reply(message_id, user_msg: str, chat_id: str,
-                            ai_fn: Callable[[str], str],
-                            send_fn: Callable[..., None]) -> bool:
-    """
-    Tangani reply user ke pesan sinyal. Return True kalau ditangani (memang sinyal),
-    False kalau message_id bukan sinyal (biar bot fallback ke handler lain).
-    """
-    signal = get_signal_for_message(message_id)
-    if not signal:
-        return False
+def _guess_coin(text: str) -> Optional[str]:
+    """Tebak coin dari teks berdasarkan symbol yang ada di history sinyal."""
+    if not text:
+        return None
+    syms = set()
+    for s in _read(HISTORY_FILE, []):
+        if isinstance(s, dict):
+            sym = s.get("symbol", "").upper().replace("USDT", "")
+            if sym:
+                syms.add(sym)
+    up = text.upper()
+    for s in sorted(syms, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(s) + r"\b", up):
+            return s
+    return None
 
-    # Mulai/lanjutkan percakapan terikat ke message ini
+
+def _resolve_context(message_id, user_msg: str, replied_text: str) -> Optional[dict]:
+    """
+    Tentukan konteks diskusi:
+      1. sinyal terdaftar untuk message yang di-reply
+      2. sinyal terakhir untuk coin yang disebut user / di pesan bot
+      3. konteks ringan dari isi pesan bot yang di-reply
+    """
+    ctx = get_signal_for_message(message_id) if message_id else None
+    if ctx:
+        return ctx
+    coin = _guess_coin(user_msg) or _guess_coin(replied_text or "")
+    if coin:
+        sig = find_latest_signal(coin)
+        if sig:
+            return sig
+    if replied_text:
+        return {"symbol": coin or "?", "summary": replied_text, "_light": True}
+    return None
+
+
+def _discuss(ctx: dict, user_msg: str, chat_id: str,
+             ai_fn: Callable[[str], str], send_fn: Callable[..., None],
+             replied_text: str = None) -> None:
+    """Inti diskusi: bangun prompt grounded, jawab, sambung thread, usulkan rule."""
+    is_full = bool(ctx and ctx.get("component_scores"))
+
     convo = _get_convo(chat_id)
-    if convo.get("message_id") != str(message_id):
-        start_convo(chat_id, message_id, signal)
+    if (not convo.get("context")) or convo.get("symbol") != (ctx or {}).get("symbol"):
+        start_convo(chat_id, None, ctx or {})
 
     append_turn(chat_id, "user", user_msg)
 
-    style_rules = get_style_rules()
-    prompt = build_discussion_prompt(signal, get_history(chat_id), user_msg, style_rules)
-
+    prompt = build_discussion_prompt(ctx, get_history(chat_id), user_msg,
+                                     get_style_rules(), replied_text=replied_text)
     try:
         ai_raw = ai_fn(prompt) or ""
     except Exception as e:
-        log.warning(f"discussion ai_fn error: {e}")
+        log.warning(f"discuss ai_fn error: {e}")
         ai_raw = ""
 
     if not ai_raw.strip():
-        send_fn("⚠️ AI tidak merespons. Coba lagi sebentar.", chat_id)
-        return True
+        send_fn("⚠️ AI-nya lagi error, coba lagi bentar ya.", chat_id)
+        return
 
     clean, rule = parse_style_suggestion(ai_raw)
     append_turn(chat_id, "bot", clean)
 
-    # Header penjelasan deterministik hanya di turn pertama
-    if len(get_history(chat_id)) <= 2:
-        send_fn(explain_signal(signal), chat_id)
+    # Penjelasan deterministik hanya di awal & hanya kalau data sinyal lengkap
+    if is_full and len(get_history(chat_id)) <= 2:
+        send_fn(explain_signal(ctx), chat_id)
 
-    send_fn(f"💬 {clean}", chat_id)
+    mid = send_fn(f"💬 {clean}", chat_id)
+    # Daftarkan balasan bot → reply ke jawaban ini lanjut diskusi dengan konteks sama
+    if mid and ctx:
+        try:
+            register_signal_message(mid, ctx)
+        except Exception:
+            pass
 
     if rule:
         set_pending_rule(chat_id, rule)
         send_fn(
-            f"📝 Aku nangkep gaya trading kamu:\n<b>“{rule}”</b>\n\n"
-            f"Simpan jadi aturan biar sinyal berikutnya menyesuaikan? "
-            f"Balas <b>ya</b> atau <b>skip</b>.",
+            f"📝 Gue nangkep gaya trading lo:\n<b>“{rule}”</b>\n\n"
+            f"Simpan biar sinyal berikutnya nyesuaiin? Balas <b>ya</b> / <b>skip</b>.",
             chat_id,
         )
+
+
+def handle_discussion_reply(message_id, user_msg: str, chat_id: str,
+                            ai_fn: Callable[[str], str],
+                            send_fn: Callable[..., None],
+                            replied_text: str = None) -> bool:
+    """
+    Tangani reply user ke pesan bot. Grounded ke sinyal terdaftar / coin yang
+    disebut / isi pesan yang di-reply. Return False hanya kalau benar-benar tidak
+    ada konteks (biar bot bisa fallback).
+    """
+    ctx = _resolve_context(message_id, user_msg, replied_text)
+    if not ctx:
+        return False
+    _discuss(ctx, user_msg, chat_id, ai_fn, send_fn, replied_text=replied_text)
+    return True
+
+
+def handle_followup(user_msg: str, chat_id: str,
+                    ai_fn: Callable[[str], str],
+                    send_fn: Callable[..., None]) -> bool:
+    """Lanjutan diskusi tanpa reply (selama window masih aktif)."""
+    if not is_discussion_active(chat_id):
+        return False
+    ctx = get_context(chat_id)
+    if not ctx:
+        return False
+    _discuss(ctx, user_msg, chat_id, ai_fn, send_fn)
     return True
 
 
