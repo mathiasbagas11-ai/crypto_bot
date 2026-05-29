@@ -107,12 +107,21 @@ def calculate_bb_squeeze(candles: list, period: int = 20, mult: float = 2.0) -> 
         return empty
 
     current_width = widths[-1]
+
+    # Degenerate case: zero variance = maximum compression = squeeze
+    if current_width == 0.0:
+        return {
+            "squeeze": True, "width_pct": 0.0, "bb_width": 0.0,
+            "expanding": False, "squeeze_bars": min(10, len(widths)),
+        }
+
     lookback = widths[-50:] if len(widths) >= 50 else widths
     sorted_w = sorted(lookback)
 
-    # percentile rank of current width in recent history
-    rank = sum(1 for w in sorted_w if w <= current_width)
-    width_percentile = (rank / max(len(sorted_w), 1)) * 100
+    # Percentile rank: what fraction of historical widths is STRICTLY greater?
+    # This gives a "lower is tighter" reading — current_width at 0% = tightest ever.
+    rank = sum(1 for w in sorted_w if w < current_width)
+    width_percentile = (rank / max(len(sorted_w) - 1, 1)) * 100
 
     # squeeze threshold = 20th percentile
     pct20_val = sorted_w[max(0, len(sorted_w) // 5)]
