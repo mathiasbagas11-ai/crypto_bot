@@ -190,6 +190,14 @@ except ImportError:
     SYMBOL_MEMORY_MODULE = False
     logging.getLogger("v13").warning("symbol_memory.py tidak ditemukan — fitur symbol memory dinonaktifkan")
 
+# ── v15: Signal Chat / Discussion + Trading-Style Learning ──────
+try:
+    import signal_chat
+    SIGNAL_CHAT_MODULE = True
+except ImportError:
+    SIGNAL_CHAT_MODULE = False
+    logging.getLogger("v15").warning("signal_chat.py tidak ditemukan — diskusi sinyal dinonaktifkan")
+
 # ── v13: Multi-Exchange Resolver ──────────────
 try:
     from exchange_resolver import (
@@ -4394,20 +4402,22 @@ def _sanitize_ai_output(text: str) -> str:
     return text.strip()
 
 def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
+    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None)."""
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
-        return
+        return None
 
     target = chat_id or TELEGRAM_CHAT_ID
     if not target:
         log.warning("No chat_id for Telegram!")
-        return
+        return None
 
     html_message = _md_to_html(message)
 
     max_len = 4000
     chunks  = [html_message[i:i+max_len] for i in range(0, len(html_message), max_len)]
 
+    first_message_id = None
     for chunk in chunks:
         sent = False
         # Coba kirim HTML dulu
@@ -4420,6 +4430,11 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
                 )
                 if r.status_code == 200:
                     log.info("✅ Telegram sent OK (HTML)")
+                    if first_message_id is None:
+                        try:
+                            first_message_id = r.json()["result"]["message_id"]
+                        except Exception:
+                            pass
                     sent = True
                     break
                 elif r.status_code == 400:
@@ -4444,12 +4459,19 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
                 )
                 if r.status_code == 200:
                     log.info("✅ Telegram sent OK (plain fallback)")
+                    if first_message_id is None:
+                        try:
+                            first_message_id = r.json()["result"]["message_id"]
+                        except Exception:
+                            pass
                 else:
                     log.warning(f"Telegram plain fallback error {r.status_code}: {r.text[:80]}")
             except Exception as e:
                 log.error(f"Telegram plain fallback exception: {e}")
 
         time.sleep(0.5)
+
+    return first_message_id
 
 
 
@@ -5815,6 +5837,25 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
     return True
 
 
+def _signal_chat_ai(prompt: str) -> str:
+    """AI call untuk diskusi sinyal — kirim prompt penuh (Groq → Gemini → Claude)."""
+    if GROQ_API_KEY:
+        out = _groq_request([{"role": "user", "content": prompt}],
+                            max_tokens=900, temperature=0.6)
+        if out:
+            return out
+    if GEMINI_API_KEY:
+        out = _gemini_request({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 900},
+        })
+        if out:
+            return out
+    if ANTHROPIC_API_KEY:
+        return claude_free_ask(prompt) or ""
+    return ""
+
+
 def handle_ask_command(question: str, chat_id: str):
     if not question.strip():
         send_telegram("❓ Format: `/ask <pertanyaan>` — contoh: `/ask apa itu order block?`", chat_id)
@@ -5956,6 +5997,14 @@ def handle_help_command(chat_id: str):
         "  confluence + prepump + predump + scalp + swing\n"
         "Divalidasi backtest 7 hari → kalau bagus, langsung kirim.\n"
         "Threshold: master score >= 75 + backtest profit factor >= 1.0\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 *DISKUSI SINYAL & GAYA TRADING* _(v15 baru!)_\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "❓ `/why [BTC]` — Kenapa sinyal ini? (indikator pendorong + saran sesuai gaya kamu)\n"
+        "💬 *Reply* ke pesan sinyal → diskusi bolak-balik soal entry\n"
+        "   Bot bisa koreksi kamu, kamu bisa koreksi bot.\n"
+        "🎚️ `/style` — Lihat gaya trading yang dipelajari bot (hapus: `/style del 2`)\n"
+        "   Insight dari diskusi disimpan setelah kamu konfirmasi (ya/skip).\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📝 *TRADE JOURNAL*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6345,6 +6394,25 @@ def process_update(update: dict):
     elif text_lower.startswith("/security"):
         send_telegram(get_security_status(), chat_id)
 
+    # ── v15: Signal discussion + trading-style ───
+    elif text_lower.startswith("/why"):
+        if SIGNAL_CHAT_MODULE:
+            parts = text.split(maxsplit=1)
+            sym   = parts[1].strip() if len(parts) > 1 else None
+            threading.Thread(
+                target=signal_chat.handle_why,
+                args=(sym, chat_id, _signal_chat_ai, send_telegram),
+                daemon=True).start()
+        else:
+            send_telegram("⚠️ signal_chat.py tidak tersedia.", chat_id)
+
+    elif text_lower.startswith("/style"):
+        if SIGNAL_CHAT_MODULE:
+            parts = text.split(maxsplit=1)
+            signal_chat.handle_style_command(parts[1] if len(parts) > 1 else "", chat_id, send_telegram)
+        else:
+            send_telegram("⚠️ signal_chat.py tidak tersedia.", chat_id)
+
     elif text_lower.startswith("/help") or text_lower.startswith("/start"):
         handle_help_command(chat_id)
 
@@ -6355,6 +6423,23 @@ def process_update(update: dict):
             args=(text, chat_id),
             daemon=True
         ).start()
+
+    # v15: Reply ke pesan sinyal → diskusi (harus di atas free-form)
+    elif (SIGNAL_CHAT_MODULE
+          and message.get("reply_to_message")
+          and signal_chat.get_signal_for_message(
+              message.get("reply_to_message", {}).get("message_id")) is not None):
+        reply_id = message["reply_to_message"]["message_id"]
+        threading.Thread(
+            target=signal_chat.handle_discussion_reply,
+            args=(reply_id, text, chat_id, _signal_chat_ai, send_telegram),
+            daemon=True).start()
+
+    # v15: Jawaban ya/skip untuk usulan aturan gaya trading
+    elif (SIGNAL_CHAT_MODULE
+          and signal_chat.has_pending_rule(chat_id)
+          and signal_chat.is_confirm_answer(text)):
+        signal_chat.handle_confirm(text, chat_id, send_telegram)
 
     # Direct coin name → analyze
     elif len(text.split()) == 1 and text.upper().replace("USDT", "") in TICKER_TO_BINANCE:
@@ -7169,9 +7254,10 @@ def run_scan(manual: bool = False, chat_id: str = None):
         tracker_fn = on_signal_sent if TRACKER_MODULE else None
         # Kirim confirmed signal ke chat yang sama dengan peminta scan
         _confirmed_send = (lambda msg, cid=chat_id: send_telegram(msg, cid)) if (manual and chat_id) else send_telegram
+        _register_fn = signal_chat.register_signal_message if SIGNAL_CHAT_MODULE else None
         threading.Thread(
             target=run_confirmed_signal_scan,
-            args=(enriched_coins, _confirmed_send, tracker_fn),
+            args=(enriched_coins, _confirmed_send, tracker_fn, _register_fn),
             daemon=True
         ).start()
         log.info(f"🔬 Confirmed signal scan started ({len(enriched_coins)} coins) in background")

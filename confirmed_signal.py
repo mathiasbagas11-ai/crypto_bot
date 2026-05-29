@@ -1053,6 +1053,7 @@ def run_confirmed_signal_scan(
     coins_data: list,
     send_telegram_fn,
     tracker_on_signal_sent=None,
+    register_signal_fn=None,
 ):
     """
     Dipanggil di run_scan() setelah screen_coins().
@@ -1102,8 +1103,15 @@ def run_confirmed_signal_scan(
 
             # Kirim ke Telegram
             msg = format_confirmed_signal_message(signal)
-            send_telegram_fn(msg)
+            msg_id = send_telegram_fn(msg)
             confirmed_count += 1
+
+            # v15: daftarkan message_id → signal supaya bisa didiskusikan via reply
+            if register_signal_fn:
+                try:
+                    register_signal_fn(msg_id, signal)
+                except Exception as e:
+                    log.debug(f"register_signal_fn error: {e}")
 
             # Track ke signal_tracker kalau tersedia
             if tracker_on_signal_sent:

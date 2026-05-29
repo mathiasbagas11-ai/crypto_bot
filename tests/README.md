@@ -37,6 +37,11 @@ The suite targets the high-value, pure-logic units across three tiers.
 | `exchange_resolver.py` | `test_exchange_resolver.py` | `resolve_symbol` normalization + fallback, `_klines_*` parsing/normalization |
 | `signal_tracker.py` | `test_signal_tracker.py` | `check_pending_signals` TP/SL/timeout, conservative SL-first resolution |
 
+### Feature — signal discussion & trading-style learning (v15)
+| Module | File | What's covered |
+|--------|------|----------------|
+| `signal_chat.py` | `test_signal_chat.py` | component classification & `explain_signal`, prompt building, `[STYLE:]` marker parsing, signal↔message mapping, style store add/dedup/remove, discussion-reply orchestration, confirm-to-save flow |
+
 ## Conventions
 
 - Tests are offline: network (`requests`, exchange/price fetches) and state
