@@ -741,8 +741,8 @@ def gemini_free_ask(question: str) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ GEMINI_API_KEY belum diset di .env"
 
-    prompt = f"""Kamu adalah asisten crypto trading ahli SMC, technical analysis, dan fundamental crypto.
-Jawab dalam Bahasa Indonesia, singkat dan padat (max 5 kalimat):
+    prompt = f"""Lo asisten trading crypto pribadi-nya user, ngobrol santai kayak temen yang jago (boleh 'gue/lo').
+Jawab Bahasa Indonesia, langsung ke poin & spesifik, maksimal 5 kalimat. Jangan ngasih definisi/teori dasar kecuali diminta:
 
 {question}"""
 
@@ -949,8 +949,10 @@ def groq_free_ask(question: str) -> str:
     if not GROQ_API_KEY:
         return ""
 
-    system_msg = ("Kamu adalah asisten crypto trading profesional ahli SMC, technical analysis, "
-                  "fundamental crypto, dan DeFi. Jawab dalam Bahasa Indonesia, komprehensif dan actionable.")
+    system_msg = ("Lo asisten trading crypto pribadi-nya user, ngobrol santai kayak temen yang "
+                  "jago (boleh 'gue/lo'). Jawab Bahasa Indonesia, langsung ke poin & spesifik, "
+                  "maksimal ~5 kalimat. JANGAN ngasih definisi/teori dasar kecuali diminta — "
+                  "fokus jawab pertanyaannya. Jujur kalau nggak yakin.")
     result = _groq_request(
         messages=[
             {"role": "system", "content": system_msg},
@@ -6001,7 +6003,8 @@ def handle_help_command(chat_id: str):
         "💬 *DISKUSI SINYAL & GAYA TRADING* _(v15 baru!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "❓ `/why [BTC]` — Kenapa sinyal ini? (indikator pendorong + saran sesuai gaya kamu)\n"
-        "💬 *Reply* ke pesan sinyal → diskusi bolak-balik soal entry\n"
+        "💬 *Reply* ke pesan bot mana aja → diskusi nyambung soal coin/sinyal itu\n"
+        "   Lanjut ngobrol tanpa reply juga bisa; ketik `/done` kalau udah.\n"
         "   Bot bisa koreksi kamu, kamu bisa koreksi bot.\n"
         "🎚️ `/style` — Lihat gaya trading yang dipelajari bot (hapus: `/style del 2`)\n"
         "   Insight dari diskusi disimpan setelah kamu konfirmasi (ya/skip).\n\n"
@@ -6424,26 +6427,38 @@ def process_update(update: dict):
             daemon=True
         ).start()
 
-    # v15: Reply ke pesan sinyal → diskusi (harus di atas free-form)
-    elif (SIGNAL_CHAT_MODULE
-          and message.get("reply_to_message")
-          and signal_chat.get_signal_for_message(
-              message.get("reply_to_message", {}).get("message_id")) is not None):
-        reply_id = message["reply_to_message"]["message_id"]
-        threading.Thread(
-            target=signal_chat.handle_discussion_reply,
-            args=(reply_id, text, chat_id, _signal_chat_ai, send_telegram),
-            daemon=True).start()
-
-    # v15: Jawaban ya/skip untuk usulan aturan gaya trading
+    # v15: Jawaban ya/skip untuk usulan aturan gaya trading (prioritas)
     elif (SIGNAL_CHAT_MODULE
           and signal_chat.has_pending_rule(chat_id)
           and signal_chat.is_confirm_answer(text)):
         signal_chat.handle_confirm(text, chat_id, send_telegram)
 
+    # v15: /done → tutup diskusi yang sedang aktif
+    elif (SIGNAL_CHAT_MODULE and text_lower in ("/done", "selesai", "cukup", "udahan")
+          and signal_chat.is_discussion_active(chat_id)):
+        signal_chat.end_convo(chat_id)
+        send_telegram("👍 Oke, diskusi ditutup. Reply sinyal mana aja kalau mau bahas lagi.", chat_id)
+
+    # v15: Reply ke pesan BOT → diskusi grounded (di atas free-form)
+    elif (SIGNAL_CHAT_MODULE
+          and message.get("reply_to_message", {}).get("from", {}).get("is_bot")):
+        replied = message["reply_to_message"]
+        threading.Thread(
+            target=signal_chat.handle_discussion_reply,
+            args=(replied.get("message_id"), text, chat_id, _signal_chat_ai,
+                  send_telegram, replied.get("text", "")),
+            daemon=True).start()
+
     # Direct coin name → analyze
     elif len(text.split()) == 1 and text.upper().replace("USDT", "") in TICKER_TO_BINANCE:
         threading.Thread(target=handle_analyze_command, args=(text.strip(), chat_id), daemon=True).start()
+
+    # v15: Lanjutan diskusi aktif (tanpa reply, dalam window) → diskusi
+    elif SIGNAL_CHAT_MODULE and signal_chat.is_discussion_active(chat_id):
+        threading.Thread(
+            target=signal_chat.handle_followup,
+            args=(text, chat_id, _signal_chat_ai, send_telegram),
+            daemon=True).start()
 
     # Free-form question → Gemini
     elif len(text) > 3:

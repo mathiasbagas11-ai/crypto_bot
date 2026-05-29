@@ -197,7 +197,65 @@ def test_discussion_reply_ai_silent(store):
     sends = []
     sc.handle_discussion_reply("888", "halo", "chatB",
                                ai_fn=lambda p: "", send_fn=lambda m, c=None: sends.append(m))
-    assert any("tidak merespons" in m for m in sends)
+    assert any("error" in m.lower() for m in sends)
+
+
+def test_discussion_reply_grounds_on_replied_text_when_unregistered(store):
+    # No registered signal & no coin in history, but the bot's replied message
+    # text is available -> should still ground the discussion on it.
+    captured = {}
+    sends = []
+
+    def ai_fn(prompt):
+        captured["prompt"] = prompt
+        return "Gue suruh short Allo karena udah overextended di resistance."
+
+    handled = sc.handle_discussion_reply(
+        "unreg", "kenapa short padahal naik?", "chatC",
+        ai_fn=ai_fn, send_fn=lambda m, c=None: sends.append(m),
+        replied_text="ALLO SHORT — entry 1.2, overextended")
+
+    assert handled is True
+    assert "ALLO SHORT — entry 1.2" in captured["prompt"]   # replied text grounds prompt
+    assert any("overextended" in m for m in sends)
+
+
+def test_discussion_reply_finds_signal_by_coin_mention(store):
+    import json
+    with open(sc.HISTORY_FILE, "w") as f:
+        json.dump([_signal()], f)  # BNBUSDT in history
+    captured = {}
+    sc.handle_discussion_reply(
+        "unreg", "kenapa BNB long?", "chatD",
+        ai_fn=lambda p: captured.setdefault("p", p) or "jawab",
+        send_fn=lambda m, c=None: None,
+        replied_text="")
+    # Grounded on the BNB signal pulled from history (full component context).
+    assert "BNBUSDT" in captured["p"]
+    assert "Indikator pendorong" in captured["p"]
+
+
+def test_persona_is_casual_and_grounded():
+    p = sc.build_discussion_prompt(_signal(), [], "kenapa?", [], replied_text="ALLO short call")
+    assert "gue/lo" in p.lower()           # casual persona
+    assert "ALLO short call" in p          # replied text included
+    assert "[STYLE:" in p
+
+
+def test_followup_continues_active_discussion(store):
+    sc.start_convo("chatE", None, _signal())  # sets context + last_active=now
+    assert sc.is_discussion_active("chatE") is True
+    sends = []
+    handled = sc.handle_followup("terus gimana entrynya?", "chatE",
+                                 ai_fn=lambda p: "masuk pas retest aja.",
+                                 send_fn=lambda m, c=None: sends.append(m))
+    assert handled is True
+    assert any("retest" in m for m in sends)
+
+
+def test_followup_not_active_returns_false(store):
+    assert sc.handle_followup("halo", "chatNobody",
+                              ai_fn=lambda p: "x", send_fn=lambda m, c=None: None) is False
 
 
 # ── orchestration: confirm ───────────────────────────────────────
