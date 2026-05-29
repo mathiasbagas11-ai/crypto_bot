@@ -6856,12 +6856,14 @@ def _check_money_flow_gate(tf_4h: dict, tf_1h: dict, tf_15m: dict, direction: st
 
 
 def _check_entry_mode_gate(trade: dict) -> tuple[bool, str]:
-    """Gate: entry mode harus MOMENTUM_NOW atau RETEST_WAIT dengan zona."""
+    """Gate: entry mode harus MOMENTUM_NOW, SNIPER_ENTRY, atau RETEST_WAIT dengan zona."""
     if not trade:
         return False, "No trade plan"
     em = trade.get("entry_mode", "")
     if em == "MOMENTUM_NOW":
         return True, "MOMENTUM_NOW — entry market sekarang"
+    if em == "SNIPER_ENTRY":
+        return True, "SNIPER_ENTRY — price di zone + candle confirmed 🎯"
     if em == "RETEST_WAIT":
         cz = trade.get("confirmation_zone")
         if cz and cz.get("bottom") and cz.get("top"):
@@ -6876,13 +6878,18 @@ def _build_gated_signal_message(
     trade: dict, oi_data: dict,
     confluence: dict, mf_reasons: list,
     gate_reasons: list,
-    alert_type: str = "SETUP"  # "SETUP" | "ENTRY_NOW"
+    alert_type: str = "SETUP",  # "SETUP" | "ENTRY_NOW"
+    tf_4h: dict = None, tf_1h: dict = None, tf_15m: dict = None,
 ) -> str:
     """
     Build pesan signal yang sudah lolos semua gate.
     alert_type SETUP = pertama kali setup terdeteksi
     alert_type ENTRY_NOW = price masuk retest zone (notif kedua)
+    v14: tambah market regime + candle structure section
     """
+    tf_4h  = tf_4h  or {}
+    tf_1h  = tf_1h  or {}
+    tf_15m = tf_15m or {}
     ts  = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
     sym = symbol.replace("USDT", "")
     dir_emoji = "🟢" if direction in ("LONG", "PUMP") else "🔴"
@@ -6924,7 +6931,13 @@ def _build_gated_signal_message(
         "─── TRADE PLAN ───",
     ]
 
-    if entry_mode == "MOMENTUM_NOW":
+    if entry_mode == "SNIPER_ENTRY":
+        lines.append(f"🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
+        for ctx in trade.get("momentum_context", [])[:2]:
+            lines.append(f"   ↳ {ctx}")
+        lines.append(f"⚡ Entry  : <code>{_f(trade.get('entry', price))}</code> ← SEKARANG")
+        lines.append(f"   SL ketat: 1x ATR di bawah zone bottom")
+    elif entry_mode == "MOMENTUM_NOW":
         lines.append(f"🚀 <b>ENTRY NOW</b> — Momentum confirmed")
         for ctx in trade.get("momentum_context", [])[:2]:
             lines.append(f"   ↳ {ctx}")
@@ -6938,8 +6951,13 @@ def _build_gated_signal_message(
             lines.append(f"⏳ <b>TUNGGU RETEST</b> ke zona: <b>{_fmt_zone(cz.get('bottom',0), cz.get('top',0))}</b>")
             lines.append(f"   Sumber zone: {cz.get('source','?')}")
         lines.append(f"🎯 Entry  : <code>{_f(trade.get('entry', price))}</code> ← LIMIT")
-        conf_word = "bullish engulfing/pin bar 15M" if "LONG" in direction or "PUMP" in direction else "bearish engulfing/pin bar 15M"
-        lines.append(f"✅ Konfirmasi: {conf_word} + vol ≥1.5x")
+        # v14: tunjukkan candle pattern spesifik dari 15M kalau ada
+        cp15 = tf_15m.get("candle_patterns", {})
+        if cp15.get("pattern") not in (None, "NONE"):
+            lines.append(f"✅ Konfirmasi: {cp15['detail']} + vol ≥1.5x")
+        else:
+            conf_word = "bullish engulfing/pin bar 15M" if "LONG" in direction or "PUMP" in direction else "bearish engulfing/pin bar 15M"
+            lines.append(f"✅ Konfirmasi: {conf_word} + vol ≥1.5x")
 
     lines += [
         f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}",
@@ -6952,6 +6970,67 @@ def _build_gated_signal_message(
 
     for r in gate_reasons:
         lines.append(f"  ✅ {r}")
+
+    # ── v14: MARKET STRUCTURE SECTION ─────────────────────────
+    # Regime + Candle Pattern + Entry Zone Quality
+    _regime      = confluence.get("regime") or tf_4h.get("market_regime", {}).get("regime", "")
+    _cp15        = tf_15m.get("candle_patterns", {})
+    _cp1h        = tf_1h.get("candle_patterns", {})
+    _sb          = tf_1h.get("sudden_breakout", {}) or tf_4h.get("sudden_breakout", {})
+    _vc          = tf_1h.get("volume_coil", {})
+    _bb_sq       = tf_4h.get("bb_squeeze", {})
+    _ext         = confluence.get("entry_extended", False)
+    _near_zone   = confluence.get("nearest_zone_pct")
+    _adx         = tf_4h.get("market_regime", {}).get("adx", 0) or tf_4h.get("adx", 0)
+
+    _regime_emoji = {
+        "BULLISH_TREND": "📈", "BEARISH_TREND": "📉",
+        "BB_SQUEEZE": "🔵", "RANGING": "↔️",
+        "BREAKOUT_UP": "🚀", "BREAKOUT_DOWN": "🔻",
+        "VOLATILE": "⚡", "WEAK_TREND": "〰️",
+    }.get(_regime, "❓")
+
+    struct_lines = []
+
+    if _regime and _regime != "UNKNOWN":
+        adx_str = f" | ADX {_adx:.0f}" if _adx else ""
+        struct_lines.append(f"  {_regime_emoji} Regime   : <b>{_regime}</b>{adx_str}")
+
+    # Candle pattern 15M
+    if _cp15.get("pattern") not in (None, "NONE"):
+        pat_emoji = "🟢" if _cp15.get("direction") == "BULLISH" else "🔴" if _cp15.get("direction") == "BEARISH" else "⚪"
+        struct_lines.append(f"  {pat_emoji} 15M Candle: <b>{_cp15['pattern']}</b> — {_cp15['detail']}")
+    # Candle pattern 1H (secondary)
+    if _cp1h.get("pattern") not in (None, "NONE"):
+        pat_emoji1 = "🟢" if _cp1h.get("direction") == "BULLISH" else "🔴" if _cp1h.get("direction") == "BEARISH" else "⚪"
+        struct_lines.append(f"  {pat_emoji1} 1H Candle : {_cp1h['pattern']}")
+
+    # BB Squeeze
+    if _bb_sq.get("squeeze"):
+        sq_bars = _bb_sq.get("squeeze_bars", 0)
+        struct_lines.append(f"  🔵 BB Squeeze: {sq_bars} bar — coiling sebelum breakout")
+
+    # Volume coil
+    if _vc.get("coiling") and _vc.get("spike_detected"):
+        struct_lines.append(f"  🌊 Vol Coil: spring release {_vc.get('vol_ratio',1):.1f}x — momentum akselerasi")
+    elif _vc.get("coiling"):
+        struct_lines.append(f"  🔍 Vol Coil: {_vc.get('compression_bars',0)} bar declining — akumulasi silent")
+
+    # Sudden breakout
+    if _sb.get("sudden_breakout"):
+        sb_dir = "🚀" if _sb.get("direction") == "UP" else "🔻"
+        struct_lines.append(f"  {sb_dir} Sudden Breakout: vol {_sb.get('vol_spike',1):.1f}x, +{_sb.get('range_break_pct',0):.1f}%")
+
+    # Entry zone quality
+    if _ext:
+        struct_lines.append(f"  ⚠️ Entry Extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
+    elif _near_zone is not None and _near_zone <= 1.0:
+        struct_lines.append(f"  🎯 Sniper Zone: {_near_zone:.1f}% dari key level — presisi tinggi")
+
+    if struct_lines:
+        lines.append("")
+        lines.append("─── MARKET STRUCTURE ───")
+        lines.extend(struct_lines)
 
     # Money flow summary
     if mf_reasons:
@@ -7312,7 +7391,8 @@ def run_gated_scan():
                 master_score=raw_master, confidence=confidence_label,
                 trade=trade, oi_data=oi, confluence=confluence,
                 mf_reasons=mf_all_reasons, gate_reasons=gate_reasons,
-                alert_type="SETUP"
+                alert_type="SETUP",
+                tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
             )
 
             # v14: Groq AI insight — append sebelum dikirim
