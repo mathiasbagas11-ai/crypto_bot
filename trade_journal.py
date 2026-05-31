@@ -209,7 +209,10 @@ def _setup_dashboard(spreadsheet):
             return f
 
         # ── Formulas ────────────────────────────────────────────
-        F_SALDO        = "=IFERROR(INDEX(Balance!D2:D10000,COUNTA(Balance!D2:D10000)),0)"
+        # Saldo = Initial Balance + SUM semua PnL dari Trades
+        # Lebih akurat daripada ambil entry terakhir Balance sheet
+        F_INIT_BAL     = '=IFERROR(SUMIF(Balance!B2:B10000,"INITIAL BALANCE",Balance!D2:D10000),0)'
+        F_SALDO        = '=IFERROR(ROUND(SUMIF(Balance!B2:B10000,"INITIAL BALANCE",Balance!D2:D10000)+SUM(Trades!H2:H10000),2),0)'
         F_TOTAL        = "=COUNTA(Trades!A2:A10000)"
         F_WIN          = '=COUNTIF(Trades!J2:J10000,"WIN")'
         F_LOSS         = '=COUNTIF(Trades!J2:J10000,"LOSS")'
@@ -260,14 +263,14 @@ def _setup_dashboard(spreadsheet):
             ["Semua angka otomatis update dari bot Telegram", "", "", "", "", "", "", "", ""],
             # Row 3: spacer
             [""] * NC,
-            # Row 4: KPI LABELS row  (6 KPI: Saldo | Total PnL | Win Rate | Profit Factor | Best | Worst)
-            ["💰 SALDO", "", "📈 TOTAL P&L", "", "🎯 WIN RATE", "", "⚡ PROFIT FACTOR", "", ""],
+            # Row 4: KPI LABELS row
+            ["💰 SALDO SEKARANG", "", "🏦 MODAL AWAL", "", "📈 TOTAL P&L", "", "🎯 WIN RATE", "", ""],
             # Row 5: KPI VALUES row
-            [F_SALDO, "", F_PNL, "", F_WR, "", F_PF, "", ""],
+            [F_SALDO, "", F_INIT_BAL, "", F_PNL, "", F_WR, "", ""],
             # Row 6: KPI labels row 2
-            ["🏆 BEST TRADE", "", "💔 WORST TRADE", "", "↔️ LONG vs SHORT", "", "📊 TOTAL TRADES", "", ""],
+            ["⚡ PROFIT FACTOR", "", "🏆 BEST TRADE", "", "💔 WORST TRADE", "", "📊 TOTAL TRADES", "", ""],
             # Row 7: KPI values row 2
-            [F_BEST, "", F_WORST, "", F_LS, "", F_TOTAL, "", ""],
+            [F_PF, "", F_BEST, "", F_WORST, "", F_TOTAL, "", ""],
             # Row 8: spacer
             [""] * NC,
             # Row 9: section headers
