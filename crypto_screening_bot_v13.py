@@ -166,6 +166,18 @@ except ImportError:
     TRACKER_MODULE = False
     logging.getLogger("v12").warning("signal_tracker.py tidak ditemukan — auto signal tracking dinonaktifkan")
 
+# ── Manual Trade Manager ──────────────────────
+try:
+    from trade_manager import (
+        record_trade, close_trade, get_active_trades,
+        check_active_trades, format_trade_opened,
+        format_trades_list, format_closed_trade, parse_trade_command,
+    )
+    TRADE_MANAGER_MODULE = True
+except ImportError:
+    TRADE_MANAGER_MODULE = False
+    logging.getLogger("trade").warning("trade_manager.py tidak ditemukan — /trade dinonaktifkan")
+
 # ── v12: Confirmed Entry Signal ───────────────
 try:
     from confirmed_signal import (
@@ -6378,9 +6390,16 @@ def handle_help_command(chat_id: str):
         "💬 `/ask <pertanyaan>` — Tanya crypto ke Gemini\n"
         "📡 `/scan` — Trigger manual scan sekarang\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔬 *BACKTEST ENGINE* _(v12 baru!)_\n"
+        "📈 *MANUAL TRADE MANAGER* _(BARU!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari _(BARU!)_\n"
+        "📌 `/trade BTC LONG 95000 60` — Daftarkan posisi manual\n"
+        "   → Bot hitung SL/TP1/TP2/BE/trailing otomatis (ATR-based)\n"
+        "   → Monitor tiap scan: alert BE, TP1 partial, trailing, SL\n"
+        "🏁 `/close BTC [harga]` — Manual full close + auto-log ke journal\n"
+        "📊 `/trades` — Lihat semua posisi aktif + P&L realtime\n\n"
+        "🔬 *BACKTEST ENGINE*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari\n"
         "   → Rank coins by WR%. Cache dipakai untuk validasi sinyal otomatis\n"
         "📊 `/backtest BTC scalp 30` — Backtest sinyal bot ke data historis\n"
         "   strategies: `scalp` | `swing` | `prepump` | `predump` | `combined`\n"
@@ -6780,6 +6799,85 @@ def process_update(update: dict):
                 "Pastikan `backtest_engine.py` ada di folder yang sama.",
                 chat_id
             )
+
+    # ── Manual Trade Manager ──────────────────────────
+    elif text_lower.startswith("/trade ") or text_lower == "/trade":
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif not args:
+            send_telegram(
+                "📌 <b>Format /trade:</b>\n"
+                "<code>/trade SYMBOL DIRECTION ENTRY [SIZE_USD]</code>\n\n"
+                "Contoh:\n"
+                "<code>/trade BTC LONG 95000 60</code>\n"
+                "<code>/trade ETH SHORT 3200 100</code>\n\n"
+                "Bot akan otomatis hitung SL, TP1, TP2, BE, dan trailing stop.",
+                chat_id
+            )
+        else:
+            def _open_trade():
+                parsed = parse_trade_command(args)
+                if "error" in parsed:
+                    send_telegram(f"❌ {parsed['error']}", chat_id)
+                    return
+                send_telegram(
+                    f"⏳ Menghitung level untuk {parsed['symbol']} (fetch ATR)...", chat_id
+                )
+                trade = record_trade(
+                    parsed["symbol"], parsed["direction"],
+                    parsed["entry"], parsed["size"]
+                )
+                if "error" in trade:
+                    send_telegram(f"❌ {trade['error']}", chat_id)
+                else:
+                    send_telegram(format_trade_opened(trade), chat_id)
+            threading.Thread(target=_open_trade, daemon=True).start()
+
+    elif text_lower.startswith("/close"):
+        parts = text.split(maxsplit=2)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/close SYMBOL [EXIT_PRICE]</code>\n"
+                "Contoh:\n"
+                "<code>/close BTC</code> → close di harga sekarang\n"
+                "<code>/close BTC 96000</code> → close di harga spesifik",
+                chat_id
+            )
+        else:
+            sym_arg   = parts[1].strip().upper()
+            price_arg = None
+            if len(parts) >= 3:
+                try:
+                    price_arg = float(parts[2].replace(",", ""))
+                except ValueError:
+                    send_telegram(f"❌ Harga tidak valid: '{parts[2]}'", chat_id)
+                    return
+            def _close_trade(s=sym_arg, p=price_arg):
+                if not p:
+                    send_telegram(f"⏳ Fetching harga {s}...", chat_id)
+                trade = close_trade(s, p, "MANUAL")
+                if trade is None:
+                    send_telegram(
+                        f"❌ Tidak ada posisi aktif untuk <b>{s}</b>.\n"
+                        f"Lihat posisi aktif dengan /trades",
+                        chat_id
+                    )
+                else:
+                    send_telegram(format_closed_trade(trade), chat_id)
+            threading.Thread(target=_close_trade, daemon=True).start()
+
+    elif text_lower == "/trades":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            def _list_trades():
+                active = get_active_trades()
+                send_telegram(format_trades_list(active), chat_id)
+            threading.Thread(target=_list_trades, daemon=True).start()
 
     elif text_lower.startswith("/liqstatus"):
         parts = text.split(maxsplit=1)
@@ -7799,6 +7897,15 @@ def run_scan(manual: bool = False, chat_id: str = None):
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
             log.warning(f"Signal tracker on_scan_start error: {e}")
+
+    # ── Manual Trade Manager: monitor posisi aktif ────
+    if TRADE_MANAGER_MODULE:
+        try:
+            closed = check_active_trades(send_telegram)
+            if closed:
+                log.info(f"📈 Trade manager: {len(closed)} posisi di-close")
+        except Exception as e:
+            log.warning(f"Trade manager check error: {e}")
 
     btc   = get_btc_context()
     coins = screen_coins(manual=manual)
