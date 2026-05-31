@@ -387,6 +387,16 @@ def _multi_indicator_check(candles_1h: list, candles_15m: list, direction: str) 
     - ADX trend strength        : 15pts
     - VWAP bias                 : 10pts
     """
+    # calculate_rsi di-import lokal (sama pola dengan _build_tf_data) untuk
+    # hindari circular import backtest_engine <-> crypto_screening_bot_v13.
+    try:
+        from crypto_screening_bot_v13 import calculate_rsi
+    except ImportError:
+        try:
+            from crypto_screening_bot_v11 import calculate_rsi
+        except ImportError:
+            calculate_rsi = None
+
     closes_1h  = [c["close"] for c in candles_1h]
     closes_15m = [c["close"] for c in candles_15m]
     score = 0; detail = {}; reasons = []
@@ -415,14 +425,15 @@ def _multi_indicator_check(candles_1h: list, candles_15m: list, direction: str) 
             elif macd["macd"]<macd["signal"]: score+=10; reasons.append("🟡 MACD < Signal")
 
     # RSI 15M (replaced StochRSI — research: RSI 54% win rate > StochRSI 51%, less noise)
-    rsi_15m = calculate_rsi(candles_15m)
+    rsi_15m = calculate_rsi(candles_15m) if calculate_rsi else None
     detail["rsi_15m"] = rsi_15m
-    if direction == "LONG":
-        if rsi_15m <= 35:   score += 20; reasons.append(f"✅ RSI 15M oversold ({rsi_15m:.0f})")
-        elif rsi_15m <= 50: score += 8;  reasons.append(f"🟡 RSI 15M building ({rsi_15m:.0f})")
-    else:
-        if rsi_15m >= 65:   score += 20; reasons.append(f"✅ RSI 15M overbought ({rsi_15m:.0f})")
-        elif rsi_15m >= 50: score += 8;  reasons.append(f"🟡 RSI 15M fading ({rsi_15m:.0f})")
+    if rsi_15m is not None:
+        if direction == "LONG":
+            if rsi_15m <= 35:   score += 20; reasons.append(f"✅ RSI 15M oversold ({rsi_15m:.0f})")
+            elif rsi_15m <= 50: score += 8;  reasons.append(f"🟡 RSI 15M building ({rsi_15m:.0f})")
+        else:
+            if rsi_15m >= 65:   score += 20; reasons.append(f"✅ RSI 15M overbought ({rsi_15m:.0f})")
+            elif rsi_15m >= 50: score += 8;  reasons.append(f"🟡 RSI 15M fading ({rsi_15m:.0f})")
 
     # Bollinger Bands (1H)
     bb = _calc_bbands(closes_1h)

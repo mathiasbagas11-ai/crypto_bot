@@ -9,12 +9,16 @@ Bot otomatis hitung:
   - SL (ATR-based 1.5x), Breakeven trigger, TP1 (2x ATR), TP2 (3.5x ATR)
   - Trailing stop aktif setelah TP1 tercapai (trail 1x ATR di bawah high)
 
-Per-scan monitoring:
-  - Price ≥ breakeven trigger → geser SL ke entry, kirim alert
-  - Price ≥ TP1              → ambil 50% profit, SL → entry, aktifkan trailing
-  - Trailing stop tersentuh  → close 50% sisa, log
-  - Price ≥ TP2              → close 50% sisa, log
-  - Price ≤ SL               → full close, log
+Per-scan monitoring (NOTIFY-ONLY, bot tidak auto-close):
+  - Price ≥ breakeven trigger → geser SL ke entry + kirim alert
+  - Price ≥ TP1              → SL → entry, aktifkan trailing + kirim alert
+  - Trailing stop tersentuh  → kirim alert + saran /close
+  - Price ≥ TP2              → kirim alert + saran /close
+  - Price ≤ SL / BE-stop     → kirim alert + saran /close
+
+User yang konfirmasi tutup lewat /close → baru hasil masuk compound + journal/Excel.
+Sizing pakai equity (balance + unrealized PnL posisi aktif) × stake_pct, jadi
+bisa jalan banyak posisi sekaligus.
 
 /close BTC [exit_price]     → user konfirmasi full close manual
 /trades                     → lihat semua posisi aktif + P&L realtime
@@ -112,12 +116,39 @@ def set_stake_pct(pct: float) -> dict:
     return cfg
 
 
-def get_auto_stake() -> Optional[float]:
-    """Return stake size otomatis berdasarkan balance × stake_pct. None kalau belum diset."""
+def _current_equity() -> Optional[float]:
+    """Equity = balance + unrealized PnL semua posisi aktif (buat sizing)."""
     cfg = _load_compound()
     if cfg.get("balance") is None:
         return None
-    stake = cfg["balance"] * cfg["stake_pct"]
+    equity = cfg["balance"]
+    for t in _load():
+        if t.get("status") != "ACTIVE":
+            continue
+        price = _fetch_price(t["symbol"])
+        if price is None:
+            continue
+        entry = t["entry_price"]
+        size  = t["size_usdt"]
+        if not entry or entry <= 0:
+            continue
+        if t["direction"] == "LONG":
+            equity += size * (price - entry) / entry
+        else:
+            equity += size * (entry - price) / entry
+    return equity
+
+
+def get_auto_stake() -> Optional[float]:
+    """Stake otomatis = equity (balance + unrealized PnL posisi aktif) x stake_pct.
+    None kalau balance belum diset."""
+    cfg = _load_compound()
+    if cfg.get("balance") is None:
+        return None
+    equity = _current_equity()
+    if equity is None:
+        return None
+    stake = equity * cfg["stake_pct"]
     return round(max(stake, 1.0), 2)
 
 
@@ -460,16 +491,25 @@ def _log_to_journal(trade: dict):
 
 def check_active_trades(send_telegram_fn=None) -> list:
     """
-    Dipanggil setiap scan loop. Cek semua posisi aktif, kirim alert,
-    update SL/trailing, dan auto-close kalau level tersentuh.
-    Return list trade yang di-close pada scan ini.
+    Dipanggil tiap scan. NOTIFY-ONLY: saat level kena (SL/BE/TP1/TP2/trailing)
+    bot kirim alert + saran /close, TAPI tidak auto-close. User konfirmasi tutup
+    lewat /close SYMBOL -> baru hasil masuk compound + journal/Excel.
+    SL->BE shift & trailing stop tetap di-update di tracking. Alert di-dedup dan
+    di-reset saat harga balik aman. Return list trade yang memicu alert scan ini.
     """
-    trades  = _load()
-    active  = [t for t in trades if t["status"] == "ACTIVE"]
+    trades = _load()
+    active = [t for t in trades if t["status"] == "ACTIVE"]
     if not active:
         return []
 
-    closed_now = []
+    alerted_now = []
+
+    def _send(msg):
+        if send_telegram_fn:
+            try:
+                send_telegram_fn(msg)
+            except Exception as e:
+                log.warning(f"trade alert send failed: {e}")
 
     for trade in active:
         sym   = trade["symbol"]
@@ -486,91 +526,106 @@ def check_active_trades(send_telegram_fn=None) -> list:
         tp2    = trade["tp2"]
         trail  = trade["trail_dist"]
         tp1hit = trade["tp1_hit"]
-        size   = trade["size_usdt"]
+        coin   = sym.replace("USDT", "")
 
         pnl_now = (price - entry) / entry * 100 if direc == "LONG" else (entry - price) / entry * 100
 
-        # ── 1. SL Check (selalu prioritas pertama) ──────
-        sl_triggered = (direc == "LONG" and price <= sl) or \
-                       (direc == "SHORT" and price >= sl)
-
+        # 1. SL / breakeven-stop kena -> notify (TIDAK close)
+        sl_triggered = (direc == "LONG" and price <= sl) or (direc == "SHORT" and price >= sl)
         if sl_triggered:
-            _do_close(trade, price, "SL")
-            closed_now.append(trade)
-            if send_telegram_fn:
-                send_telegram_fn(_fmt_sl_alert(trade, price, pnl_now))
-            _log_to_journal(trade)
+            if not trade.get("alert_sl"):
+                trade["alert_sl"] = True
+                alerted_now.append(trade)
+                tag = "BREAKEVEN STOP" if trade.get("sl_at_be") else "STOP LOSS"
+                _send(
+                    f"\U0001F6D1 <b>{coin} - {tag} KENA</b>\n"
+                    f"{direc} | entry ${entry:,.4f} -> now ${price:,.4f}\n"
+                    f"PnL: {pnl_now:+.2f}%\n"
+                    f"Konfirmasi tutup posisi: <code>/close {coin}</code>"
+                )
             continue
+        else:
+            trade["alert_sl"] = False  # reset kalau harga balik aman
 
-        # ── 2. TP2 / Trailing Stop Check (kalau TP1 sudah hit) ──
+        # 2. Setelah TP1: trailing stop + TP2
         if tp1hit:
-            # Update trailing high/low
             if direc == "LONG":
                 trade["trailing_high"] = max(trade.get("trailing_high") or price, price)
-                new_trail_stop = trade["trailing_high"] - trail
-                trade["trailing_stop"] = new_trail_stop
-                trail_hit = price <= new_trail_stop and not trade["alert_trail"]
+                trade["trailing_stop"] = trade["trailing_high"] - trail
+                trail_hit = price <= trade["trailing_stop"]
             else:
-                trade["trailing_low"] = min(trade.get("trailing_low") or price, price)
-                new_trail_stop = trade["trailing_low"] + trail
-                trade["trailing_stop"] = new_trail_stop
-                trail_hit = price >= new_trail_stop and not trade["alert_trail"]
+                trade["trailing_low"]  = min(trade.get("trailing_low") or price, price)
+                trade["trailing_stop"] = trade["trailing_low"] + trail
+                trail_hit = price >= trade["trailing_stop"]
 
-            # TP2 check
             tp2_hit = (direc == "LONG" and price >= tp2) or (direc == "SHORT" and price <= tp2)
-
-            if tp2_hit and not trade["alert_tp2"]:
-                _do_close(trade, price, "TP2")
-                closed_now.append(trade)
-                if send_telegram_fn:
-                    send_telegram_fn(_fmt_tp2_alert(trade, price))
-                _log_to_journal(trade)
+            if tp2_hit:
+                if not trade.get("alert_tp2"):
+                    trade["alert_tp2"] = True
+                    alerted_now.append(trade)
+                    _send(
+                        f"\U0001F3AF <b>{coin} - TP2 KENA</b>\n"
+                        f"{direc} | now ${price:,.4f} | PnL {pnl_now:+.2f}%\n"
+                        f"Amankan profit: <code>/close {coin}</code>"
+                    )
                 continue
 
             if trail_hit:
-                _do_close(trade, price, "TRAILING_STOP")
-                closed_now.append(trade)
-                trade["alert_trail"] = True
-                if send_telegram_fn:
-                    send_telegram_fn(_fmt_trailing_alert(trade, price, pnl_now))
-                _log_to_journal(trade)
-                continue
+                if not trade.get("alert_trail"):
+                    trade["alert_trail"] = True
+                    alerted_now.append(trade)
+                    _send(
+                        f"\U0001F4C9 <b>{coin} - TRAILING STOP KENA</b>\n"
+                        f"{direc} | now ${price:,.4f} | PnL {pnl_now:+.2f}%\n"
+                        f"trailing stop ${trade['trailing_stop']:,.4f}\n"
+                        f"Konfirmasi tutup: <code>/close {coin}</code>"
+                    )
+            else:
+                trade["alert_trail"] = False  # reset saat harga menjauh dari trailing
+            continue
 
-        # ── 3. TP1 Check (kalau belum hit) ──────────────
-        if not tp1hit:
-            tp1_hit_now = (direc == "LONG" and price >= tp1) or (direc == "SHORT" and price <= tp1)
-
-            if tp1_hit_now and not trade["alert_tp1"]:
+        # 3. Sebelum TP1: cek TP1
+        tp1_hit_now = (direc == "LONG" and price >= tp1) or (direc == "SHORT" and price <= tp1)
+        if tp1_hit_now:
+            if not trade.get("alert_tp1"):
                 trade["tp1_hit"]       = True
                 trade["tp1_hit_price"] = price
                 trade["tp1_hit_time"]  = datetime.now(timezone.utc).isoformat()
-                trade["sl"]            = entry   # geser SL ke breakeven
+                trade["sl"]            = entry      # geser SL ke breakeven
                 trade["sl_at_be"]      = True
-                trade["partial_done"]  = True
-                trade["partial_price"] = price
                 trade["alert_tp1"]     = True
-                # Init trailing
+                trade["alert_sl"]      = False
                 if direc == "LONG":
                     trade["trailing_high"] = price
                     trade["trailing_stop"] = price - trail
                 else:
                     trade["trailing_low"]  = price
                     trade["trailing_stop"] = price + trail
-                if send_telegram_fn:
-                    send_telegram_fn(_fmt_tp1_alert(trade, price))
-                continue
+                alerted_now.append(trade)
+                _send(
+                    f"\u2705 <b>{coin} - TP1 KENA</b>\n"
+                    f"{direc} | now ${price:,.4f} | PnL {pnl_now:+.2f}%\n"
+                    f"\U0001F6E1 SL digeser ke breakeven (${entry:,.4f}), trailing aktif.\n"
+                    f"Ambil partial / tutup penuh: <code>/close {coin}</code>"
+                )
+            continue
 
-            # ── 4. Breakeven trigger ─────────────────────
-            be_hit = (direc == "LONG" and price >= be) or (direc == "SHORT" and price <= be)
-            if be_hit and not trade["sl_at_be"] and not trade["alert_be"]:
-                trade["sl"]       = entry
-                trade["sl_at_be"] = True
+        # 4. Breakeven trigger (sebelum TP1) -> geser SL ke BE + notify
+        be_hit = (direc == "LONG" and price >= be) or (direc == "SHORT" and price <= be)
+        if be_hit and not trade.get("sl_at_be"):
+            trade["sl"]       = entry
+            trade["sl_at_be"] = True
+            if not trade.get("alert_be"):
                 trade["alert_be"] = True
-                if send_telegram_fn:
-                    send_telegram_fn(_fmt_be_alert(trade, price))
+                alerted_now.append(trade)
+                _send(
+                    f"\U0001F6E1 <b>{coin} - BREAKEVEN</b>\n"
+                    f"{direc} | now ${price:,.4f} | PnL {pnl_now:+.2f}%\n"
+                    f"SL diamankan ke entry (${entry:,.4f}). Posisi tetap jalan."
+                )
 
     _save(trades)
-    return closed_now
+    return alerted_now
 
 
 def get_active_trades() -> list:
@@ -611,7 +666,7 @@ def format_trade_opened(trade: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 Entry : <b>${entry:,.4f}</b>\n"
         f"📦 Size  : <b>${size:.2f}</b> ({qty:.6f} {sym})\n\n"
-        f"🎯 <b>TARGETS (partial close 50% di TP1):</b>\n"
+        f"🎯 <b>TARGETS:</b>\n"
         f"   TP1 : <b>${tp1:,.4f}</b> (+{t1pct:.1f}%) — R:R {rr1:.1f}:1\n"
         f"   TP2 : <b>${tp2:,.4f}</b> (+{t2pct:.1f}%) — R:R {rr2:.1f}:1\n\n"
         f"🛡️ <b>RISK MANAGEMENT:</b>\n"
@@ -619,8 +674,9 @@ def format_trade_opened(trade: dict) -> str:
         f"   BE Trigger : <b>${be:,.4f}</b> → SL geser ke entry\n"
         f"   Trailing   : aktif setelah TP1, jarak {trade['trail_dist']:.4f}\n\n"
         f"📐 <i>{meth}</i>\n\n"
-        f"💡 Bot monitor otomatis tiap scan.\n"
-        f"   /close {sym} → manual full close\n"
+        f"💡 Bot monitor tiap scan & kirim alert saat level kena.\n"
+        f"   Tutup posisi kapan saja dengan /close — bot tidak auto-close.\n"
+        f"   /close {sym} → full close (masuk compound + journal)\n"
         f"   /trades → lihat semua posisi aktif"
     )
 

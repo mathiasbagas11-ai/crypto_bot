@@ -7968,9 +7968,9 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── Manual Trade Manager: monitor posisi aktif ────
     if TRADE_MANAGER_MODULE:
         try:
-            closed = check_active_trades(send_telegram)
-            if closed:
-                log.info(f"📈 Trade manager: {len(closed)} posisi di-close")
+            alerts = check_active_trades(send_telegram)
+            if alerts:
+                log.info(f"📈 Trade manager: {len(alerts)} posisi memicu alert (notify-only)")
         except Exception as e:
             log.warning(f"Trade manager check error: {e}")
 
