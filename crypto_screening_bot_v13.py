@@ -120,6 +120,7 @@ try:
         handle_logoutcome_command, handle_lessons_command,
         handle_decisions_command, handle_evolve_command,
         handle_addlesson_command, get_performance_stats_text,
+        analyze_signal_outcomes_daily,
     )
     LEARNING_MODULE = True
 except ImportError:
@@ -1011,44 +1012,56 @@ def groq_signal_insight(
     if not GROQ_API_KEY:
         return ""
 
-    coin  = symbol.replace("USDT", "")
-    s4    = tf_4h.get("structure", {})
-    s1    = tf_1h.get("structure", {})
-    mf4   = tf_4h.get("money_flow", {})
-    mf1   = tf_1h.get("money_flow", {})
-    mf15  = tf_15m.get("money_flow", {})
-    em    = trade.get("entry_mode", "")
-    entry = trade.get("entry", 0)
-    tp1   = trade.get("tp1", 0)
-    sl    = trade.get("sl", 0)
+    coin    = symbol.replace("USDT", "")
+    s4      = tf_4h.get("structure", {})
+    s1      = tf_1h.get("structure", {})
+    mf4     = tf_4h.get("money_flow", {})
+    mf1     = tf_1h.get("money_flow", {})
+    mf15    = tf_15m.get("money_flow", {})
+    cp15    = tf_15m.get("candle_patterns", {})
+    cp1h    = tf_1h.get("candle_patterns", {})
+    em      = trade.get("entry_mode", "")
+    entry   = trade.get("entry", 0)
+    tp1     = trade.get("tp1", 0)
+    sl      = trade.get("sl", 0)
+    is_long = "LONG" in direction or "PUMP" in direction
+    bias_word = "LONG/bullish" if is_long else "SHORT/bearish"
 
-    gate_str = " | ".join(gate_reasons[:3])
+    gate_str  = " | ".join(gate_reasons[:3])
+    cp15_str  = f"{cp15.get('pattern','NONE')} ({cp15.get('direction','-')})" if cp15.get("pattern") not in (None, "NONE") else "tidak ada"
+    cp1h_str  = f"{cp1h.get('pattern','NONE')} ({cp1h.get('direction','-')})" if cp1h.get("pattern") not in (None, "NONE") else "tidak ada"
+
     user_msg = (
-        f"Signal {direction} {coin} lolos semua gate (score {master_score}/100).\n"
-        f"Gate passed: {gate_str}\n"
+        f"Setup {direction} ({bias_word}) {coin}, score {master_score}/100.\n"
+        f"Gate lolos: {gate_str}\n"
         f"Entry mode: {em} | Entry: {entry} | TP1: {tp1} | SL: {sl}\n"
-        f"4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | "
-        f"MF 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
-        f"MF 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
-        f"MF 15M: {mf15.get('bias','?')} | "
-        f"Funding: {oi_data.get('funding_rate','N/A')}% | OI: {oi_data.get('oi_change_pct','N/A')}% | "
-        f"L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | "
-        f"Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')}) | "
-        f"Basis: {oi_data.get('perp_spot_basis','N/A')}%\n\n"
-        f"Dalam 2-3 kalimat Bahasa Indonesia:\n"
-        f"1. Kenapa sinyal ini valid dan layak dieksekusi sekarang (sebutkan alasan paling kuat)\n"
-        f"2. Satu hal yang bisa bikin sinyal ini gagal / level invalidasi\n"
-        f"Jangan ulangi angka yang sudah ada di atas. Langsung ke judgment.\n"
-        f"JANGAN pakai markdown **bold** atau *italic* — cukup plain text dengan emoji."
+        f"Struktur — 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')}\n"
+        f"Money Flow — 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
+        f"1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}\n"
+        f"Candle — 15M: {cp15_str} | 1H: {cp1h_str}\n"
+        f"Derivatif — Funding {oi_data.get('funding_rate','N/A')}% | OI {oi_data.get('oi_change_pct','N/A')}% | "
+        f"L/S {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | "
+        f"Top Trader {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')}) | "
+        f"Basis {oi_data.get('perp_spot_basis','N/A')}%\n\n"
+        f"Kamu reviewer independen — TUGASMU mengkritik, bukan menjual setup. "
+        f"Jawab dalam Bahasa Indonesia, format persis seperti ini (3 baris, tiap baris diawali emoji):\n"
+        f"✅ EDGE: kenapa setup {bias_word} ini punya edge nyata SEKARANG — confluence faktor mana yg paling kuat & saling mendukung (bukan sekadar ngulang data, tapi APA artinya).\n"
+        f"⚠️ KONFLIK: sebutkan faktor yang KONTRA arah trade (mis. candle/MF/struktur TF yg berlawanan). Kalau ada konflik serius, bilang terus terang setup ini lemah. Kalau benar-benar clean, bilang 'tidak ada konflik berarti'.\n"
+        f"🛑 INVALIDASI: di level/kondisi harga SPESIFIK apa thesis ini batal (pakai angka, acuan ke SL {sl} atau level struktur). Bukan jawaban umum 'kalau sentimen berubah'.\n"
+        f"Maksimal 1-2 kalimat per baris. Tajam dan jujur. JANGAN markdown **bold**/*italic* — plain text + emoji saja."
     )
 
     result = _groq_request(
         messages=[
-            {"role": "system", "content": "Kamu trader crypto senior. Jawab singkat, langsung ke poin, Bahasa Indonesia. Plain text, tanpa markdown."},
+            {"role": "system", "content": (
+                "Kamu trader crypto senior yang bertugas sebagai DEVIL'S ADVOCATE untuk setiap setup. "
+                "Kamu tidak takut bilang sebuah sinyal lemah kalau datanya konflik. "
+                "Selalu sebut level harga konkret untuk invalidasi. Bahasa Indonesia, plain text tanpa markdown, langsung ke poin."
+            )},
             {"role": "user",   "content": user_msg},
         ],
-        max_tokens=250,
-        temperature=0.5,
+        max_tokens=320,
+        temperature=0.4,
     )
     return result or ""
 
@@ -7325,12 +7338,17 @@ def _build_gated_signal_message(
             lines.append(f"   Sumber zone: {cz.get('source','?')}")
         lines.append(f"🎯 Entry  : <code>{_f(trade.get('entry', price))}</code> ← LIMIT")
         # v14: tunjukkan candle pattern spesifik dari 15M kalau ada
-        cp15 = tf_15m.get("candle_patterns", {})
-        if cp15.get("pattern") not in (None, "NONE"):
+        # FIX: hanya pakai candle 15M sebagai konfirmasi kalau arahnya SEARAH dgn trade.
+        # Kalau setup SHORT tapi 15M malah bullish engulfing, itu BUKAN konfirmasi —
+        # tampilkan candle yang DIHARAPKAN di retest, bukan candle kontra yang misleading.
+        is_long  = "LONG" in direction or "PUMP" in direction
+        want_dir = "BULLISH" if is_long else "BEARISH"
+        cp15     = tf_15m.get("candle_patterns", {})
+        if cp15.get("pattern") not in (None, "NONE") and cp15.get("direction") == want_dir:
             lines.append(f"✅ Konfirmasi: {cp15['detail']} + vol ≥1.5x")
         else:
-            conf_word = "bullish engulfing/pin bar 15M" if "LONG" in direction or "PUMP" in direction else "bearish engulfing/pin bar 15M"
-            lines.append(f"✅ Konfirmasi: {conf_word} + vol ≥1.5x")
+            conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
+            lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
 
     lines += [
         f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}",
@@ -8405,10 +8423,17 @@ if __name__ == "__main__":
         scheduler.add_job(run_btall_scheduled, "cron", hour=1, minute=0, id="auto_btall")
         threading.Thread(target=run_btall_scheduled, daemon=True).start()
 
+    # Daily learning: analyze signal outcomes dan call DeepSeek for recommendations (jam 23:00 UTC)
+    if LEARNING_MODULE:
+        scheduler.add_job(
+            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_telegram),
+            "cron", hour=23, minute=0, id="daily_learning"
+        )
+
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
-        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC"
+        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | Daily-learning=23:00 UTC"
     )
 
     try:
