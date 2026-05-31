@@ -698,7 +698,7 @@ def generate_confirmed_signal(
             # Fetch BTC 4H context untuk validator
             btc_tf4h_ctx = None
             try:
-                from crypto_screening_bot_v12 import analyze_timeframe
+                from crypto_screening_bot_v13 import analyze_timeframe
                 btc_tf4h_ctx = analyze_timeframe("BTCUSDT", "4h")
             except Exception:
                 pass
@@ -773,7 +773,7 @@ def generate_confirmed_signal(
     except Exception as e:
         log.debug(f"Feedback check error: {e}")
     try:
-        from crypto_screening_bot_v12 import calculate_trade_plan
+        from crypto_screening_bot_v13 import calculate_trade_plan
         atr_1h = tf_1h.get("atr", 0)
         bt_dir = "PUMP" if direction == "LONG" else "DUMP"
         trade  = calculate_trade_plan(price, bt_dir, atr_1h, tf_4h, tf_1h, tf_15m)
@@ -1147,17 +1147,26 @@ def run_confirmed_signal_scan(
             if tracker_on_signal_sent:
                 trade = signal.get("trade", {})
                 try:
-                    tracker_on_signal_sent(
-                        symbol          = symbol,
-                        signal_type     = "CONFIRMED",
-                        direction       = signal["direction"],
-                        entry_price     = price,
-                        tp              = float(trade.get("tp1", 0) or 0),
-                        sl              = float(trade.get("sl", 0) or 0),
-                        score           = signal["master_score"],
-                        confluence_level= signal["confidence"],
-                        reasons         = signal.get("reasons", [])[:3],
-                    )
+                    _dir    = signal["direction"]
+                    _tp_val = float(trade.get("tp1", 0) or 0)
+                    _sl_val = float(trade.get("sl", 0) or 0)
+                    _entry  = float(trade.get("entry") or price)
+                    _sane   = (_dir == "LONG"  and _tp_val > _entry) or \
+                              (_dir == "SHORT" and _tp_val < _entry)
+                    if _sane and _tp_val and _sl_val:
+                        tracker_on_signal_sent(
+                            symbol          = symbol,
+                            signal_type     = "CONFIRMED",
+                            direction       = _dir,
+                            entry_price     = _entry,
+                            tp              = _tp_val,
+                            sl              = _sl_val,
+                            score           = signal["master_score"],
+                            confluence_level= signal["confidence"],
+                            reasons         = signal.get("reasons", [])[:3],
+                        )
+                    else:
+                        log.warning(f"⚠️ CONFIRMED sanity fail {symbol}: dir={_dir} entry={_entry} tp={_tp_val}")
                 except Exception as e:
                     log.debug(f"Tracker record error: {e}")
 

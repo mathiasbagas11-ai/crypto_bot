@@ -318,12 +318,12 @@ SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
 SCALP_ALERT_THRESHOLD   = 55      # score >= 55 → auto alert (v14: turun dari 65)
 
-# ── v14: SIGNAL GATE — relaxed untuk lebih banyak signal valid ─────────────
-GATE_MASTER_SCORE_MIN   = 55      # v14: turun dari 65 (formula baru berbasis conf_score)
-GATE_MONEYFLOW_TF_MIN   = 1       # v14: turun dari 2 — cukup 1 TF aligned
+# ── SIGNAL GATE ──────────────────────────────────────────────────────────────
+GATE_MASTER_SCORE_MIN   = 65      # min score buat sinyal lolos — lebih tinggi = lebih selektif
+GATE_MONEYFLOW_TF_MIN   = 2       # minimal 2 TF harus align money flow (4H+1H atau 1H+15M)
 GATE_BT_PF_MIN          = 1.0     # backtest profit factor minimum
 GATE_REQUIRE_ENTRY_MODE = True    # entry mode HARUS jelas (MOMENTUM_NOW atau RETEST_WAIT)
-GATE_COOLDOWN_HOURS     = 2       # v14: turun dari 4 jam
+GATE_COOLDOWN_HOURS     = 4       # cooldown per coin setelah sinyal dikirim
 HEARTBEAT_INTERVAL_HRS  = 4       # interval "no signal" update
 WATCHLIST_THRESHOLD     = 60      # master score ambang batas masuk watchlist
 
@@ -7811,6 +7811,16 @@ def run_gated_scan():
             mf = tf_data.get("money_flow", {})
             for r in mf.get("reasons", [])[:1]:
                 mf_all_reasons.append(f"{tf_name}: {r}")
+
+        # Sanity check: TP harus di arah yang benar sebelum dikirim
+        _trade_tp  = float(trade.get("tp1") or 0)
+        _trade_sl  = float(trade.get("sl") or 0)
+        _trade_dir = "LONG" if pump_dir else "SHORT"
+        _tp_sane   = (_trade_dir == "LONG"  and _trade_tp > price) or \
+                     (_trade_dir == "SHORT" and _trade_tp < price)
+        if not _tp_sane or not _trade_tp or not _trade_sl:
+            log.warning(f"⚠️ TP sanity FAIL {analysis_sym}: dir={_trade_dir} price={price} tp={_trade_tp} — signal dibatalkan")
+            all_pass = False
 
         if all_pass:
             # ── ALL GATES PASSED → SEND ALERT SETUP ──
