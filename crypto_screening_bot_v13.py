@@ -275,6 +275,7 @@ TELEGRAM_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID")
 # Forum topic IDs (optional) — set these when using a supergroup with topics
 TELEGRAM_SIGNALS_TOPIC  = os.getenv("TELEGRAM_SIGNALS_TOPIC_ID")   # sinyal otomatis
 TELEGRAM_REPORTS_TOPIC  = os.getenv("TELEGRAM_REPORTS_TOPIC_ID")   # laporan trade
+TELEGRAM_MARKET_TOPIC   = os.getenv("TELEGRAM_MARKET_TOPIC_ID")    # market update & heartbeat
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
@@ -4925,6 +4926,11 @@ def send_report(message: str):
     tid = int(TELEGRAM_REPORTS_TOPIC) if TELEGRAM_REPORTS_TOPIC else None
     return send_telegram(message, thread_id=tid)
 
+def send_market_update(message: str):
+    """Kirim market update / heartbeat ke topic Market Update (atau default chat)."""
+    tid = int(TELEGRAM_MARKET_TOPIC) if TELEGRAM_MARKET_TOPIC else None
+    return send_telegram(message, thread_id=tid)
+
 
 # ─────────────────────────────────────────────
 # MESSAGE BUILDER — RESTORED RICH FORMAT
@@ -7614,7 +7620,7 @@ def run_gated_scan():
     # ── 0. Signal tracker resolve ──────────────────
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_telegram)
+            resolved = on_scan_start(send_market_update)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -8056,7 +8062,7 @@ def _check_heartbeat(state: dict, signals_sent: int = 0):
             watchlist        = state.get(_WATCHLIST_KEY, {}),
             last_signal_ts   = last_signal[:16].replace("T", " ") if last_signal else "",
         )
-        send_telegram(msg)
+        send_market_update(msg)
         state[_LAST_HB_KEY] = now.isoformat()
         log.info("💓 Heartbeat sent")
 
@@ -8475,7 +8481,7 @@ if __name__ == "__main__":
     # Daily learning: analyze signal outcomes dan call DeepSeek for recommendations (jam 23:00 UTC)
     if LEARNING_MODULE:
         scheduler.add_job(
-            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_telegram),
+            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_market_update),
             "cron", hour=23, minute=0, id="daily_learning"
         )
 
