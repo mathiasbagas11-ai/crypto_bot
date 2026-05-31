@@ -172,6 +172,7 @@ try:
         record_trade, close_trade, get_active_trades,
         check_active_trades, format_trade_opened,
         format_trades_list, format_closed_trade, parse_trade_command,
+        set_balance, set_stake_pct, format_compound_status,
     )
     TRADE_MANAGER_MODULE = True
 except ImportError:
@@ -6393,10 +6394,14 @@ def handle_help_command(chat_id: str):
         "📈 *MANUAL TRADE MANAGER* _(BARU!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📌 `/trade BTC LONG 95000 60` — Daftarkan posisi manual\n"
+        "   `/trade BTC LONG 95000` — tanpa size → auto dari compound balance\n"
         "   → Bot hitung SL/TP1/TP2/BE/trailing otomatis (ATR-based)\n"
         "   → Monitor tiap scan: alert BE, TP1 partial, trailing, SL\n"
         "🏁 `/close BTC [harga]` — Manual full close + auto-log ke journal\n"
-        "📊 `/trades` — Lihat semua posisi aktif + P&L realtime\n\n"
+        "📊 `/trades` — Lihat semua posisi aktif + P&L realtime\n"
+        "📈 `/compound` — Status compound stake (balance + next trade size)\n"
+        "💰 `/balance 500` — Set modal saat ini $500\n"
+        "📊 `/setstake 10` — Set stake 10% per trade dari balance\n\n"
         "🔬 *BACKTEST ENGINE*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari\n"
@@ -6878,6 +6883,68 @@ def process_update(update: dict):
                 active = get_active_trades()
                 send_telegram(format_trades_list(active), chat_id)
             threading.Thread(target=_list_trades, daemon=True).start()
+
+    elif text_lower.startswith("/balance"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/balance &lt;jumlah&gt;</code>\n"
+                "Contoh: <code>/balance 500</code>\n\n"
+                "Gunakan /compound untuk melihat status compound stake.",
+                chat_id
+            )
+        else:
+            try:
+                bal = float(parts[1].replace(",", "").replace("$", ""))
+                if bal <= 0:
+                    raise ValueError
+                cfg = set_balance(bal)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                send_telegram(
+                    f"✅ Balance diset ke <b>${bal:,.2f}</b>\n"
+                    f"📊 Stake per trade ({cfg['stake_pct']*100:.1f}%): <b>${next_stake:,.2f}</b>\n\n"
+                    f"Lihat detail: /compound",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Jumlah tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower.startswith("/setstake"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/setstake &lt;persen&gt;</code>\n"
+                "Contoh: <code>/setstake 10</code> → 10% dari balance per trade\n"
+                "Range: 1% – 50%",
+                chat_id
+            )
+        else:
+            try:
+                pct = float(parts[1].replace("%", ""))
+                if pct <= 0:
+                    raise ValueError
+                cfg = set_stake_pct(pct)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                stake_str = f"${next_stake:,.2f}" if next_stake else "balance belum diset"
+                send_telegram(
+                    f"✅ Stake per trade diset ke <b>{cfg['stake_pct']*100:.1f}%</b>\n"
+                    f"💰 Next trade size: <b>{stake_str}</b>",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Persentase tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower == "/compound":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            send_telegram(format_compound_status(), chat_id)
 
     elif text_lower.startswith("/liqstatus"):
         parts = text.split(maxsplit=1)

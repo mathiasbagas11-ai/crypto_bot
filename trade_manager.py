@@ -33,6 +33,7 @@ from typing import Optional
 log = logging.getLogger("trade_manager")
 
 TRADES_FILE    = "active_trades.json"
+COMPOUND_FILE  = "compound_config.json"
 BINANCE_BASE   = "https://api.binance.com/api/v3"
 BINANCE_FUT    = "https://fapi.binance.com"
 
@@ -44,6 +45,8 @@ DEFAULT_BE_PCT      = 0.010   # 1.0%  (breakeven trigger)
 DEFAULT_TP1_PCT     = 0.040   # 4.0%
 DEFAULT_TP2_PCT     = 0.070   # 7.0%
 DEFAULT_TRAIL_PCT   = 0.020   # 2.0%  (trailing stop distance)
+
+DEFAULT_STAKE_PCT   = 0.10    # 10% of balance per trade
 
 # ─────────────────────────────────────────────
 # I/O
@@ -67,6 +70,100 @@ def _save(trades: list):
                 json.dump(trades, f, indent=2)
         except Exception as e:
             log.error(f"Save trades error: {e}")
+
+
+# ─────────────────────────────────────────────
+# COMPOUND STAKE
+# ─────────────────────────────────────────────
+
+def _load_compound() -> dict:
+    try:
+        if os.path.exists(COMPOUND_FILE):
+            with open(COMPOUND_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"balance": None, "stake_pct": DEFAULT_STAKE_PCT, "total_pnl": 0.0, "trades_closed": 0}
+
+
+def _save_compound(cfg: dict):
+    try:
+        cfg["updated_at"] = datetime.now(timezone.utc).isoformat()
+        with open(COMPOUND_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        log.error(f"Save compound error: {e}")
+
+
+def set_balance(amount: float) -> dict:
+    """Set modal awal / update balance manual."""
+    cfg = _load_compound()
+    cfg["balance"] = round(amount, 2)
+    _save_compound(cfg)
+    return cfg
+
+
+def set_stake_pct(pct: float) -> dict:
+    """Set persentase stake per trade (1–50%). Input dalam persen, e.g. 10 = 10%."""
+    pct = max(1.0, min(50.0, pct))
+    cfg = _load_compound()
+    cfg["stake_pct"] = round(pct / 100, 4)
+    _save_compound(cfg)
+    return cfg
+
+
+def get_auto_stake() -> Optional[float]:
+    """Return stake size otomatis berdasarkan balance × stake_pct. None kalau belum diset."""
+    cfg = _load_compound()
+    if cfg.get("balance") is None:
+        return None
+    stake = cfg["balance"] * cfg["stake_pct"]
+    return round(max(stake, 1.0), 2)
+
+
+def _update_compound_balance(pnl_usdt: float):
+    """Tambah/kurang PnL ke balance setelah trade close."""
+    cfg = _load_compound()
+    if cfg.get("balance") is None:
+        return
+    cfg["balance"]       = round(cfg["balance"] + pnl_usdt, 2)
+    cfg["total_pnl"]     = round(cfg.get("total_pnl", 0.0) + pnl_usdt, 4)
+    cfg["trades_closed"] = cfg.get("trades_closed", 0) + 1
+    _save_compound(cfg)
+    log.info(f"Compound balance updated: +{pnl_usdt:.2f} → ${cfg['balance']:.2f}")
+
+
+def format_compound_status() -> str:
+    cfg  = _load_compound()
+    bal  = cfg.get("balance")
+    pct  = cfg.get("stake_pct", DEFAULT_STAKE_PCT)
+    tpnl = cfg.get("total_pnl", 0.0)
+    cnt  = cfg.get("trades_closed", 0)
+
+    if bal is None:
+        return (
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📈 <b>COMPOUND STAKE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⚠️ Balance belum diset.\n\n"
+            "Set dengan: <code>/balance 500</code>\n"
+            "Set stake %: <code>/setstake 10</code> (default 10%)"
+        )
+
+    next_stake = round(bal * pct, 2)
+    pnl_emoji  = "🟢" if tpnl >= 0 else "🔴"
+
+    return (
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📈 <b>COMPOUND STAKE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 Balance saat ini: <b>${bal:,.2f}</b>\n"
+        f"📊 Stake per trade: <b>{pct*100:.1f}%</b> = <b>${next_stake:,.2f}</b>\n"
+        f"{pnl_emoji} Total PnL: <b>${tpnl:+.2f}</b> ({cnt} trade)\n\n"
+        "💡 <code>/balance &lt;jumlah&gt;</code> — update balance manual\n"
+        "💡 <code>/setstake &lt;%&gt;</code> — ubah persentase stake\n"
+        "💡 <code>/trade BTC LONG 95000</code> — tanpa size → auto dari balance"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -189,7 +286,7 @@ def calculate_levels(symbol: str, direction: str, entry: float, size_usdt: float
 # ─────────────────────────────────────────────
 
 def record_trade(symbol: str, direction: str, entry_price: float,
-                 size_usdt: float = 100.0) -> dict:
+                 size_usdt: Optional[float] = None) -> dict:
     """
     Catat posisi manual yang dibuka user.
     Return trade dict (juga disimpan ke active_trades.json).
@@ -200,6 +297,12 @@ def record_trade(symbol: str, direction: str, entry_price: float,
     direction = direction.upper()
     if direction not in ("LONG", "SHORT"):
         return {"error": f"Direction harus LONG atau SHORT, bukan '{direction}'"}
+
+    # Auto-stake dari compound balance kalau size tidak diberikan
+    if size_usdt is None:
+        size_usdt = get_auto_stake()
+        if size_usdt is None:
+            return {"error": "Size trade tidak diberikan dan compound balance belum diset.\nGunakan /balance <jumlah> atau tulis size: /trade BTC LONG 95000 60"}
 
     levels = calculate_levels(sym, direction, entry_price, size_usdt)
 
@@ -323,6 +426,7 @@ def _do_close(trade: dict, exit_price: float, reason: str):
 
     trade["pnl_usdt"] = round(pnl_usdt, 4)
     trade["pnl_pct"]  = round(pnl_pct, 2)
+    _update_compound_balance(trade["pnl_usdt"])
 
 
 def _log_to_journal(trade: dict):
@@ -694,7 +798,7 @@ def parse_trade_command(args: str) -> dict:
     except ValueError:
         return {"error": f"Entry price tidak valid: '{parts[2]}'"}
 
-    size = 100.0
+    size = None  # None = auto dari compound balance
     if len(parts) >= 4:
         try:
             size = float(parts[3])
@@ -703,7 +807,7 @@ def parse_trade_command(args: str) -> dict:
 
     if entry <= 0:
         return {"error": "Entry price harus > 0"}
-    if size <= 0:
+    if size is not None and size <= 0:
         return {"error": "Size harus > 0"}
     if direc not in ("LONG", "SHORT"):
         return {"error": f"Direction harus LONG atau SHORT, bukan '{direc}'"}
