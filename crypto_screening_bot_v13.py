@@ -425,11 +425,12 @@ def _build_ob_mitigation_context(ob4: dict, ob1: dict, price: float, candles_4h:
         ob_bottom = ob.get("bottom", 0)
         ob_mid    = ob.get("mid", 0)
 
-        # Cek apakah ada candle yang pernah masuk ke dalam zone OB
-        touches = 0
-        for c in candles[-30:]:  # 30 candle terakhir
-            if c["low"] <= ob_top and c["high"] >= ob_bottom:
-                touches += 1
+        # Gunakan touches yang sudah dihitung di detect_order_blocks bila ada,
+        # fallback ke hitung ulang kalau field tidak tersedia
+        if "touches" in ob:
+            touches = ob["touches"]
+        else:
+            touches = sum(1 for c in candles[-30:] if c["low"] <= ob_top and c["high"] >= ob_bottom)
 
         if touches == 0:
             status = "🟢 FRESH (belum pernah disentuh)"
@@ -1479,18 +1480,28 @@ def detect_order_blocks(candles: list) -> dict:
 
         if move_up and c["close"] < c["open"] and current_price > c["high"]:
             if result["bullish_ob"] is None:
+                ob_top_val    = round(c["open"], 6)
+                ob_bottom_val = round(c["close"], 6)
+                touches_bull  = sum(1 for cc in candles[-30:] if cc["low"] <= ob_top_val and cc["high"] >= ob_bottom_val)
                 result["bullish_ob"] = {
-                    "top": round(c["open"], 6), "bottom": round(c["close"], 6),
+                    "top": ob_top_val, "bottom": ob_bottom_val,
                     "mid": round((c["open"]+c["close"])/2, 6),
-                    "distance_pct": round(((current_price-c["close"])/current_price)*100, 2)
+                    "distance_pct": round(((current_price-c["close"])/current_price)*100, 2),
+                    "touches": touches_bull,
+                    "is_fresh": touches_bull <= 1,
                 }
 
         if move_down and c["close"] > c["open"] and current_price < c["low"]:
             if result["bearish_ob"] is None:
+                ob_top_val    = round(c["close"], 6)
+                ob_bottom_val = round(c["open"], 6)
+                touches_bear  = sum(1 for cc in candles[-30:] if cc["low"] <= ob_top_val and cc["high"] >= ob_bottom_val)
                 result["bearish_ob"] = {
-                    "top": round(c["close"], 6), "bottom": round(c["open"], 6),
+                    "top": ob_top_val, "bottom": ob_bottom_val,
                     "mid": round((c["open"]+c["close"])/2, 6),
-                    "distance_pct": round(((c["open"]-current_price)/current_price)*100, 2)
+                    "distance_pct": round(((c["open"]-current_price)/current_price)*100, 2),
+                    "touches": touches_bear,
+                    "is_fresh": touches_bear <= 1,
                 }
 
         if result["bullish_ob"] and result["bearish_ob"]:
@@ -4029,16 +4040,32 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
 
     if ob4.get("bullish_ob"):
         d = ob4["bullish_ob"].get("distance_pct", 999)
-        if d < 5: pump_score += 8; reasons.append(f"✅ 4H: Price near Bullish OB ({d:.1f}% away)")
+        if d < 5:
+            if ob4["bullish_ob"].get("is_fresh", True):
+                pump_score += 8; reasons.append(f"✅ 4H: Price near Bullish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 4H: Bullish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai support")
     if ob4.get("bearish_ob"):
         d = ob4["bearish_ob"].get("distance_pct", 999)
-        if d < 5: dump_score += 8; reasons.append(f"🔴 4H: Price near Bearish OB ({d:.1f}% away)")
+        if d < 5:
+            if ob4["bearish_ob"].get("is_fresh", True):
+                dump_score += 8; reasons.append(f"🔴 4H: Price near Bearish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 4H: Bearish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai resistance")
     if ob1.get("bullish_ob"):
         d = ob1["bullish_ob"].get("distance_pct", 999)
-        if d < 3: pump_score += 5; reasons.append(f"✅ 1H: Price near Bullish OB ({d:.1f}% away)")
+        if d < 3:
+            if ob1["bullish_ob"].get("is_fresh", True):
+                pump_score += 5; reasons.append(f"✅ 1H: Price near Bullish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 1H: Bullish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai support")
     if ob1.get("bearish_ob"):
         d = ob1["bearish_ob"].get("distance_pct", 999)
-        if d < 3: dump_score += 5; reasons.append(f"🔴 1H: Price near Bearish OB ({d:.1f}% away)")
+        if d < 3:
+            if ob1["bearish_ob"].get("is_fresh", True):
+                dump_score += 5; reasons.append(f"🔴 1H: Price near Bearish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 1H: Bearish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai resistance")
 
     oi_chg      = oi_data.get("oi_change_pct")
     ls_bias     = oi_data.get("ls_bias", "UNKNOWN")
@@ -4602,10 +4629,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         if ob4.get("bullish_ob") and ob4["bullish_ob"].get("distance_pct", 999) < 4:
             ob = ob4["bullish_ob"]
-            entry_candidates.append(("4H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 4, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("4H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 4, ob.get("bottom",price), ob.get("top",price)))
         if ob1.get("bullish_ob") and ob1["bullish_ob"].get("distance_pct", 999) < 5:
             ob = ob1["bullish_ob"]
-            entry_candidates.append(("1H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 3, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("1H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 3, ob.get("bottom",price), ob.get("top",price)))
         if fvg15.get("fvg_type") == "BULLISH" and fvg15.get("bullish_fvg"):
             fvg = fvg15["bullish_fvg"]
             if -3 < fvg.get("distance_pct", 999) < 0:
@@ -4691,10 +4720,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         if ob4.get("bearish_ob") and ob4["bearish_ob"].get("distance_pct", 999) < 4:
             ob = ob4["bearish_ob"]
-            entry_candidates.append(("4H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 4, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("4H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 4, ob.get("bottom",price), ob.get("top",price)))
         if ob1.get("bearish_ob") and ob1["bearish_ob"].get("distance_pct", 999) < 5:
             ob = ob1["bearish_ob"]
-            entry_candidates.append(("1H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 3, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("1H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 3, ob.get("bottom",price), ob.get("top",price)))
         if fvg15.get("fvg_type") == "BEARISH" and fvg15.get("bearish_fvg"):
             fvg = fvg15["bearish_fvg"]
             if 0 < fvg.get("distance_pct", 999) < 3:
