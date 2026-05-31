@@ -1563,6 +1563,40 @@ def calculate_ema_series(candles: list, period: int) -> list:
     return series
 
 
+def calculate_macd(candles: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    """MACD(12,26,9) — trend + momentum confirmation. Research: RSI+MACD combo ~77% win rate."""
+    empty = {"macd": None, "signal_line": None, "hist": None, "above": False,
+             "cross_bull": False, "cross_bear": False}
+    if len(candles) < slow + signal:
+        return empty
+    ema_f = calculate_ema_series(candles, fast)
+    ema_s = calculate_ema_series(candles, slow)
+    if not ema_f or not ema_s:
+        return empty
+    # ema_f has len(candles)-fast+1 values; ema_s has len(candles)-slow+1.
+    # offset aligns them to same candle: ema_f[slow-fast + j] vs ema_s[j]
+    offset = slow - fast
+    macd_line = [ema_f[offset + j] - ema_s[j] for j in range(len(ema_s))]
+    if len(macd_line) < signal:
+        return empty
+    k = 2.0 / (signal + 1)
+    sig_series = [float(np.mean(macd_line[:signal]))]
+    for v in macd_line[signal:]:
+        sig_series.append(v * k + sig_series[-1] * (1 - k))
+    m_last = macd_line[-1]
+    m_prev = macd_line[-2] if len(macd_line) > 1 else m_last
+    s_last = sig_series[-1]
+    s_prev = sig_series[-2] if len(sig_series) > 1 else s_last
+    return {
+        "macd":       round(m_last, 8),
+        "signal_line": round(s_last, 8),
+        "hist":       round(m_last - s_last, 8),
+        "above":      (m_last - s_last) > 0,
+        "cross_bull": m_prev < s_prev and m_last >= s_last,
+        "cross_bear": m_prev > s_prev and m_last <= s_last,
+    }
+
+
 # ─────────────────────────────────────────────
 # v13: MONEY FLOW DETECTOR
 # ─────────────────────────────────────────────
@@ -1701,22 +1735,17 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
 
         result["mfi"] = round(mfi, 1)
 
+        # MFI kept for context/display only — score handled by RSI (avoids redundancy)
         if mfi >= 80:
             result["mfi_signal"] = "OVERBOUGHT"
-            score_pts -= 1  # overbought = potential outflow / reversal
-            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought, watch for outflow")
+            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought zone")
         elif mfi <= 20:
             result["mfi_signal"] = "OVERSOLD"
-            score_pts += 1  # oversold = potential inflow / reversal
-            reasons.append(f"💡 MFI: {mfi:.0f} — oversold, watch for inflow")
+            reasons.append(f"💡 MFI: {mfi:.0f} — oversold zone")
         elif mfi >= 60:
             result["mfi_signal"] = "BULLISH"
-            score_pts += 1
-            reasons.append(f"🟢 MFI: {mfi:.0f} — positive money flow dominan")
         elif mfi <= 40:
             result["mfi_signal"] = "BEARISH"
-            score_pts -= 1
-            reasons.append(f"🔴 MFI: {mfi:.0f} — negative money flow dominan")
         else:
             result["mfi_signal"] = "NEUTRAL"
 
@@ -2723,6 +2752,7 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "volume_coil":     detect_volume_coil(closed_candles),
         "sudden_breakout": detect_sudden_breakout(closed_candles),
         "adx":             calculate_adx(closed_candles).get("adx", 0),
+        "macd":            calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count":   len(closed_candles),
     }
@@ -2960,6 +2990,22 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
     elif _div_pp["bear_score"] >= 7:
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bearish Div — momentum downside lebih kuat dari upside")
+
+    # MACD confirmation (research: RSI+MACD combo ~77% win rate)
+    _macd_1h = tf_1h.get("macd", {})
+    _macd_4h = tf_4h.get("macd", {})
+    if _macd_1h.get("cross_bull"):
+        mom_score += 10
+        result["reasons"].append("📈 MACD 1H: Bullish crossover — momentum acceleration dikonfirmasi")
+    elif _macd_1h.get("above") and _macd_4h.get("above"):
+        mom_score += 6
+        result["reasons"].append("✅ MACD: 1H+4H histogram positif — sustained bullish momentum")
+    elif _macd_1h.get("above"):
+        mom_score += 3
+        result["reasons"].append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+    elif _macd_1h.get("cross_bear"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bearish crossover — momentum flip DOWN, hati-hati")
 
     result["momentum_score"] = min(mom_score, 35)
 
@@ -3449,6 +3495,22 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bullish Div — potensi bounce lebih besar dari dump")
 
+    # MACD confirmation (bearish side)
+    _macd_1h_pd = tf_1h.get("macd", {})
+    _macd_4h_pd = tf_4h.get("macd", {})
+    if _macd_1h_pd.get("cross_bear"):
+        mom_score += 10
+        result["reasons"].append("📉 MACD 1H: Bearish crossover — momentum flip DOWN dikonfirmasi")
+    elif not _macd_1h_pd.get("above", True) and not _macd_4h_pd.get("above", True):
+        mom_score += 6
+        result["reasons"].append("🔴 MACD: 1H+4H histogram negatif — sustained bearish momentum")
+    elif not _macd_1h_pd.get("above", True):
+        mom_score += 3
+        result["reasons"].append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
+    elif _macd_1h_pd.get("cross_bull"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bullish crossover — momentum flip UP, kontra dump")
+
     result["momentum_score"] = min(mom_score, 35)
 
     # ── 3. OI + PRICE ACTION + ATR BEARISH ──────
@@ -3832,6 +3894,32 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         else:
             dump_score += 12
             reasons.append(f"⚡ Sudden breakout DOWN (1H): vol {sb_1h['vol_spike']:.1f}x — momentum aktif")
+
+    # ── MACD Momentum Confirmation (research: RSI+MACD ~77% win rate) ──────
+    macd_4h = tf_4h.get("macd", {})
+    macd_1h = tf_1h.get("macd", {})
+    macd_1h_above = macd_1h.get("above", False)
+    macd_4h_above = macd_4h.get("above", False)
+
+    if macd_1h.get("cross_bull"):
+        pump_score += 14
+        reasons.append("📈 MACD 1H: Bullish crossover — momentum flip UP confirmed")
+    elif macd_1h_above and macd_4h_above:
+        pump_score += 8
+        reasons.append(f"✅ MACD 1H+4H: Histogram positif — bullish momentum sustained")
+    elif macd_1h_above:
+        pump_score += 4
+        reasons.append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+
+    if macd_1h.get("cross_bear"):
+        dump_score += 14
+        reasons.append("📉 MACD 1H: Bearish crossover — momentum flip DOWN confirmed")
+    elif not macd_1h_above and not macd_4h_above:
+        dump_score += 8
+        reasons.append(f"🔴 MACD 1H+4H: Histogram negatif — bearish momentum sustained")
+    elif not macd_1h_above:
+        dump_score += 4
+        reasons.append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
 
     rej = tf_15m.get("rejection", {})
     fvg = tf_15m.get("fvg", {})
@@ -5476,6 +5564,16 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "trendline_sup": detect_trendline(closed_candles, "lows"),
         "trendline_res": detect_trendline(closed_candles, "highs"),
         "money_flow": detect_money_flow(closed_candles),
+        "ema9": calculate_ema(closed_candles, 9),
+        "ema21": calculate_ema(closed_candles, 21),
+        "ema50": calculate_ema(closed_candles, 50),
+        "candle_patterns": detect_candle_patterns(closed_candles),
+        "market_regime": detect_market_regime(closed_candles),
+        "bb_squeeze": calculate_bb_squeeze(closed_candles),
+        "volume_coil": detect_volume_coil(closed_candles),
+        "sudden_breakout": detect_sudden_breakout(closed_candles),
+        "adx": calculate_adx(closed_candles).get("adx", 0),
+        "macd": calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count": len(closed_candles),
         "_exchange": exchange,

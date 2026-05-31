@@ -382,7 +382,7 @@ def _multi_indicator_check(candles_1h: list, candles_15m: list, direction: str) 
     Weights:
     - EMA trend stack (9/21/50) : 20pts
     - MACD cross/bias           : 20pts
-    - StochRSI OS/OB            : 20pts
+    - RSI 15M OB/OS             : 20pts  (replaced StochRSI — 54% win rate vs 51%)
     - Bollinger Band touch      : 15pts
     - ADX trend strength        : 15pts
     - VWAP bias                 : 10pts
@@ -414,16 +414,15 @@ def _multi_indicator_check(candles_1h: list, candles_15m: list, direction: str) 
             if macd["cross_bear"]: score+=20; reasons.append("✅ MACD Bear Cross")
             elif macd["macd"]<macd["signal"]: score+=10; reasons.append("🟡 MACD < Signal")
 
-    # Stoch RSI (15M)
-    srsi = _calc_stoch_rsi(closes_15m)
-    detail["stoch_rsi"] = srsi
-    if srsi["k"] is not None:
-        if direction=="LONG":
-            if srsi["oversold"]:  score+=20; reasons.append(f"✅ StochRSI OS ({srsi['k']:.0f})")
-            elif srsi["k"]<40:    score+=8;  reasons.append(f"🟡 StochRSI low ({srsi['k']:.0f})")
-        else:
-            if srsi["overbought"]:score+=20; reasons.append(f"✅ StochRSI OB ({srsi['k']:.0f})")
-            elif srsi["k"]>60:    score+=8;  reasons.append(f"🟡 StochRSI high ({srsi['k']:.0f})")
+    # RSI 15M (replaced StochRSI — research: RSI 54% win rate > StochRSI 51%, less noise)
+    rsi_15m = calculate_rsi(candles_15m)
+    detail["rsi_15m"] = rsi_15m
+    if direction == "LONG":
+        if rsi_15m <= 35:   score += 20; reasons.append(f"✅ RSI 15M oversold ({rsi_15m:.0f})")
+        elif rsi_15m <= 50: score += 8;  reasons.append(f"🟡 RSI 15M building ({rsi_15m:.0f})")
+    else:
+        if rsi_15m >= 65:   score += 20; reasons.append(f"✅ RSI 15M overbought ({rsi_15m:.0f})")
+        elif rsi_15m >= 50: score += 8;  reasons.append(f"🟡 RSI 15M fading ({rsi_15m:.0f})")
 
     # Bollinger Bands (1H)
     bb = _calc_bbands(closes_1h)
