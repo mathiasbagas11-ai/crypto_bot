@@ -469,6 +469,11 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
     Validasi backtest untuk coin.
     Priority: cached /btall result (≤7 hari) → live 7-hari backtest.
     Cached result jauh lebih cepat dan tidak spam API.
+
+    Filosofi: backtest itu untuk MENGUMPULKAN data dulu. Kalau data belum cukup
+    (<BT_MIN_TRADES) → JANGAN blok (insufficient_data=True), biar coin tetap bisa
+    lolos sambil ngumpulin track record. Baru kalau data SUDAH cukup tapi PF jelek
+    → signal ditahan (valid=False).
     """
     # ── 1. Cek cached btall result terlebih dahulu ──
     try:
@@ -487,7 +492,8 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
             )
             log.info(f"  {symbol}: backtest from cache — {reason}")
             return {"valid": valid, "profit_factor": pf, "win_rate": wr,
-                    "trades": n, "strategy": "cached_combined", "reason": reason}
+                    "trades": n, "strategy": "cached_combined",
+                    "insufficient_data": False, "reason": reason}
     except Exception as e:
         log.debug(f"Cache lookup error: {e}")
 
@@ -496,7 +502,8 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
         from backtest_engine import run_backtest
     except ImportError:
         return {"valid": True, "profit_factor": 1.0, "win_rate": 50.0,
-                "strategy": "none", "reason": "backtest_engine unavailable, bypassed"}
+                "strategy": "none", "insufficient_data": True,
+                "reason": "backtest_engine unavailable, bypassed"}
 
     strategies = ["scalp", "prepump"] if direction == "LONG" else ["scalp", "predump"]
     best_result = None
@@ -517,8 +524,10 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
             log.debug(f"Quick BT {strat} error: {e}")
 
     if best_result is None:
+        # Data belum cukup → bypass (lagi ngumpulin data), JANGAN blok.
         return {"valid": True, "profit_factor": 0.0, "win_rate": 0.0,
-                "strategy": "none", "reason": f"Tidak cukup data BT (<{BT_MIN_TRADES} trades)"}
+                "strategy": "none", "insufficient_data": True,
+                "reason": f"Data BT belum cukup (<{BT_MIN_TRADES} trades) — lolos sambil ngumpulin data"}
 
     pf    = best_result.get("profit_factor", 0)
     wr    = best_result.get("win_rate", 0)
@@ -531,7 +540,8 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
         f"BT {strat} {BT_DAYS}d GAGAL: PF={pf:.2f} < {BT_MIN_PROFIT_FACTOR} — signal ditahan"
     )
     return {"valid": valid, "profit_factor": pf, "win_rate": wr,
-            "trades": n, "strategy": strat, "reason": reason}
+            "trades": n, "strategy": strat,
+            "insufficient_data": False, "reason": reason}
 
 
 # ─────────────────────────────────────────────
