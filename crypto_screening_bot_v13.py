@@ -255,6 +255,14 @@ except ImportError:
     LIQ_TRACKER_MODULE = False
     def get_liq_data(symbol): return {}
 
+# ── Supabase Sync ─────────────────────────────
+try:
+    from supabase_sync import push_signal as _push_signal_supa
+    SUPABASE_MODULE = True
+except ImportError:
+    SUPABASE_MODULE = False
+    def _push_signal_supa(s): return False
+
 # ── Glassnode Macro Filter ─────────────────────
 _GLASSNODE_API_KEY = os.environ.get("GLASSNODE_API_KEY", "")
 _glassnode_cache: dict = {}   # {"btc_netflow": {"z": 0.0, "ts": 0}}
@@ -262,8 +270,11 @@ _glassnode_cache: dict = {}   # {"btc_netflow": {"z": 0.0, "ts": 0}}
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID      = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID")
+# Forum topic IDs (optional) — set these when using a supergroup with topics
+TELEGRAM_SIGNALS_TOPIC  = os.getenv("TELEGRAM_SIGNALS_TOPIC_ID")   # sinyal otomatis
+TELEGRAM_REPORTS_TOPIC  = os.getenv("TELEGRAM_REPORTS_TOPIC_ID")   # laporan trade
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
@@ -4820,8 +4831,12 @@ def _sanitize_ai_output(text: str) -> str:
 
     return text.strip()
 
-def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
-    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None)."""
+def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
+                  thread_id: int = None):
+    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None).
+
+    thread_id — message_thread_id untuk forum topic di supergroup.
+    """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
         return None
@@ -4839,12 +4854,15 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
     first_message_id = None
     for chunk in chunks:
         sent = False
+        payload_html = {"chat_id": target, "text": chunk, "parse_mode": "HTML"}
+        if thread_id:
+            payload_html["message_thread_id"] = int(thread_id)
         # Coba kirim HTML dulu
         for attempt in range(3):
             try:
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": chunk, "parse_mode": "HTML"},
+                    json=payload_html,
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4871,9 +4889,12 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
         if not sent:
             try:
                 plain = re.sub(r"<[^>]+>", "", chunk)   # strip HTML tags
+                payload_plain = {"chat_id": target, "text": plain}
+                if thread_id:
+                    payload_plain["message_thread_id"] = int(thread_id)
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": plain},
+                    json=payload_plain,
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4892,6 +4913,17 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
 
     return first_message_id
 
+
+
+def send_signal(message: str):
+    """Kirim sinyal ke topic Signals (atau default chat jika topic tidak diset)."""
+    tid = int(TELEGRAM_SIGNALS_TOPIC) if TELEGRAM_SIGNALS_TOPIC else None
+    return send_telegram(message, thread_id=tid)
+
+def send_report(message: str):
+    """Kirim laporan trade ke topic Reports (atau default chat jika topic tidak diset)."""
+    tid = int(TELEGRAM_REPORTS_TOPIC) if TELEGRAM_REPORTS_TOPIC else None
+    return send_telegram(message, thread_id=tid)
 
 
 # ─────────────────────────────────────────────
@@ -7809,10 +7841,27 @@ def run_gated_scan():
                 except Exception as _ai_e:
                     log.debug(f"Groq signal insight error: {_ai_e}")
 
-            send_telegram(msg)
+            send_signal(msg)
             _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {direction} score={raw_master}")
+
+            # Sync sinyal ke Supabase untuk website
+            if SUPABASE_MODULE:
+                try:
+                    _push_signal_supa({
+                        "coin":        analysis_sym,
+                        "signal_type": "SETUP",
+                        "direction":   "LONG" if pump_dir else "SHORT",
+                        "entry_price": float(trade.get("entry") or price),
+                        "tp":          float(trade.get("tp1", 0)),
+                        "sl":          float(trade.get("sl", 0)),
+                        "score":       raw_master,
+                        "confidence":  confidence_label,
+                        "reason":      "; ".join(gate_reasons[:3]),
+                    })
+                except Exception as _sp_e:
+                    log.debug(f"Supabase signal push error: {_sp_e}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
@@ -8156,7 +8205,7 @@ def run_prepump_auto():
 
     if hot:
         msg = build_prepump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal prepump ke signal tracker ──
         if TRACKER_MODULE:
@@ -8213,7 +8262,7 @@ def run_predump_auto():
 
     if hot:
         msg = build_predump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal predump ke signal tracker ──
         if TRACKER_MODULE:
@@ -8270,7 +8319,7 @@ def run_scalp_auto():
 
     if hot:
         msg = build_scalp_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # Track sinyal scalp ke signal tracker
         if TRACKER_MODULE:
