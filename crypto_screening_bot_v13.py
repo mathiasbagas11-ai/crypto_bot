@@ -166,6 +166,19 @@ except ImportError:
     TRACKER_MODULE = False
     logging.getLogger("v12").warning("signal_tracker.py tidak ditemukan — auto signal tracking dinonaktifkan")
 
+# ── Manual Trade Manager ──────────────────────
+try:
+    from trade_manager import (
+        record_trade, close_trade, get_active_trades,
+        check_active_trades, format_trade_opened,
+        format_trades_list, format_closed_trade, parse_trade_command,
+        set_balance, set_stake_pct, format_compound_status,
+    )
+    TRADE_MANAGER_MODULE = True
+except ImportError:
+    TRADE_MANAGER_MODULE = False
+    logging.getLogger("trade").warning("trade_manager.py tidak ditemukan — /trade dinonaktifkan")
+
 # ── v12: Confirmed Entry Signal ───────────────
 try:
     from confirmed_signal import (
@@ -1563,6 +1576,40 @@ def calculate_ema_series(candles: list, period: int) -> list:
     return series
 
 
+def calculate_macd(candles: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    """MACD(12,26,9) — trend + momentum confirmation. Research: RSI+MACD combo ~77% win rate."""
+    empty = {"macd": None, "signal_line": None, "hist": None, "above": False,
+             "cross_bull": False, "cross_bear": False}
+    if len(candles) < slow + signal:
+        return empty
+    ema_f = calculate_ema_series(candles, fast)
+    ema_s = calculate_ema_series(candles, slow)
+    if not ema_f or not ema_s:
+        return empty
+    # ema_f has len(candles)-fast+1 values; ema_s has len(candles)-slow+1.
+    # offset aligns them to same candle: ema_f[slow-fast + j] vs ema_s[j]
+    offset = slow - fast
+    macd_line = [ema_f[offset + j] - ema_s[j] for j in range(len(ema_s))]
+    if len(macd_line) < signal:
+        return empty
+    k = 2.0 / (signal + 1)
+    sig_series = [float(np.mean(macd_line[:signal]))]
+    for v in macd_line[signal:]:
+        sig_series.append(v * k + sig_series[-1] * (1 - k))
+    m_last = macd_line[-1]
+    m_prev = macd_line[-2] if len(macd_line) > 1 else m_last
+    s_last = sig_series[-1]
+    s_prev = sig_series[-2] if len(sig_series) > 1 else s_last
+    return {
+        "macd":       round(m_last, 8),
+        "signal_line": round(s_last, 8),
+        "hist":       round(m_last - s_last, 8),
+        "above":      (m_last - s_last) > 0,
+        "cross_bull": m_prev < s_prev and m_last >= s_last,
+        "cross_bear": m_prev > s_prev and m_last <= s_last,
+    }
+
+
 # ─────────────────────────────────────────────
 # v13: MONEY FLOW DETECTOR
 # ─────────────────────────────────────────────
@@ -1701,22 +1748,17 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
 
         result["mfi"] = round(mfi, 1)
 
+        # MFI kept for context/display only — score handled by RSI (avoids redundancy)
         if mfi >= 80:
             result["mfi_signal"] = "OVERBOUGHT"
-            score_pts -= 1  # overbought = potential outflow / reversal
-            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought, watch for outflow")
+            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought zone")
         elif mfi <= 20:
             result["mfi_signal"] = "OVERSOLD"
-            score_pts += 1  # oversold = potential inflow / reversal
-            reasons.append(f"💡 MFI: {mfi:.0f} — oversold, watch for inflow")
+            reasons.append(f"💡 MFI: {mfi:.0f} — oversold zone")
         elif mfi >= 60:
             result["mfi_signal"] = "BULLISH"
-            score_pts += 1
-            reasons.append(f"🟢 MFI: {mfi:.0f} — positive money flow dominan")
         elif mfi <= 40:
             result["mfi_signal"] = "BEARISH"
-            score_pts -= 1
-            reasons.append(f"🔴 MFI: {mfi:.0f} — negative money flow dominan")
         else:
             result["mfi_signal"] = "NEUTRAL"
 
@@ -2723,6 +2765,7 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "volume_coil":     detect_volume_coil(closed_candles),
         "sudden_breakout": detect_sudden_breakout(closed_candles),
         "adx":             calculate_adx(closed_candles).get("adx", 0),
+        "macd":            calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count":   len(closed_candles),
     }
@@ -2960,6 +3003,22 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
     elif _div_pp["bear_score"] >= 7:
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bearish Div — momentum downside lebih kuat dari upside")
+
+    # MACD confirmation (research: RSI+MACD combo ~77% win rate)
+    _macd_1h = tf_1h.get("macd", {})
+    _macd_4h = tf_4h.get("macd", {})
+    if _macd_1h.get("cross_bull"):
+        mom_score += 10
+        result["reasons"].append("📈 MACD 1H: Bullish crossover — momentum acceleration dikonfirmasi")
+    elif _macd_1h.get("above") and _macd_4h.get("above"):
+        mom_score += 6
+        result["reasons"].append("✅ MACD: 1H+4H histogram positif — sustained bullish momentum")
+    elif _macd_1h.get("above"):
+        mom_score += 3
+        result["reasons"].append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+    elif _macd_1h.get("cross_bear"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bearish crossover — momentum flip DOWN, hati-hati")
 
     result["momentum_score"] = min(mom_score, 35)
 
@@ -3449,6 +3508,22 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bullish Div — potensi bounce lebih besar dari dump")
 
+    # MACD confirmation (bearish side)
+    _macd_1h_pd = tf_1h.get("macd", {})
+    _macd_4h_pd = tf_4h.get("macd", {})
+    if _macd_1h_pd.get("cross_bear"):
+        mom_score += 10
+        result["reasons"].append("📉 MACD 1H: Bearish crossover — momentum flip DOWN dikonfirmasi")
+    elif not _macd_1h_pd.get("above", True) and not _macd_4h_pd.get("above", True):
+        mom_score += 6
+        result["reasons"].append("🔴 MACD: 1H+4H histogram negatif — sustained bearish momentum")
+    elif not _macd_1h_pd.get("above", True):
+        mom_score += 3
+        result["reasons"].append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
+    elif _macd_1h_pd.get("cross_bull"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bullish crossover — momentum flip UP, kontra dump")
+
     result["momentum_score"] = min(mom_score, 35)
 
     # ── 3. OI + PRICE ACTION + ATR BEARISH ──────
@@ -3832,6 +3907,32 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         else:
             dump_score += 12
             reasons.append(f"⚡ Sudden breakout DOWN (1H): vol {sb_1h['vol_spike']:.1f}x — momentum aktif")
+
+    # ── MACD Momentum Confirmation (research: RSI+MACD ~77% win rate) ──────
+    macd_4h = tf_4h.get("macd", {})
+    macd_1h = tf_1h.get("macd", {})
+    macd_1h_above = macd_1h.get("above", False)
+    macd_4h_above = macd_4h.get("above", False)
+
+    if macd_1h.get("cross_bull"):
+        pump_score += 14
+        reasons.append("📈 MACD 1H: Bullish crossover — momentum flip UP confirmed")
+    elif macd_1h_above and macd_4h_above:
+        pump_score += 8
+        reasons.append(f"✅ MACD 1H+4H: Histogram positif — bullish momentum sustained")
+    elif macd_1h_above:
+        pump_score += 4
+        reasons.append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+
+    if macd_1h.get("cross_bear"):
+        dump_score += 14
+        reasons.append("📉 MACD 1H: Bearish crossover — momentum flip DOWN confirmed")
+    elif not macd_1h_above and not macd_4h_above:
+        dump_score += 8
+        reasons.append(f"🔴 MACD 1H+4H: Histogram negatif — bearish momentum sustained")
+    elif not macd_1h_above:
+        dump_score += 4
+        reasons.append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
 
     rej = tf_15m.get("rejection", {})
     fvg = tf_15m.get("fvg", {})
@@ -5476,6 +5577,16 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "trendline_sup": detect_trendline(closed_candles, "lows"),
         "trendline_res": detect_trendline(closed_candles, "highs"),
         "money_flow": detect_money_flow(closed_candles),
+        "ema9": calculate_ema(closed_candles, 9),
+        "ema21": calculate_ema(closed_candles, 21),
+        "ema50": calculate_ema(closed_candles, 50),
+        "candle_patterns": detect_candle_patterns(closed_candles),
+        "market_regime": detect_market_regime(closed_candles),
+        "bb_squeeze": calculate_bb_squeeze(closed_candles),
+        "volume_coil": detect_volume_coil(closed_candles),
+        "sudden_breakout": detect_sudden_breakout(closed_candles),
+        "adx": calculate_adx(closed_candles).get("adx", 0),
+        "macd": calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count": len(closed_candles),
         "_exchange": exchange,
@@ -6280,14 +6391,27 @@ def handle_help_command(chat_id: str):
         "💬 `/ask <pertanyaan>` — Tanya crypto ke Gemini\n"
         "📡 `/scan` — Trigger manual scan sekarang\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔬 *BACKTEST ENGINE* _(v12 baru!)_\n"
+        "📈 *MANUAL TRADE MANAGER* _(BARU!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 `/trade BTC LONG 95000 60` — Daftarkan posisi manual\n"
+        "   `/trade BTC LONG 95000` — tanpa size → auto dari compound balance\n"
+        "   → Bot hitung SL/TP1/TP2/BE/trailing otomatis (ATR-based)\n"
+        "   → Monitor tiap scan: alert BE, TP1 partial, trailing, SL\n"
+        "🏁 `/close BTC [harga]` — Manual full close + auto-log ke journal\n"
+        "📊 `/trades` — Lihat semua posisi aktif + P&L realtime\n"
+        "📈 `/compound` — Status compound stake (balance + next trade size)\n"
+        "💰 `/balance 500` — Set modal saat ini $500\n"
+        "📊 `/setstake 10` — Set stake 10% per trade dari balance\n\n"
+        "🔬 *BACKTEST ENGINE*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari\n"
+        "   → Rank coins by WR%. Cache dipakai untuk validasi sinyal otomatis\n"
         "📊 `/backtest BTC scalp 30` — Backtest sinyal bot ke data historis\n"
         "   strategies: `scalp` | `swing` | `prepump` | `predump` | `combined`\n"
         "📋 `/btresult` — Hasil backtest terakhir\n"
         "🔬 `/btcompare BTC 14` — Compare semua strategy untuk 1 coin\n"
         "📚 `/btstats` — History aggregate semua backtest session\n"
-        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n"
+        "📡 `/signals` — Status semua signal + per-coin win rate\n"
         "🌐 `/marketstatus` — Fear&Greed + BTC Regime + Market Breadth + Dominance\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🐦 *X (TWITTER) SENTIMENT & DCA*\n"
@@ -6351,6 +6475,74 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def handle_btall_command(args: str, chat_id: str):
+    """
+    /btall [days] — Batch backtest top 20 coins × combined strategy.
+    Hasilnya disimpan ke btall_results.json dan dipakai sebagai cache
+    untuk validasi sinyal selanjutnya (menggantikan live per-signal backtest).
+    """
+    if not BACKTEST_MODULE:
+        send_telegram("❌ Backtest module tidak tersedia.", chat_id)
+        return
+
+    try:
+        days = int(args.strip()) if args.strip().isdigit() else 30
+        days = max(7, min(days, 90))
+    except Exception:
+        days = 30
+
+    send_telegram(
+        f"🧪 <b>Batch Backtest dimulai!</b>\n"
+        f"📅 Period: {days} hari | Strategy: COMBINED\n"
+        f"⏳ Mengambil top coins... ~3-8 menit\n"
+        f"<i>Hasil akan dikirim setelah selesai.</i>",
+        chat_id, parse_mode="HTML"
+    )
+
+    def _run():
+        try:
+            from backtest_engine import run_batch_backtest, format_batch_result
+
+            # Ambil top 20 coins dari CoinGecko, sorted by market cap
+            all_coins = get_top_coins()
+            if not all_coins:
+                send_telegram("❌ Gagal fetch coin list dari CoinGecko.", chat_id)
+                return
+
+            top20 = sorted(all_coins, key=lambda c: c.get("market_cap", 0), reverse=True)[:20]
+            symbols = []
+            for c in top20:
+                sym = c.get("symbol", "").upper()
+                if sym and sym not in ("USDT", "BUSD", "USDC", "DAI"):
+                    symbols.append(sym + "USDT")
+
+            sym_names = ", ".join(s.replace("USDT", "") for s in symbols[:10])
+            send_telegram(
+                f"📋 <b>{len(symbols)} coins:</b> {sym_names}{'...' if len(symbols) > 10 else ''}\n"
+                f"⚙️ Running backtest... sabar ya 🙏",
+                chat_id, parse_mode="HTML"
+            )
+
+            results = run_batch_backtest(symbols, strategy="combined", days=days)
+            msg     = format_batch_result(results, "combined", days)
+            send_telegram(msg, chat_id, parse_mode="HTML")
+
+            # Update tip
+            strong = [r for r in results if r.get("_grade") == "STRONG"]
+            if strong:
+                syms = ", ".join(r.get("symbol","").replace("USDT","") for r in strong[:5])
+                send_telegram(
+                    f"💡 <b>Tip:</b> Sinyal selanjutnya untuk {syms} akan divalidasi "
+                    f"menggunakan hasil batch backtest ini (cache 7 hari).",
+                    chat_id, parse_mode="HTML"
+                )
+        except Exception as e:
+            log.error(f"btall error: {e}", exc_info=True)
+            send_telegram(f"❌ Batch backtest error: {e}", chat_id)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─────────────────────────────────────────────
@@ -6568,6 +6760,11 @@ def process_update(update: dict):
                 chat_id
             )
 
+    elif text_lower.startswith("/btall"):
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        handle_btall_command(args, chat_id)
+
     elif text_lower.startswith("/btresult"):
         if BACKTEST_MODULE:
             handle_btresult_wrapper(chat_id)
@@ -6607,6 +6804,147 @@ def process_update(update: dict):
                 "Pastikan `backtest_engine.py` ada di folder yang sama.",
                 chat_id
             )
+
+    # ── Manual Trade Manager ──────────────────────────
+    elif text_lower.startswith("/trade ") or text_lower == "/trade":
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif not args:
+            send_telegram(
+                "📌 <b>Format /trade:</b>\n"
+                "<code>/trade SYMBOL DIRECTION ENTRY [SIZE_USD]</code>\n\n"
+                "Contoh:\n"
+                "<code>/trade BTC LONG 95000 60</code>\n"
+                "<code>/trade ETH SHORT 3200 100</code>\n\n"
+                "Bot akan otomatis hitung SL, TP1, TP2, BE, dan trailing stop.",
+                chat_id
+            )
+        else:
+            def _open_trade():
+                parsed = parse_trade_command(args)
+                if "error" in parsed:
+                    send_telegram(f"❌ {parsed['error']}", chat_id)
+                    return
+                send_telegram(
+                    f"⏳ Menghitung level untuk {parsed['symbol']} (fetch ATR)...", chat_id
+                )
+                trade = record_trade(
+                    parsed["symbol"], parsed["direction"],
+                    parsed["entry"], parsed["size"]
+                )
+                if "error" in trade:
+                    send_telegram(f"❌ {trade['error']}", chat_id)
+                else:
+                    send_telegram(format_trade_opened(trade), chat_id)
+            threading.Thread(target=_open_trade, daemon=True).start()
+
+    elif text_lower.startswith("/close"):
+        parts = text.split(maxsplit=2)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/close SYMBOL [EXIT_PRICE]</code>\n"
+                "Contoh:\n"
+                "<code>/close BTC</code> → close di harga sekarang\n"
+                "<code>/close BTC 96000</code> → close di harga spesifik",
+                chat_id
+            )
+        else:
+            sym_arg   = parts[1].strip().upper()
+            price_arg = None
+            if len(parts) >= 3:
+                try:
+                    price_arg = float(parts[2].replace(",", ""))
+                except ValueError:
+                    send_telegram(f"❌ Harga tidak valid: '{parts[2]}'", chat_id)
+                    return
+            def _close_trade(s=sym_arg, p=price_arg):
+                if not p:
+                    send_telegram(f"⏳ Fetching harga {s}...", chat_id)
+                trade = close_trade(s, p, "MANUAL")
+                if trade is None:
+                    send_telegram(
+                        f"❌ Tidak ada posisi aktif untuk <b>{s}</b>.\n"
+                        f"Lihat posisi aktif dengan /trades",
+                        chat_id
+                    )
+                else:
+                    send_telegram(format_closed_trade(trade), chat_id)
+            threading.Thread(target=_close_trade, daemon=True).start()
+
+    elif text_lower == "/trades":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            def _list_trades():
+                active = get_active_trades()
+                send_telegram(format_trades_list(active), chat_id)
+            threading.Thread(target=_list_trades, daemon=True).start()
+
+    elif text_lower.startswith("/balance"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/balance &lt;jumlah&gt;</code>\n"
+                "Contoh: <code>/balance 500</code>\n\n"
+                "Gunakan /compound untuk melihat status compound stake.",
+                chat_id
+            )
+        else:
+            try:
+                bal = float(parts[1].replace(",", "").replace("$", ""))
+                if bal <= 0:
+                    raise ValueError
+                cfg = set_balance(bal)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                send_telegram(
+                    f"✅ Balance diset ke <b>${bal:,.2f}</b>\n"
+                    f"📊 Stake per trade ({cfg['stake_pct']*100:.1f}%): <b>${next_stake:,.2f}</b>\n\n"
+                    f"Lihat detail: /compound",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Jumlah tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower.startswith("/setstake"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/setstake &lt;persen&gt;</code>\n"
+                "Contoh: <code>/setstake 10</code> → 10% dari balance per trade\n"
+                "Range: 1% – 50%",
+                chat_id
+            )
+        else:
+            try:
+                pct = float(parts[1].replace("%", ""))
+                if pct <= 0:
+                    raise ValueError
+                cfg = set_stake_pct(pct)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                stake_str = f"${next_stake:,.2f}" if next_stake else "balance belum diset"
+                send_telegram(
+                    f"✅ Stake per trade diset ke <b>{cfg['stake_pct']*100:.1f}%</b>\n"
+                    f"💰 Next trade size: <b>{stake_str}</b>",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Persentase tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower == "/compound":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            send_telegram(format_compound_status(), chat_id)
 
     elif text_lower.startswith("/liqstatus"):
         parts = text.split(maxsplit=1)
@@ -7626,6 +7964,15 @@ def run_scan(manual: bool = False, chat_id: str = None):
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
             log.warning(f"Signal tracker on_scan_start error: {e}")
+
+    # ── Manual Trade Manager: monitor posisi aktif ────
+    if TRADE_MANAGER_MODULE:
+        try:
+            closed = check_active_trades(send_telegram)
+            if closed:
+                log.info(f"📈 Trade manager: {len(closed)} posisi di-close")
+        except Exception as e:
+            log.warning(f"Trade manager check error: {e}")
 
     btc   = get_btc_context()
     coins = screen_coins(manual=manual)
