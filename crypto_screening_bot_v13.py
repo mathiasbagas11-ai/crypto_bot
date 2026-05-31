@@ -74,12 +74,31 @@ except ImportError:
 
 # ── v9: Module imports ────────────────────────
 try:
-    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block, get_news_gate
+    from news_sentiment    import (
+        get_coin_sentiment, get_macro_sentiment,
+        format_sentiment_block, get_news_gate,
+        get_structured_news_for_ai,
+    )
     NEWS_MODULE = True
 except ImportError:
     NEWS_MODULE = False
     log_tmp = logging.getLogger("v9")
     log_tmp.warning("news_sentiment.py tidak ditemukan — fitur news dinonaktifkan")
+
+# ── v15: DeepSeek AI — primary strategist ──────
+try:
+    from deepseek_ai import (
+        deepseek_signal_review,
+        deepseek_analyze_coin,
+        deepseek_free_ask,
+        deepseek_macro_analysis,
+        is_available as deepseek_available,
+    )
+    DEEPSEEK_MODULE = True
+except ImportError:
+    DEEPSEEK_MODULE = False
+    log_tmp = logging.getLogger("v15")
+    log_tmp.warning("deepseek_ai.py tidak ditemukan — DeepSeek AI dinonaktifkan")
 
 # ── Market Context ─────────────────────────
 try:
@@ -274,7 +293,10 @@ CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 # v9: New module env vars
 NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 
-# v14: AI priority chain → Groq (fastest) → Gemini (search grounding) → Claude (fallback)
+# v15: DeepSeek — primary AI strategist sebelum sinyal dikirim ke Telegram
+DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
+
+# AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
 SCAN_INTERVAL_MINUTES   = 10
 TOP_COINS_COUNT         = 5
@@ -5294,13 +5316,35 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append(format_risk_block(entry, sl, direc))
 
     # ── AI Insight untuk /analyze, /scalp, /prepump, dll ──
-    # Chain: Groq (primary, cepat) → Gemini (fallback, search grounding) → Claude (last resort)
+    # v15: DeepSeek primary → Groq fallback → Gemini fallback → Claude last resort
     if with_gemini:
         lines.append("")
         insight  = ""
         ai_label = ""
 
-        # 1. Groq — primary untuk on-demand analysis (cepat, llama-3.3-70b)
+        # 1. DeepSeek — primary AI strategist (analisa SMC + news + memory)
+        if DEEPSEEK_MODULE and DEEPSEEK_API_KEY and not insight:
+            _news_ctx = None
+            if NEWS_MODULE:
+                try:
+                    _news_ctx = get_structured_news_for_ai(symbol)
+                except Exception:
+                    pass
+            _sym_mem = None
+            try:
+                from symbol_memory import get_symbol_memory
+                _sym_mem = get_symbol_memory(symbol)
+            except Exception:
+                pass
+            insight = deepseek_analyze_coin(
+                symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                prepump, predump, scalp, swing,
+                news_context=_news_ctx, symbol_memory=_sym_mem,
+            )
+            if insight:
+                ai_label = "🤖 <b>AI Insight (DeepSeek):</b>"
+
+        # 2. Groq — fallback kalau DeepSeek tidak tersedia
         if GROQ_API_KEY and not insight:
             insight = groq_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5309,7 +5353,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Groq):</b>"
 
-        # 2. Gemini — fallback kalau Groq tidak merespons
+        # 3. Gemini — fallback dengan search grounding
         if GEMINI_API_KEY and not insight:
             insight = gemini_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5318,7 +5362,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Gemini):</b>"
 
-        # 3. Claude — last resort
+        # 4. Claude — last resort
         if ANTHROPIC_API_KEY and not insight:
             insight = claude_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5341,8 +5385,8 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                 lines.append("🌐 <b>Sentiment &amp; Event Overlay:</b>")
                 lines.append(f"<i>{sentiment}</i>")
 
-    elif with_gemini and not GEMINI_API_KEY and not GROQ_API_KEY:
-        lines.append("\n⚠️ <i>Set GROQ_API_KEY atau GEMINI_API_KEY di .env untuk AI insight</i>")
+    elif with_gemini and not GEMINI_API_KEY and not GROQ_API_KEY and not DEEPSEEK_API_KEY:
+        lines.append("\n⚠️ <i>Set DEEPSEEK_API_KEY di .env untuk AI insight</i>")
 
     return lines
 
@@ -5527,6 +5571,19 @@ def build_prepump_message(candidates: list) -> str:
             lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
             lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
+
+        # v15: DeepSeek AI insight
+        if pp.get("ai_insight"):
+            _verdict = pp.get("ai_verdict", "CONFIRM")
+            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            for _line in pp["ai_insight"].split("\n"):
+                if _line.strip():
+                    lines.append(f"  {_line.strip()}")
+            if pp.get("ai_adjusted"):
+                lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5582,6 +5639,19 @@ def build_predump_message(candidates: list) -> str:
             lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
             lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
+
+        # v15: DeepSeek AI insight
+        if pd_c.get("ai_insight"):
+            _verdict = pd_c.get("ai_verdict", "CONFIRM")
+            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            for _line in pd_c["ai_insight"].split("\n"):
+                if _line.strip():
+                    lines.append(f"  {_line.strip()}")
+            if pd_c.get("ai_adjusted"):
+                lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5847,11 +5917,82 @@ def handle_chart_command(chat_id: str, photo_file_id: str):
         send_telegram(f"❌ Error saat analisa chart: {str(e)[:100]}", chat_id)
 
 
+def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
+    """
+    v15: Jalankan DeepSeek review untuk setiap kandidat sinyal.
+    Adjust entry/TP/SL kalau AI merekomendasikan.
+    Buang kandidat yang di-SKIP oleh AI.
+    """
+    if not DEEPSEEK_MODULE or not DEEPSEEK_API_KEY or not candidates:
+        return candidates
+
+    enriched = []
+    _news_cache: dict = {}   # symbol → news_ctx, hindari double fetch
+
+    for cand in candidates:
+        sym   = cand.get("symbol", "")
+        trade = cand.get("trade", {})
+        if not trade or not trade.get("entry"):
+            enriched.append(cand)
+            continue
+
+        # Fetch news context (cache per symbol)
+        news_ctx = _news_cache.get(sym)
+        if news_ctx is None and NEWS_MODULE:
+            try:
+                news_ctx = get_structured_news_for_ai(sym)
+                _news_cache[sym] = news_ctx
+            except Exception:
+                news_ctx = None
+                _news_cache[sym] = None
+
+        try:
+            review = deepseek_signal_review(
+                symbol       = sym,
+                direction    = direction,
+                trade        = trade,
+                master_score = cand.get("total_score", cand.get("score", 0)),
+                reasons      = cand.get("reasons", []),
+                oi_data      = cand.get("oi_data", {}),
+                tf_4h        = cand.get("tf_4h", {}),
+                tf_1h        = cand.get("tf_1h", {}),
+                tf_15m       = cand.get("tf_15m", {}),
+                news_context = news_ctx,
+                signal_type  = direction,
+            )
+
+            if review.get("ai_verdict") == "SKIP":
+                log.info(f"🤖 DeepSeek SKIP {sym} {direction}")
+                continue
+
+            cand = dict(cand)   # copy agar tidak mutate original
+
+            if review.get("was_adjusted"):
+                cand["trade"] = dict(trade)
+                cand["trade"]["entry"] = review["entry"]
+                cand["trade"]["tp1"]   = review["tp1"]
+                cand["trade"]["tp2"]   = review["tp2"]
+                cand["trade"]["sl"]    = review["sl"]
+
+            if review.get("insight"):
+                cand["ai_insight"]  = review["insight"]
+                cand["ai_verdict"]  = review.get("ai_verdict", "CONFIRM")
+                cand["ai_adjusted"] = review.get("was_adjusted", False)
+
+        except Exception as e:
+            log.warning(f"DeepSeek enrich error {sym}: {e}")
+
+        enriched.append(cand)
+
+    return enriched
+
+
 def handle_prepump_command(chat_id: str):
     """Handle /prepump — scan pre-pump candidates."""
     send_telegram("🎯 Scanning pre-pump candidates... ⏳ (ini butuh ~1-2 menit)", chat_id)
 
     candidates = scan_prepump_candidates()
+    candidates = _deepseek_enrich_candidates(candidates, "PREPUMP")
     msg = build_prepump_message(candidates)
     send_telegram(msg, chat_id)
 
@@ -5861,6 +6002,7 @@ def handle_predump_command(chat_id: str):
     send_telegram("💀 Scanning pre-dump candidates... ⏳ (ini butuh ~1-2 menit)", chat_id)
 
     candidates = scan_predump_candidates()
+    candidates = _deepseek_enrich_candidates(candidates, "PREDUMP")
     msg = build_predump_message(candidates)
     send_telegram(msg, chat_id)
 
@@ -6396,7 +6538,14 @@ def handle_ask_command(question: str, chat_id: str):
         send_telegram("❓ Format: `/ask <pertanyaan>` — contoh: `/ask apa itu order block?`", chat_id)
         return
 
-    # v14: Groq → Gemini → Claude chain
+    # v15: DeepSeek primary → Groq → Gemini → Claude chain
+    if DEEPSEEK_MODULE and DEEPSEEK_API_KEY:
+        send_telegram("🤖 Tanya ke DeepSeek AI... ⏳", chat_id)
+        answer = deepseek_free_ask(question)
+        if answer:
+            send_telegram(f"🤖 <b>DeepSeek AI:</b>\n\n{answer}", chat_id)
+            return
+
     if GROQ_API_KEY:
         send_telegram("🤖 Tanya ke Groq AI (Llama 70B)... ⏳", chat_id)
         answer = groq_free_ask(question)
@@ -7899,12 +8048,56 @@ def run_gated_scan():
             all_pass = False
 
         if all_pass:
-            # ── ALL GATES PASSED → SEND ALERT SETUP ──
+            # ── ALL GATES PASSED → DEEPSEEK REVIEW SEBELUM KIRIM ──
+            _signal_direction = "LONG" if pump_dir else "SHORT"
+
+            # v15: DeepSeek strategic review — adjust entry/TP/SL + news context
+            ai_review = None
+            if DEEPSEEK_MODULE and DEEPSEEK_API_KEY:
+                try:
+                    _news_ctx = None
+                    if NEWS_MODULE:
+                        try:
+                            _news_ctx = get_structured_news_for_ai(analysis_sym)
+                        except Exception:
+                            pass
+                    ai_review = deepseek_signal_review(
+                        symbol       = analysis_sym,
+                        direction    = _signal_direction,
+                        trade        = trade,
+                        master_score = raw_master,
+                        reasons      = gate_reasons,
+                        oi_data      = oi,
+                        tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
+                        news_context = _news_ctx,
+                        signal_type  = "GATED_SIGNAL",
+                    )
+                    # Kalau AI verdict SKIP → batalkan sinyal
+                    if ai_review and ai_review.get("ai_verdict") == "SKIP":
+                        log.info(f"🤖 DeepSeek SKIP {analysis_sym} — AI tidak konfirmasi sinyal")
+                        continue
+                    # Apply adjustments kalau ada
+                    if ai_review and ai_review.get("was_adjusted"):
+                        trade = dict(trade)   # copy agar tidak mutate original
+                        trade["entry"] = ai_review["entry"]
+                        trade["tp1"]   = ai_review["tp1"]
+                        trade["tp2"]   = ai_review["tp2"]
+                        trade["sl"]    = ai_review["sl"]
+                        log.info(
+                            f"🤖 DeepSeek adjusted {analysis_sym}: "
+                            f"entry={ai_review['entry']:.4f} tp1={ai_review['tp1']:.4f} sl={ai_review['sl']:.4f}"
+                        )
+                    # Apply score adjustment
+                    if ai_review and ai_review.get("score_adj", 0) != 0:
+                        raw_master = max(0, min(100, raw_master + ai_review["score_adj"]))
+                except Exception as _ds_e:
+                    log.warning(f"DeepSeek review error {analysis_sym}: {_ds_e}")
+
             confidence_label = ("HIGH" if raw_master >= 85 else
                                 "MEDIUM" if raw_master >= 75 else "LOW")
             msg = _build_gated_signal_message(
                 symbol=analysis_sym, price=price,
-                direction="LONG" if pump_dir else "SHORT",
+                direction=_signal_direction,
                 master_score=raw_master, confidence=confidence_label,
                 trade=trade, oi_data=oi, confluence=confluence,
                 mf_reasons=mf_all_reasons, gate_reasons=gate_reasons,
@@ -7912,32 +8105,40 @@ def run_gated_scan():
                 tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
             )
 
-            # v14: Groq AI insight — append sebelum dikirim
-            if GROQ_API_KEY:
+            # Append DeepSeek insight ke pesan
+            if ai_review and ai_review.get("insight"):
+                _verdict_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️", "SKIP": "🚫"}.get(
+                    ai_review.get("ai_verdict", "CONFIRM"), "🤖")
+                msg += (
+                    f"\n\n─── 🤖 DeepSeek AI ───\n"
+                    f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>\n"
+                    f"{_sanitize_ai_output(ai_review['insight'])}"
+                )
+                if ai_review.get("was_adjusted"):
+                    msg += "\n🔧 <i>Level harga disesuaikan oleh AI</i>"
+            elif GROQ_API_KEY and not DEEPSEEK_MODULE:
+                # Fallback ke Groq kalau DeepSeek tidak tersedia
                 try:
                     ai_txt = groq_signal_insight(
-                        symbol     = analysis_sym,
-                        direction  = "LONG" if pump_dir else "SHORT",
-                        master_score = raw_master,
-                        gate_reasons = gate_reasons,
-                        trade      = trade,
-                        tf_4h      = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
-                        oi_data    = oi,
+                        symbol=analysis_sym, direction=_signal_direction,
+                        master_score=raw_master, gate_reasons=gate_reasons,
+                        trade=trade, tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
+                        oi_data=oi,
                     )
                     if ai_txt:
                         msg += f"\n\n─── AI INSIGHT ───\n🤖 {_sanitize_ai_output(ai_txt)}"
                 except Exception as _ai_e:
-                    log.debug(f"Groq signal insight error: {_ai_e}")
+                    log.debug(f"Groq fallback error: {_ai_e}")
 
             send_telegram(msg)
             _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
-            log.info(f"🚀 SIGNAL SENT: {analysis_sym} {direction} score={raw_master}")
+            log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
                 try:
-                    _bt_dir    = "LONG" if pump_dir else "SHORT"
+                    _bt_dir    = _signal_direction
                     _tp_val    = float(trade.get("tp1", 0))
                     _sl_val    = float(trade.get("sl", 0))
                     _entry_val = float(trade.get("entry") or price)
@@ -8275,6 +8476,11 @@ def run_prepump_auto():
     hot = [c for c in candidates if c["total_score"] >= PREPUMP_ALERT_THRESHOLD]
 
     if hot:
+        # v15: DeepSeek review sebelum kirim
+        hot = _deepseek_enrich_candidates(hot, "PREPUMP")
+        if not hot:
+            log.info("Pre-pump: semua kandidat di-SKIP oleh DeepSeek AI")
+            return
         msg = build_prepump_message(hot)
         send_telegram(msg)
 
@@ -8332,6 +8538,11 @@ def run_predump_auto():
     hot = [c for c in candidates if c["total_score"] >= PREDUMP_ALERT_THRESHOLD]
 
     if hot:
+        # v15: DeepSeek review sebelum kirim
+        hot = _deepseek_enrich_candidates(hot, "PREDUMP")
+        if not hot:
+            log.info("Pre-dump: semua kandidat di-SKIP oleh DeepSeek AI")
+            return
         msg = build_predump_message(hot)
         send_telegram(msg)
 

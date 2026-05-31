@@ -514,3 +514,105 @@ def format_sentiment_block(s: dict, mode: str = "full") -> str:
 def _score_bar(score: int, w: int = 10) -> str:
     filled = max(0, min(w, int((score+100)/200*w)))
     return f"`[{'█'*filled}{'░'*(w-filled)}]`"
+
+
+# ── Trading Session Detector ──────────────────
+def _get_trading_session() -> str:
+    """Return sesi trading aktif berdasarkan waktu UTC."""
+    now_utc = datetime.now(timezone.utc)
+    hour = now_utc.hour
+    if 0 <= hour < 8:
+        return "ASIA (00:00–08:00 UTC) — likuiditas sedang"
+    elif 8 <= hour < 12:
+        return "EROPA OPEN (08:00–12:00 UTC) — volatilitas tinggi"
+    elif 12 <= hour < 17:
+        return "US PRE-MARKET (12:00–17:00 UTC) — momentum kuat"
+    elif 17 <= hour < 21:
+        return "US PEAK (17:00–21:00 UTC) — likuiditas tertinggi"
+    else:
+        return "US CLOSE / LATE (21:00–00:00 UTC) — volume menurun"
+
+
+# ── AI-Ready Structured News Context ─────────
+def get_structured_news_for_ai(symbol: str) -> dict:
+    """
+    Fetch dan susun konteks news dalam format terstruktur untuk DeepSeek.
+
+    Return dict:
+      sentiment_label    : str  (BULLISH / BEARISH / NEUTRAL / MIXED)
+      sentiment_score    : int  (-100 to +100)
+      trading_session    : str  (nama sesi trading aktif)
+      high_impact_events : list[str]  (event penting yang terdeteksi)
+      upcoming_unlocks   : list[str]  (token unlock events)
+      headlines          : list[str]  (headline terkini)
+      macro_risk         : str  (ringkasan risiko makro)
+    """
+    sym = symbol.upper().replace("USDT", "")
+    result = {
+        "symbol":             sym,
+        "sentiment_label":    "NEUTRAL",
+        "sentiment_score":    0,
+        "trading_session":    _get_trading_session(),
+        "high_impact_events": [],
+        "upcoming_unlocks":   [],
+        "headlines":          [],
+        "macro_risk":         "",
+    }
+
+    # Trading session selalu tersedia tanpa API
+    if not NEWSAPI_KEY:
+        return result
+
+    try:
+        # Fetch coin-specific articles
+        query = COIN_SEARCH_MAP.get(sym, f"{sym} cryptocurrency")
+        coin_arts  = _fetch_articles(query, days=2, n=5)
+
+        # Fetch macro articles
+        macro_arts = _fetch_articles(
+            "Federal Reserve crypto Bitcoin market risk inflation", days=2, n=3)
+
+        # Merge & deduplicate
+        seen, merged = set(), []
+        for a in coin_arts + macro_arts:
+            t = a.get("title", "")
+            if t and t not in seen:
+                seen.add(t)
+                merged.append(a)
+
+        # Headlines (plain text, tanpa source)
+        headlines = [
+            a.get("title", "")[:100]
+            for a in merged[:5]
+            if a.get("title")
+        ]
+        result["headlines"] = headlines
+
+        # High-impact events detection
+        hi_events = _scan_articles_for_high_impact(merged, sym)
+        event_labels = []
+        unlock_labels = []
+        for ev in hi_events:
+            cat = ev.get("category", "")
+            imp = ev.get("direction", "NEUTRAL")
+            label = f"{cat} ({imp})"
+            if "TOKEN_UNLOCK" in cat:
+                unlock_labels.append(label)
+            else:
+                event_labels.append(label)
+
+        result["high_impact_events"] = event_labels
+        result["upcoming_unlocks"]   = unlock_labels
+
+        # Sentiment analysis via Gemini (jika tersedia)
+        if GEMINI_API_KEY and merged:
+            txt = _format_for_prompt(merged[:MAX_ARTICLES])
+            senti = _gemini_analyze(txt, f"{sym} crypto market")
+            result["sentiment_label"] = senti.get("sentiment",    "NEUTRAL")
+            result["sentiment_score"] = senti.get("score",        0)
+            result["macro_risk"]      = senti.get("summary",      "")[:200]
+
+    except Exception as e:
+        log.warning(f"get_structured_news_for_ai({sym}) error: {e}")
+
+    return result

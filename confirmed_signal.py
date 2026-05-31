@@ -51,10 +51,17 @@ except ImportError:
 
 # ── News Gate ───────────────────────────────
 try:
-    from news_sentiment import get_news_gate
+    from news_sentiment import get_news_gate, get_structured_news_for_ai
     NEWS_GATE_MODULE = True
 except ImportError:
     NEWS_GATE_MODULE = False
+
+# ── DeepSeek AI ─────────────────────────────
+try:
+    from deepseek_ai import deepseek_signal_review
+    DEEPSEEK_MODULE = True
+except ImportError:
+    DEEPSEEK_MODULE = False
 
 # ── Auto Validator ─────────────────────────
 try:
@@ -799,6 +806,59 @@ def generate_confirmed_signal(
                 "entry_type": "MARKET", "rr": 2.0,
             }
 
+    # 5b. DeepSeek strategic review — adjust entry/TP/SL + news context
+    ai_review = None
+    if DEEPSEEK_MODULE:
+        try:
+            import os as _os
+            _ds_key = _os.getenv("DEEPSEEK_API_KEY", "")
+            if _ds_key:
+                _news_ctx = None
+                if NEWS_GATE_MODULE:
+                    try:
+                        _news_ctx = get_structured_news_for_ai(symbol)
+                    except Exception:
+                        pass
+                ai_review = deepseek_signal_review(
+                    symbol       = symbol,
+                    direction    = direction,
+                    trade        = trade,
+                    master_score = master["master_score"],
+                    reasons      = master.get("reasons", []),
+                    oi_data      = oi_data,
+                    tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
+                    news_context = _news_ctx,
+                    signal_type  = "CONFIRMED",
+                )
+                if ai_review:
+                    # SKIP verdict → batalkan sinyal
+                    if ai_review.get("ai_verdict") == "SKIP":
+                        log.info(f"  {symbol}: DeepSeek SKIP — AI tidak konfirmasi sinyal confirmed")
+                        return None
+                    # Apply price adjustments
+                    if ai_review.get("was_adjusted"):
+                        trade = dict(trade)
+                        trade["entry"] = ai_review["entry"]
+                        trade["tp1"]   = ai_review["tp1"]
+                        trade["tp2"]   = ai_review["tp2"]
+                        trade["sl"]    = ai_review["sl"]
+                        log.info(
+                            f"  {symbol}: DeepSeek adjusted prices "
+                            f"entry={ai_review['entry']:.4f} tp1={ai_review['tp1']:.4f}"
+                        )
+                    # Apply score adjustment
+                    if ai_review.get("score_adj", 0) != 0:
+                        master["master_score"] = max(
+                            0, min(100, master["master_score"] + ai_review["score_adj"])
+                        )
+                    # Store insight in master for formatter
+                    if ai_review.get("insight"):
+                        master["ai_insight"]  = ai_review["insight"]
+                        master["ai_verdict"]  = ai_review.get("ai_verdict", "CONFIRM")
+                        master["ai_adjusted"] = ai_review.get("was_adjusted", False)
+        except Exception as _ds_e:
+            log.warning(f"DeepSeek review error {symbol}: {_ds_e}")
+
     # 6. Set cooldown
     _set_signal_cooldown(symbol)
 
@@ -1052,13 +1112,30 @@ def format_confirmed_signal_message(signal: dict) -> str:
             f"💡 _Jalankan `/signalbt {sym_key.replace('USDT', '')} 30` untuk lihat historical signal accuracy_",
         ]
 
+    # v15: DeepSeek AI insight
+    ai_insight = signal.get("ai_insight", "")
+    if ai_insight:
+        ai_verdict  = signal.get("ai_verdict", "CONFIRM")
+        ai_adjusted = signal.get("ai_adjusted", False)
+        _v_emoji    = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(ai_verdict, "🤖")
+        lines += [
+            "",
+            "─────── 🤖 DeepSeek AI ───────",
+            f"{_v_emoji} <b>{ai_verdict}</b>",
+        ]
+        for _il in ai_insight.split("\n"):
+            if _il.strip():
+                lines.append(f"  {_il.strip()}")
+        if ai_adjusted:
+            lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
     lines += [
         "",
         "─────── MANAJEMEN RISIKO ───────",
         f"💡 SL wajib! Entry market, TP partial di TP1 (50%)",
         f"   Gunakan `/risk` untuk hitung ukuran posisi",
         "",
-        f"⚠️ _Sinyal ini divalidasi backtest {BT_DAYS}h + 7-layer auto-check. DYOR._",
+        f"⚠️ _Sinyal ini divalidasi backtest {BT_DAYS}h + 7-layer auto-check + DeepSeek AI. DYOR._",
     ]
 
     return "\n".join(lines)
