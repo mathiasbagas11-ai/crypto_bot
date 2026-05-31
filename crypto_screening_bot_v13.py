@@ -6380,12 +6380,14 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔬 *BACKTEST ENGINE* _(v12 baru!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari _(BARU!)_\n"
+        "   → Rank coins by WR%. Cache dipakai untuk validasi sinyal otomatis\n"
         "📊 `/backtest BTC scalp 30` — Backtest sinyal bot ke data historis\n"
         "   strategies: `scalp` | `swing` | `prepump` | `predump` | `combined`\n"
         "📋 `/btresult` — Hasil backtest terakhir\n"
         "🔬 `/btcompare BTC 14` — Compare semua strategy untuk 1 coin\n"
         "📚 `/btstats` — History aggregate semua backtest session\n"
-        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n"
+        "📡 `/signals` — Status semua signal + per-coin win rate\n"
         "🌐 `/marketstatus` — Fear&Greed + BTC Regime + Market Breadth + Dominance\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🐦 *X (TWITTER) SENTIMENT & DCA*\n"
@@ -6449,6 +6451,74 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def handle_btall_command(args: str, chat_id: str):
+    """
+    /btall [days] — Batch backtest top 20 coins × combined strategy.
+    Hasilnya disimpan ke btall_results.json dan dipakai sebagai cache
+    untuk validasi sinyal selanjutnya (menggantikan live per-signal backtest).
+    """
+    if not BACKTEST_MODULE:
+        send_telegram("❌ Backtest module tidak tersedia.", chat_id)
+        return
+
+    try:
+        days = int(args.strip()) if args.strip().isdigit() else 30
+        days = max(7, min(days, 90))
+    except Exception:
+        days = 30
+
+    send_telegram(
+        f"🧪 <b>Batch Backtest dimulai!</b>\n"
+        f"📅 Period: {days} hari | Strategy: COMBINED\n"
+        f"⏳ Mengambil top coins... ~3-8 menit\n"
+        f"<i>Hasil akan dikirim setelah selesai.</i>",
+        chat_id, parse_mode="HTML"
+    )
+
+    def _run():
+        try:
+            from backtest_engine import run_batch_backtest, format_batch_result
+
+            # Ambil top 20 coins dari CoinGecko, sorted by market cap
+            all_coins = get_top_coins()
+            if not all_coins:
+                send_telegram("❌ Gagal fetch coin list dari CoinGecko.", chat_id)
+                return
+
+            top20 = sorted(all_coins, key=lambda c: c.get("market_cap", 0), reverse=True)[:20]
+            symbols = []
+            for c in top20:
+                sym = c.get("symbol", "").upper()
+                if sym and sym not in ("USDT", "BUSD", "USDC", "DAI"):
+                    symbols.append(sym + "USDT")
+
+            sym_names = ", ".join(s.replace("USDT", "") for s in symbols[:10])
+            send_telegram(
+                f"📋 <b>{len(symbols)} coins:</b> {sym_names}{'...' if len(symbols) > 10 else ''}\n"
+                f"⚙️ Running backtest... sabar ya 🙏",
+                chat_id, parse_mode="HTML"
+            )
+
+            results = run_batch_backtest(symbols, strategy="combined", days=days)
+            msg     = format_batch_result(results, "combined", days)
+            send_telegram(msg, chat_id, parse_mode="HTML")
+
+            # Update tip
+            strong = [r for r in results if r.get("_grade") == "STRONG"]
+            if strong:
+                syms = ", ".join(r.get("symbol","").replace("USDT","") for r in strong[:5])
+                send_telegram(
+                    f"💡 <b>Tip:</b> Sinyal selanjutnya untuk {syms} akan divalidasi "
+                    f"menggunakan hasil batch backtest ini (cache 7 hari).",
+                    chat_id, parse_mode="HTML"
+                )
+        except Exception as e:
+            log.error(f"btall error: {e}", exc_info=True)
+            send_telegram(f"❌ Batch backtest error: {e}", chat_id)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─────────────────────────────────────────────
@@ -6665,6 +6735,11 @@ def process_update(update: dict):
                 "Pastikan `backtest_engine.py` ada di folder yang sama.",
                 chat_id
             )
+
+    elif text_lower.startswith("/btall"):
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        handle_btall_command(args, chat_id)
 
     elif text_lower.startswith("/btresult"):
         if BACKTEST_MODULE:

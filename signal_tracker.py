@@ -668,22 +668,30 @@ def get_tracker_stats() -> dict:
     if not outcomes:
         return {"total": 0, "pending": len(pending)}
 
-    by_type = {}
+    by_type   = {}
+    by_symbol = {}
     for o in outcomes:
-        s = o.get("signal_type", "UNKNOWN")
-        by_type.setdefault(s, {"tp": 0, "sl": 0, "exp": 0, "pnl": []})
-        st = o.get("status", "")
-        if st == "TP_HIT":         by_type[s]["tp"] += 1
-        elif st == "SL_HIT":       by_type[s]["sl"] += 1
-        else:                      by_type[s]["exp"] += 1
+        s   = o.get("signal_type", "UNKNOWN")
+        sym = o.get("symbol", "UNKNOWN")
+        st  = o.get("status", "")
         pnl = o.get("pnl_pct", 0)
-        if pnl != 0:
-            by_type[s]["pnl"].append(pnl)
+
+        by_type.setdefault(s, {"tp": 0, "sl": 0, "exp": 0, "pnl": []})
+        by_symbol.setdefault(sym, {"tp": 0, "sl": 0, "exp": 0, "pnl": [], "recent": []})
+
+        for bucket in (by_type[s], by_symbol[sym]):
+            if st == "TP_HIT":   bucket["tp"] += 1
+            elif st == "SL_HIT": bucket["sl"] += 1
+            else:                bucket["exp"] += 1
+            if pnl != 0:         bucket["pnl"].append(pnl)
+
+        by_symbol[sym]["recent"].append(st)
 
     stats = {
-        "total":   len(outcomes),
-        "pending": len(pending),
-        "by_type": {}
+        "total":      len(outcomes),
+        "pending":    len(pending),
+        "by_type":    {},
+        "by_symbol":  {},
     }
 
     for stype, data in by_type.items():
@@ -697,7 +705,27 @@ def get_tracker_stats() -> dict:
             "avg_pnl": round(avg_pnl, 2),
         }
 
+    for sym, data in by_symbol.items():
+        total_s  = data["tp"] + data["sl"] + data["exp"]
+        wr       = data["tp"] / total_s * 100 if total_s > 0 else 0
+        avg_pnl  = np.mean(data["pnl"]) if data["pnl"] else 0
+        recent5  = data["recent"][-5:]
+        recent_wr = sum(1 for s in recent5 if s == "TP_HIT") / len(recent5) * 100 if recent5 else 0
+        stats["by_symbol"][sym] = {
+            "total": total_s,
+            "tp": data["tp"], "sl": data["sl"],
+            "win_rate": round(wr, 1),
+            "recent_wr": round(recent_wr, 1),
+            "avg_pnl": round(avg_pnl, 2),
+        }
+
     return stats
+
+
+def get_coin_signal_stats(symbol: str) -> Optional[dict]:
+    """Return live signal win rate stats for a specific coin from signal_outcomes.json."""
+    stats = get_tracker_stats()
+    return stats.get("by_symbol", {}).get(symbol.upper())
 
 
 def format_tracker_summary() -> str:
@@ -733,6 +761,24 @@ def format_tracker_summary() -> str:
             )
         lines.append("")
 
+    # ── Per-coin stats (sort by most signals, show top 8) ──
+    by_sym = stats.get("by_symbol", {})
+    if by_sym:
+        sorted_syms = sorted(by_sym.items(), key=lambda x: x[1]["total"], reverse=True)[:8]
+        lines.append("─── BY COIN (top signals) ───")
+        for sym, data in sorted_syms:
+            wr     = data["win_rate"]
+            rwr    = data["recent_wr"]
+            n      = data["total"]
+            avg_p  = data["avg_pnl"]
+            trend  = "↑" if rwr >= wr else ("↓" if rwr < wr - 10 else "→")
+            wr_e   = "✅" if wr >= 55 else "⚠️" if wr >= 40 else "🔴"
+            name   = sym.replace("USDT", "")
+            lines.append(
+                f"  {wr_e} *{name}* ({n}) WR:{wr:.0f}%{trend} Avg:{avg_p:+.2f}%"
+            )
+        lines.append("")
+
     if pending:
         lines.append("─── PENDING SIGNALS ───")
         for p in pending[:5]:
@@ -750,7 +796,7 @@ def format_tracker_summary() -> str:
         if len(pending) > 5:
             lines.append(f"  _...dan {len(pending)-5} lainnya_")
 
-    lines.append("\n💡 _Signals ditrack otomatis. Auto-backtest jika WR drop < 40% atau 3 SL berturut._")
+    lines.append("\n💡 _Signals ditrack otomatis. /btall untuk batch backtest semua coins._")
     return "\n".join(lines)
 
 

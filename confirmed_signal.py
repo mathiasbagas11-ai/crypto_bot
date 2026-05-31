@@ -466,17 +466,35 @@ def compute_master_score(
 
 def _quick_backtest_validate(symbol: str, direction: str) -> dict:
     """
-    Jalankan quick backtest 7 hari untuk validasi.
-    Pilih strategy terbaik berdasarkan direction:
-      LONG  → coba scalp + prepump, ambil yang lebih bagus
-      SHORT → coba scalp + predump
-
-    Return: {valid: bool, profit_factor: float, win_rate: float, strategy: str, reason: str}
+    Validasi backtest untuk coin.
+    Priority: cached /btall result (≤7 hari) → live 7-hari backtest.
+    Cached result jauh lebih cepat dan tidak spam API.
     """
+    # ── 1. Cek cached btall result terlebih dahulu ──
+    try:
+        from backtest_engine import get_coin_bt_grade
+        cached = get_coin_bt_grade(symbol, max_age_hours=168)
+        if cached and not cached.get("error") and cached.get("total_trades", 0) >= BT_MIN_TRADES:
+            pf    = cached.get("profit_factor", 0)
+            wr    = cached.get("win_rate", 0)
+            n     = cached.get("total_trades", 0)
+            grade = cached.get("_grade", "UNKNOWN")
+            valid = pf >= BT_MIN_PROFIT_FACTOR
+            reason = (
+                f"Cache btall ({grade}): PF={pf:.2f}, WR={wr:.0f}%, {n} trades"
+                if valid else
+                f"Cache btall ({grade}) GAGAL: PF={pf:.2f} < {BT_MIN_PROFIT_FACTOR}"
+            )
+            log.info(f"  {symbol}: backtest from cache — {reason}")
+            return {"valid": valid, "profit_factor": pf, "win_rate": wr,
+                    "trades": n, "strategy": "cached_combined", "reason": reason}
+    except Exception as e:
+        log.debug(f"Cache lookup error: {e}")
+
+    # ── 2. Fallback: live quick backtest ──
     try:
         from backtest_engine import run_backtest
     except ImportError:
-        log.warning("backtest_engine tidak tersedia — skip validation")
         return {"valid": True, "profit_factor": 1.0, "win_rate": 50.0,
                 "strategy": "none", "reason": "backtest_engine unavailable, bypassed"}
 
@@ -499,30 +517,21 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
             log.debug(f"Quick BT {strat} error: {e}")
 
     if best_result is None:
-        # Tidak ada data cukup → bypass validation
         return {"valid": True, "profit_factor": 0.0, "win_rate": 0.0,
                 "strategy": "none", "reason": f"Tidak cukup data BT (<{BT_MIN_TRADES} trades)"}
 
-    pf  = best_result.get("profit_factor", 0)
-    wr  = best_result.get("win_rate", 0)
-    n   = best_result.get("total_trades", 0)
+    pf    = best_result.get("profit_factor", 0)
+    wr    = best_result.get("win_rate", 0)
+    n     = best_result.get("total_trades", 0)
     strat = best_result.get("_strategy", "?")
-
-    valid  = pf >= BT_MIN_PROFIT_FACTOR
+    valid = pf >= BT_MIN_PROFIT_FACTOR
     reason = (
         f"BT {strat} {BT_DAYS}d: PF={pf:.2f}, WR={wr:.0f}%, {n} trades"
         if valid else
         f"BT {strat} {BT_DAYS}d GAGAL: PF={pf:.2f} < {BT_MIN_PROFIT_FACTOR} — signal ditahan"
     )
-
-    return {
-        "valid":          valid,
-        "profit_factor":  pf,
-        "win_rate":       wr,
-        "trades":         n,
-        "strategy":       strat,
-        "reason":         reason,
-    }
+    return {"valid": valid, "profit_factor": pf, "win_rate": wr,
+            "trades": n, "strategy": strat, "reason": reason}
 
 
 # ─────────────────────────────────────────────

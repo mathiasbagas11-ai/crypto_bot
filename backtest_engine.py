@@ -792,6 +792,167 @@ def compare_strategies(symbol: str, days: int = 14) -> list:
 
 
 # ─────────────────────────────────────────────
+# BATCH BACKTEST — semua koin sekaligus
+# ─────────────────────────────────────────────
+
+BTALL_RESULTS_FILE = "btall_results.json"
+
+def run_batch_backtest(symbols: list, strategy: str = "combined", days: int = 30,
+                       stake_usdt: float = DEFAULT_STAKE) -> list:
+    """
+    Backtest multiple symbols sekaligus. Returns list sorted by grade + WR.
+    Hasil disimpan ke btall_results.json untuk caching.
+    """
+    results = []
+    total   = len(symbols)
+
+    for i, symbol in enumerate(symbols, 1):
+        sym = symbol.upper()
+        if not sym.endswith("USDT"):
+            sym = sym + "USDT"
+        log.info(f"  btall [{i}/{total}]: {sym}")
+        try:
+            r = run_backtest(sym, strategy, days, stake_usdt)
+            n  = r.get("total_trades", 0)
+            wr = r.get("win_rate", 0)
+            pf = r.get("profit_factor", 0)
+            if r.get("error"):
+                r["_grade"] = "ERROR"
+            elif n < 3:
+                r["_grade"] = "INSUFFICIENT"
+            elif wr >= 55 and pf >= 1.5:
+                r["_grade"] = "STRONG"
+            elif wr >= 45 and pf >= 1.0:
+                r["_grade"] = "MODERATE"
+            else:
+                r["_grade"] = "WEAK"
+            results.append(r)
+        except Exception as e:
+            log.warning(f"btall {sym}: {e}")
+            results.append({
+                "symbol": sym, "strategy": strategy, "error": str(e),
+                "_grade": "ERROR", "total_trades": 0, "win_rate": 0, "profit_factor": 0,
+            })
+
+    _grade_order = {"STRONG": 0, "MODERATE": 1, "WEAK": 2, "INSUFFICIENT": 3, "ERROR": 4}
+    results.sort(key=lambda r: (
+        _grade_order.get(r.get("_grade", "ERROR"), 4),
+        -(r.get("win_rate", 0) * min(r.get("profit_factor", 0), 3))
+    ))
+
+    try:
+        with open(BTALL_RESULTS_FILE, "w") as f:
+            json.dump({
+                "run_time": datetime.now(timezone.utc).isoformat(),
+                "strategy": strategy, "days": days,
+                "results": results,
+            }, f, indent=2)
+    except Exception as e:
+        log.warning(f"Save btall error: {e}")
+
+    return results
+
+
+def get_coin_bt_grade(symbol: str, max_age_hours: int = 168) -> Optional[dict]:
+    """
+    Lookup cached batch backtest result untuk 1 coin (max 7 hari).
+    Return dict dengan grade/WR/PF, atau None kalau belum ada / kadaluarsa.
+    """
+    try:
+        if not os.path.exists(BTALL_RESULTS_FILE):
+            return None
+        with open(BTALL_RESULTS_FILE) as f:
+            data = json.load(f)
+        run_time = datetime.fromisoformat(data.get("run_time", "2000-01-01T00:00:00"))
+        if run_time.tzinfo is None:
+            run_time = run_time.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - run_time).total_seconds() / 3600 > max_age_hours:
+            return None
+        sym = symbol.upper()
+        if not sym.endswith("USDT"):
+            sym = sym + "USDT"
+        for r in data.get("results", []):
+            if r.get("symbol", "").upper() == sym:
+                return r
+    except Exception as e:
+        log.debug(f"get_coin_bt_grade: {e}")
+    return None
+
+
+def format_batch_result(results: list, strategy: str, days: int) -> str:
+    """Format batch backtest results untuk Telegram."""
+    if not results:
+        return "❌ Batch backtest gagal — tidak ada hasil."
+
+    strong  = [r for r in results if r.get("_grade") == "STRONG"]
+    moderate= [r for r in results if r.get("_grade") == "MODERATE"]
+    weak    = [r for r in results if r.get("_grade") == "WEAK"]
+    insuff  = [r for r in results if r.get("_grade") == "INSUFFICIENT"]
+    errors  = [r for r in results if r.get("_grade") == "ERROR"]
+
+    valid   = strong + moderate + weak
+    ts      = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🧪 <b>BATCH BACKTEST — {len(results)} COINS</b>",
+        f"📅 Strategy: <b>{strategy.upper()}</b> | {days} hari",
+        f"🕐 {ts}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    if strong:
+        lines.append("✅ <b>LAYAK TRADE (WR ≥ 55%, PF ≥ 1.5)</b>")
+        for i, r in enumerate(strong, 1):
+            sym = r.get("symbol", "?").replace("USDT", "")
+            wr  = r.get("win_rate", 0)
+            pf  = min(r.get("profit_factor", 0), 99)
+            n   = r.get("total_trades", 0)
+            pnl = r.get("total_pnl_pct", 0)
+            lines.append(f"  {i}. <b>{sym}</b> — WR:{wr:.0f}% | PF:{pf:.2f} | {n}T | PnL:{pnl:+.1f}%")
+        lines.append("")
+
+    if moderate:
+        lines.append("⚠️ <b>BORDERLINE (WR ≥ 45%, PF ≥ 1.0)</b>")
+        for i, r in enumerate(moderate, 1):
+            sym = r.get("symbol", "?").replace("USDT", "")
+            wr  = r.get("win_rate", 0)
+            pf  = min(r.get("profit_factor", 0), 99)
+            n   = r.get("total_trades", 0)
+            lines.append(f"  {i}. <b>{sym}</b> — WR:{wr:.0f}% | PF:{pf:.2f} | {n}T")
+        lines.append("")
+
+    if weak:
+        lines.append("🔴 <b>HINDARI (WR &lt; 45% atau PF &lt; 1.0)</b>")
+        for r in weak:
+            sym = r.get("symbol", "?").replace("USDT", "")
+            wr  = r.get("win_rate", 0)
+            pf  = min(r.get("profit_factor", 0), 99)
+            n   = r.get("total_trades", 0)
+            lines.append(f"  ⛔ <b>{sym}</b> — WR:{wr:.0f}% | PF:{pf:.2f} | {n}T")
+        lines.append("")
+
+    if insuff:
+        syms = ", ".join(r.get("symbol", "?").replace("USDT", "") for r in insuff)
+        lines.append(f"⚫ Data kurang (&lt;3 trades): {syms}")
+        lines.append("")
+
+    if errors:
+        syms = ", ".join(r.get("symbol", "?").replace("USDT", "") for r in errors)
+        lines.append(f"❌ Error fetch: {syms}")
+        lines.append("")
+
+    if valid:
+        avg_wr = sum(r.get("win_rate", 0) for r in valid) / len(valid)
+        lines.append(f"📊 Avg WR ({len(valid)} valid coins): <b>{avg_wr:.1f}%</b>")
+        lines.append(f"💎 {len(strong)} layak | ⚠️ {len(moderate)} borderline | 🚫 {len(weak)} hindari")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
 # SIGNAL-BASED BACKTEST
 # Freqtrade-inspired "export:signals" approach:
 # ukur akurasi SINYAL, bukan profitabilitas TRADE
