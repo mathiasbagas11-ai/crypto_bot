@@ -6137,6 +6137,36 @@ def handle_weeksummary_command(chat_id: str):
     send_telegram(msg, chat_id, parse_mode="HTML")
 
 
+def handle_refreshdashboard_command(chat_id: str):
+    """Handle /refreshdashboard — rebuild Dashboard sheet di Google Sheets."""
+    if not JOURNAL_MODULE:
+        send_telegram("❌ Trade journal module tidak tersedia.", chat_id)
+        return
+    try:
+        from trade_journal import _get_sheet, _setup_dashboard
+        send_telegram("🔄 Rebuilding dashboard spreadsheet...", chat_id)
+        sheet = _get_sheet()
+        if not sheet:
+            send_telegram(
+                "❌ Tidak bisa connect ke Google Sheets.\n"
+                "Pastikan <code>GOOGLE_SPREADSHEET_ID</code> dan credentials sudah diset.",
+                chat_id, parse_mode="HTML"
+            )
+            return
+        ok = _setup_dashboard(sheet)
+        if ok:
+            send_telegram(
+                "✅ <b>Dashboard berhasil diperbarui!</b>\n\n"
+                "📊 Buka spreadsheet kamu dan cek tab <b>Dashboard</b>.\n"
+                "Semua formula, warna, dan layout sudah di-refresh.",
+                chat_id, parse_mode="HTML"
+            )
+        else:
+            send_telegram("❌ Gagal rebuild dashboard. Cek log Railway untuk detail.", chat_id)
+    except Exception as e:
+        send_telegram(f"❌ Error: <code>{e}</code>", chat_id, parse_mode="HTML")
+
+
 def handle_setbalance_command(args: str, chat_id: str):
     """
     Handle /setbalance <USDT> — set balance trading.
@@ -6455,7 +6485,8 @@ def handle_help_command(chat_id: str):
         "   atau `/logtrade BTC LONG 65000 50 10 +25` (one-liner)\n"
         "📋 `/trades` — Lihat 5 trade terakhir\n"
         "📊 `/weeksummary` — Weekly summary + AI analysis\n"
-        "💰 `/setbalance 500` — Set saldo awal\n\n"
+        "💰 `/setbalance 500` — Set saldo awal\n"
+        "🔄 `/refreshdashboard` — Rebuild layout Dashboard di Sheets\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📚 *LEARNING ENGINE*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6743,6 +6774,9 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/weeksummary"):
         threading.Thread(target=handle_weeksummary_command, args=(chat_id,), daemon=True).start()
+
+    elif text_lower.startswith("/refreshdashboard"):
+        threading.Thread(target=handle_refreshdashboard_command, args=(chat_id,), daemon=True).start()
 
     elif text_lower.startswith("/setbalance"):
         parts = text.split(maxsplit=1)
