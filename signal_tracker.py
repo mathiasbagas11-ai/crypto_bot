@@ -96,7 +96,7 @@ def _save_outcomes(data: list):
 
 def record_pending_signal(
     symbol: str,
-    signal_type: str,   # SCREENER | PREPUMP | PREDUMP | SCALP | SWING
+    signal_type: str,   # SCREENER | PREPUMP | PREDUMP | SCALP | SWING | CONFIRMED
     direction: str,     # LONG | SHORT
     entry_price: float,
     tp: float,
@@ -104,6 +104,7 @@ def record_pending_signal(
     score: int,
     confluence_level: str = "",
     reasons: list = None,
+    strategy: str = "CONFIRMED",  # Strategi yang generate: scalp, prepump, predump, swing, atau CONFIRMED
 ):
     """
     Catat sinyal yang baru dikirim bot ke pending_signals.json.
@@ -113,6 +114,7 @@ def record_pending_signal(
         "id":               f"{symbol}_{int(time.time()*1000)}",
         "symbol":           symbol,
         "signal_type":      signal_type,
+        "strategy":         strategy,
         "direction":        direction,
         "entry_price":      entry_price,
         "tp":               tp,
@@ -819,16 +821,20 @@ def on_scan_start(send_telegram_fn=None) -> list:
 
 def on_signal_sent(symbol: str, signal_type: str, direction: str,
                    entry_price: float, tp: float, sl: float,
-                   score: int, confluence_level: str = "", reasons: list = None):
+                   score: int, confluence_level: str = "", reasons: list = None,
+                   strategy: str = "CONFIRMED"):
     """
     Dipanggil setelah bot kirim signal ke Telegram.
     Record signal ke pending list.
+
+    Args:
+        strategy: Strategy yang generate sinyal (scalp, prepump, predump, swing, atau CONFIRMED)
     """
     try:
         record_pending_signal(
             symbol=symbol, signal_type=signal_type, direction=direction,
             entry_price=entry_price, tp=tp, sl=sl, score=score,
-            confluence_level=confluence_level, reasons=reasons
+            confluence_level=confluence_level, reasons=reasons, strategy=strategy
         )
     except Exception as e:
         log.warning(f"on_signal_sent error: {e}")

@@ -120,6 +120,7 @@ try:
         handle_logoutcome_command, handle_lessons_command,
         handle_decisions_command, handle_evolve_command,
         handle_addlesson_command, get_performance_stats_text,
+        analyze_signal_outcomes_daily,
     )
     LEARNING_MODULE = True
 except ImportError:
@@ -8405,10 +8406,17 @@ if __name__ == "__main__":
         scheduler.add_job(run_btall_scheduled, "cron", hour=1, minute=0, id="auto_btall")
         threading.Thread(target=run_btall_scheduled, daemon=True).start()
 
+    # Daily learning: analyze signal outcomes dan call DeepSeek for recommendations (jam 23:00 UTC)
+    if LEARNING_MODULE:
+        scheduler.add_job(
+            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_telegram),
+            "cron", hour=23, minute=0, id="daily_learning"
+        )
+
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
-        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC"
+        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | Daily-learning=23:00 UTC"
     )
 
     try:
