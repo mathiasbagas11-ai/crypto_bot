@@ -8021,7 +8021,7 @@ def run_gated_scan():
                         gate_reasons = gate_reasons_entry,
                         alert_type   = "ENTRY_NOW",
                     )
-                    send_telegram(msg2)
+                    send_signal(msg2)
                     entry["notified"] = True
                     signals_sent += 1
                     log.info(f"🎯 RETEST ENTRY NOTIF: {entry['symbol']} price={cur_price}")
@@ -8436,7 +8436,7 @@ if __name__ == "__main__":
         "Ketik /help untuk list command lengkap."
     )
     try:
-        send_telegram(_startup_msg)
+        send_market_update(_startup_msg)
     except Exception as _e:
         log.warning(f"Startup Telegram notification failed: {_e}")
 
