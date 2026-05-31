@@ -279,8 +279,8 @@ NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 SCAN_INTERVAL_MINUTES   = 10
 TOP_COINS_COUNT         = 5
 PREPUMP_SCAN_INTERVAL   = 5    # menit — scan cepat, alert HANYA kalau HOT
-PREPUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
-PREDUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
+PREPUMP_ALERT_THRESHOLD = 65   # score >= 65 → kirim alert
+PREDUMP_ALERT_THRESHOLD = 65   # score >= 65 → kirim alert
 
 # CoinGecko filters
 MIN_MARKET_CAP       = 50_000_000
@@ -315,8 +315,8 @@ SCALP_TP_PCT            = 0.015   # scalp TP: 1.5%
 SCALP_SL_PCT            = 0.008   # scalp SL: 0.8%
 SWING_TP_PCT            = 0.055   # swing TP: 5.5%
 SWING_SL_PCT            = 0.025   # swing SL: 2.5%
-SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
-SCALP_ALERT_THRESHOLD   = 55      # score >= 55 → auto alert (v14: turun dari 65)
+SCALP_MIN_SCORE         = 55      # minimal score buat scalp signal
+SCALP_ALERT_THRESHOLD   = 62      # score >= 62 → auto alert
 
 # ── SIGNAL GATE ──────────────────────────────────────────────────────────────
 GATE_MASTER_SCORE_MIN   = 65      # min score buat sinyal lolos — lebih tinggi = lebih selektif
@@ -584,11 +584,18 @@ def claude_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     if swing and swing.get("score", 0) >= 50:
         swing_ctx = f"\nSwing Setup: {swing['label']} (score {swing['score']}/100, est hold {swing.get('hold_estimate','')})"
 
+    _c_regime_4h = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _c_adx_4h    = tf_4h.get("market_regime", {}).get("adx", 0)
+
     coin_name = symbol.replace("USDT", "")
     prompt = f"""Kamu adalah trader crypto senior. Tugasmu bukan menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
+ATURAN KERAS: Market Regime RANGING → wajib SKIP (fakeout sangat tinggi).
+ATURAN KERAS: TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
+ATURAN KERAS: Tidak ada OB/FVG fresh → wajib WAIT RETEST bukan ENTRY NOW.
 
 DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_c_regime_4h} (ADX={_c_adx_4h:.0f})
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
@@ -602,9 +609,9 @@ Jawab dalam Bahasa Indonesia, max 5-6 kalimat, format wajib:
 🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
 Alasan: [1-2 alasan paling decisive saja]
 
-📋 **Trade Plan**: Entry ... | SL ... | TP ... | Konfirmasi: ... (hanya jika bukan SKIP)
+📋 **Trade Plan**: Entry ... | SL ... | TP ... (wajib ≥ 2R) | Konfirmasi: ... (hanya jika bukan SKIP)
 
-⚠️ **Risk**: [satu hal yang bisa batalkan setup ini]"""
+⚠️ **Invalidasi**: [level/kondisi spesifik yang batalkan setup — pakai angka]"""
 
     try:
         r = requests.post(
@@ -740,10 +747,18 @@ def gemini_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     mf1  = tf_1h.get("money_flow", {})
     mf15 = tf_15m.get("money_flow", {})
 
+    _g_regime_4h = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _g_regime_1h = tf_1h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _g_adx_4h    = tf_4h.get("market_regime", {}).get("adx", 0)
+
     prompt = f"""Kamu adalah trader crypto senior — tugasmu BUKAN menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
+ATURAN KERAS: Kalau Market Regime RANGING → wajib SKIP (ranging = noise tinggi, fakeout).
+ATURAN KERAS: Kalau TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
+ATURAN KERAS: Kalau tidak ada OB/FVG fresh sebagai entry zone → wajib WAIT RETEST, bukan ENTRY NOW.
 {sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
 DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_g_regime_4h} (ADX={_g_adx_4h:.0f}) | 1H: {_g_regime_1h}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - MF → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
@@ -761,9 +776,9 @@ Format wajib:
 🎯 [LONG NOW / SHORT NOW / WAIT RETEST / SKIP]
 Alasan: [1-2 alasan paling decisive]
 
-📋 Trade Plan: Entry ... | SL ... | TP ... | Konfirmasi: ... (isi hanya jika bukan SKIP)
+📋 Trade Plan: Entry ... | SL ... | TP ... (wajib ≥ 2R) | Konfirmasi: ... (isi hanya jika bukan SKIP)
 
-⚠️ Risk: [satu hal yang bisa batalkan setup ini]"""
+⚠️ Invalidasi: [level/kondisi spesifik yang batalkan setup — pakai angka]"""
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -922,6 +937,9 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     system_msg = ("Kamu adalah trader crypto senior spesialis SMC dan order flow. "
                   "Tugasmu adalah memberi VERDICT yang langsung actionable — bukan menjelaskan ulang data. "
                   "Data teknikal sudah ditampilkan ke user, kamu cukup beri judgment: bisa entry atau tidak, kenapa, dan trade plan-nya. "
+                  "WAJIB SKIP kalau market RANGING (tidak ada trend jelas) — setup di ranging market = fakeout. "
+                  "WAJIB SKIP kalau R:R < 2:1 (TP terlalu dekat dari entry vs SL). "
+                  "WAJIB WAIT RETEST kalau tidak ada OB/FVG yang fresh sebagai entry zone. "
                   "Jawab singkat, padat, Bahasa Indonesia. Max 5-6 kalimat.")
 
     rsi_4h  = tf_4h.get("rsi", 0)
@@ -939,9 +957,14 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
         if v <= 40: return "bearish"
         return "neutral"
 
+    _regime_4h  = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _regime_1h  = tf_1h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _adx_4h     = tf_4h.get("market_regime", {}).get("adx", 0)
+
     user_msg = f"""{sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
 DATA: {coin_name} @ ${price}
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_regime_4h} (ADX={_adx_4h:.0f}) | 1H: {_regime_1h}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M Rejection: {rej.get('type','NONE')}
 - RSI → 4H: {rsi_4h:.0f} ({_rsi_label(rsi_4h)}) | 1H: {rsi_1h:.0f} ({_rsi_label(rsi_1h)}) | 15M: {rsi_15m:.0f} ({_rsi_label(rsi_15m)})
 - ATR 4H: {atr_4h:.4f} ({atr_4h/price*100:.2f}% dari harga) — ukuran candle normal
@@ -957,16 +980,18 @@ DATA: {coin_name} @ ${price}
 
 INSTRUKSI:
 Berikan analisa singkat dalam Bahasa Indonesia — JANGAN ulangi data di atas, langsung ke kesimpulan dan judgment kamu.
+Kalau Market Regime = RANGING → wajib SKIP (jelaskan kenapa ranging = bahaya fakeout).
+Kalau TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
 
 Format WAJIB (max 5-6 kalimat total):
 
 🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
 Kenapa verdict ini? Sebutkan 1-2 alasan PALING KUAT (bukan semua indikator, cukup yang decisive).
 
-📋 **Trade Plan** (isi hanya jika LONG NOW / SHORT NOW / WAIT RETEST):
-Entry: ... | SL: ... | TP: ... | Konfirmasi: ...
+📋 **Trade Plan** (isi hanya jika bukan SKIP, wajib cek R:R ≥ 2:1):
+Entry: ... | SL: ... | TP: ... (harus ≥ 2R) | Konfirmasi: ...
 
-⚠️ **Risk**: Satu hal yang bisa bikin setup ini gagal."""
+⚠️ **Risk / Invalidasi**: Level atau kondisi spesifik yang membatalkan setup ini."""
 
     result = _groq_request(
         messages=[
@@ -5188,6 +5213,13 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
 
     # ── Trade Plan ──
     if confluence["direction"] != "NEUTRAL" and confluence["level"] in ["EXCELLENT", "GOOD"]:
+        _t_dir  = trade.get("direction", "")
+        _t_tp1  = trade.get("tp1") or 0
+        _t_sl   = trade.get("sl") or 0
+        _t_ent  = trade.get("entry") or price
+        _tp_ok  = (_t_dir == "LONG"  and _t_tp1 > _t_ent) or \
+                  (_t_dir == "SHORT" and 0 < _t_tp1 < _t_ent)
+
         is_limit    = trade.get("is_limit", False)
         entry_icon  = "🎯" if is_limit else "⚡"
         entry_label = "LIMIT" if is_limit else "MARKET"
@@ -5196,16 +5228,19 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
         rr_ok       = tp1_r >= 2.0
 
         lines.append("")
-        lines.append(f"📍 <b>Trade Plan — {trade['direction']} ({entry_label})</b>")
-        lines.append(f"  {entry_icon} Entry : <code>{fmt_num(trade['entry'])}</code>  ← {trade.get('entry_type','')}")
-        lines.append(f"  🔴 SL    : <code>{fmt_num(trade['sl'])}</code>")
-        if trade.get("tp1"):
-            lines.append(f"  🟡 TP1   : <code>{fmt_num(trade['tp1'])}</code>  ← {trade.get('tp1_basis','')}  ({tp1_r}R)  50% close")
-        if trade.get("tp2"):
-            lines.append(f"  🟢 TP2   : <code>{fmt_num(trade['tp2'])}</code>  ← {trade.get('tp2_basis','')}  ({tp2_r}R)  runner")
-        lines.append(f"  R:R = {tp1_r}:1  {'✅' if rr_ok else '⚠️ &lt;2R — skip'}")
-        if not is_limit:
-            lines.append("  <i>⚠️ Tidak ada OB/FVG dekat — tunggu retrace dulu</i>")
+        if not _tp_ok or not _t_sl:
+            lines.append("📍 <b>Trade Plan</b> — <i>⚠️ setup belum valid, tunggu konfirmasi struktur dulu</i>")
+        else:
+            lines.append(f"📍 <b>Trade Plan — {_t_dir} ({entry_label})</b>")
+            lines.append(f"  {entry_icon} Entry : <code>{fmt_num(_t_ent)}</code>  ← {trade.get('entry_type','')}")
+            lines.append(f"  🔴 SL    : <code>{fmt_num(_t_sl)}</code>")
+            if trade.get("tp1"):
+                lines.append(f"  🟡 TP1   : <code>{fmt_num(trade['tp1'])}</code>  ← {trade.get('tp1_basis','')}  ({tp1_r}R)  50% close")
+            if trade.get("tp2"):
+                lines.append(f"  🟢 TP2   : <code>{fmt_num(trade['tp2'])}</code>  ← {trade.get('tp2_basis','')}  ({tp2_r}R)  runner")
+            lines.append(f"  R:R = {tp1_r}:1  {'✅' if rr_ok else '⚠️ &lt;2R — skip'}")
+            if not is_limit:
+                lines.append("  <i>⚠️ Tidak ada OB/FVG dekat — tunggu retrace dulu</i>")
 
     elif confluence["level"] == "FAIR":
         lines.append("🟡 <b>FAIR setup</b> — skip atau tunggu konfirmasi lebih lanjut")
@@ -5434,7 +5469,10 @@ def build_prepump_message(candidates: list) -> str:
         if pp.get("funding_rate") is not None:
             lines.append(f"  Funding: {pp['funding_rate']:+.3f}% | RSI 1H: {pp.get('rsi',0):.0f}")
 
-        if trade and trade.get("direction") == "LONG":
+        _pp_tp1  = trade.get("tp1", 0) or 0 if trade else 0
+        _pp_ent  = trade.get("entry", 0) or 0 if trade else 0
+        _pp_ok   = trade and trade.get("direction") == "LONG" and _pp_tp1 > _pp_ent > 0 and trade.get("sl")
+        if _pp_ok:
             tp1_r = trade.get("tp1_r", 0)
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
@@ -5455,9 +5493,9 @@ def build_prepump_message(candidates: list) -> str:
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
             if trade.get("tp2"):
                 lines.append(f"  🟢 TP2   : {fmt_num(trade['tp2'])}  ({tp2_r}R) ← {trade.get('tp2_basis','')} | runner")
-            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R'}")
+            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
-            lines.append("  ⚠️ Trade plan tidak tersedia (data tidak cukup)")
+            lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5486,7 +5524,10 @@ def build_predump_message(candidates: list) -> str:
         if pd_c.get("funding_rate") is not None:
             lines.append(f"  Funding: {pd_c['funding_rate']:+.3f}% | RSI 1H: {pd_c.get('rsi',0):.0f}")
 
-        if trade and trade.get("direction") == "SHORT":
+        _pd_tp1  = trade.get("tp1", 0) or 0 if trade else 0
+        _pd_ent  = trade.get("entry", 0) or 0 if trade else 0
+        _pd_ok   = trade and trade.get("direction") == "SHORT" and 0 < _pd_tp1 < _pd_ent and trade.get("sl")
+        if _pd_ok:
             tp1_r = trade.get("tp1_r", 0)
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
@@ -5507,9 +5548,9 @@ def build_predump_message(candidates: list) -> str:
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
             if trade.get("tp2"):
                 lines.append(f"  🟢 TP2   : {fmt_num(trade['tp2'])}  ({tp2_r}R) ← {trade.get('tp2_basis','')} | runner")
-            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R'}")
+            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
-            lines.append("  ⚠️ Trade plan tidak tersedia (data tidak cukup)")
+            lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5833,16 +5874,20 @@ def build_scalp_message(candidates: list) -> str:
             conf_word = "bullish engulfing/pin bar 15M" if direc == "LONG" else "bearish engulfing/pin bar 15M"
             lines.append(f"  ✅ Konfirmasi: {conf_word} + vol ≥1.5x")
 
-        if trade and trade.get("sl"):
-            lines.append(f"  🔴 SL     : {fmt_num(trade['sl'])}")
-        elif sc.get("scalp_sl"):
-            lines.append(f"  🔴 SL     : {fmt_num(sc['scalp_sl'])}")
+        _sc_sl  = (trade.get("sl") or 0) if trade else (sc.get("scalp_sl") or 0)
+        _sc_tp1 = (trade.get("tp1") or 0) if trade else (sc.get("scalp_tp") or 0)
+        _sc_ent = (trade.get("entry") or sc.get("price", 0)) if trade else sc.get("price", 0)
+        _sc_tp_ok = (direc == "LONG"  and _sc_tp1 > _sc_ent > 0) or \
+                    (direc == "SHORT" and 0 < _sc_tp1 < _sc_ent)
 
-        if trade and trade.get("tp1"):
-            tp1_r = trade.get("tp1_r", 0)
-            lines.append(f"  🟡 TP1    : {fmt_num(trade['tp1'])}  ({tp1_r}R) | close 50%")
-        elif sc.get("scalp_tp"):
-            lines.append(f"  🟡 TP     : {fmt_num(sc['scalp_tp'])}")
+        if _sc_sl:
+            lines.append(f"  🔴 SL     : {fmt_num(_sc_sl)}")
+
+        if _sc_tp_ok and _sc_tp1:
+            tp1_r = trade.get("tp1_r", 0) if trade else 0
+            lines.append(f"  🟡 TP1    : {fmt_num(_sc_tp1)}  ({tp1_r}R) | close 50%")
+        elif _sc_tp1:
+            lines.append(f"  ⚠️ TP tidak valid — tunggu retrace ke OB/FVG dulu")
 
         sw = sc.get("sweep", {})
         if sw.get("swept"):
