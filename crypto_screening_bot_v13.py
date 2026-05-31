@@ -7684,9 +7684,9 @@ def run_gated_scan():
         bt_reason = "Backtest skipped (module N/A)"
         if BACKTEST_MODULE:
             try:
-                from backtest_engine import quick_validate_signal
+                from confirmed_signal import _quick_backtest_validate
                 bt_dir = "LONG" if pump_dir else "SHORT"
-                bt_result = quick_validate_signal(analysis_sym, bt_dir)
+                bt_result = _quick_backtest_validate(analysis_sym, bt_dir)
                 bt_pass   = bt_result.get("valid", False) and bt_result.get("profit_factor", 0) >= GATE_BT_PF_MIN
                 bt_pf     = bt_result.get("profit_factor", 0)
                 bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
