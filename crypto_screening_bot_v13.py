@@ -598,7 +598,7 @@ DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
 - Market Regime → 4H: {_c_regime_4h} (ADX={_c_adx_4h:.0f})
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
-- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- FVG 15M: {fvg.get('fvg_type','NONE')} | FVG Daily: {(daily_fvg or {}).get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
 - Basis: {oi_data.get('perp_spot_basis','N/A')}% | Taker: {oi_data.get('taker_bias','N/A')} | Vol 4H: {va4.get('multiplier',1):.1f}x
 - Liquidity: {liq_ctx.strip() if liq_ctx else 'none'}
@@ -761,7 +761,7 @@ DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
 - Market Regime → 4H: {_g_regime_4h} (ADX={_g_adx_4h:.0f}) | 1H: {_g_regime_1h}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
-- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- FVG 15M: {fvg.get('fvg_type','NONE')} | FVG Daily: {(daily_fvg or {}).get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - MF → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
 - L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader L/S: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
 - Perp-Spot Basis: {oi_data.get('perp_spot_basis','N/A')}% | Taker: {oi_data.get('taker_bias','N/A')} ({oi_data.get('taker_buy_sell_ratio','N/A')}) | Vol 4H: {va4.get('multiplier',1):.1f}x
@@ -969,7 +969,7 @@ DATA: {coin_name} @ ${price}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M Rejection: {rej.get('type','NONE')}
 - RSI → 4H: {rsi_4h:.0f} ({_rsi_label(rsi_4h)}) | 1H: {rsi_1h:.0f} ({_rsi_label(rsi_1h)}) | 15M: {rsi_15m:.0f} ({_rsi_label(rsi_15m)})
 - ATR 4H: {atr_4h:.4f} ({atr_4h/price*100:.2f}% dari harga) — ukuran candle normal
-- FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
+- FVG 15M: {fvg.get('fvg_type','NONE')} | FVG Daily: {(daily_fvg or {}).get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - Money Flow → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
 - Volume → 4H: {va4.get('multiplier',1):.1f}x | 1H: {va1.get('multiplier',1):.1f}x | 15M: {va15.get('multiplier',1):.1f}x
 - L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
@@ -1460,6 +1460,17 @@ def detect_fvg(candles: list) -> dict:
                 break
 
     return result
+
+
+def get_daily_fvg(symbol: str) -> dict:
+    """Fetch Daily candles dan deteksi Daily FVG — level terkuat untuk large cap."""
+    try:
+        candles = get_binance_klines(symbol, "1d", limit=30)
+        if not candles or len(candles) < 5:
+            return {}
+        return detect_fvg(candles)
+    except Exception:
+        return {}
 
 
 def detect_order_blocks(candles: list) -> dict:
@@ -3870,7 +3881,7 @@ def scan_predump_candidates(symbols: list = None) -> list:
 # ─────────────────────────────────────────────
 
 def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dict,
-                             realtime: dict = None) -> dict:
+                             realtime: dict = None, daily_fvg: dict = None) -> dict:
     pump_score = dump_score = 0
     reasons = []
 
@@ -4034,6 +4045,55 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
     elif fvg.get("fvg_type") == "BEARISH":
         d = fvg.get("bearish_fvg", {}).get("distance_pct", 999)
         if 0 < d < 3: dump_score += 8; reasons.append(f"🔴 15M: Bearish FVG -{d:.1f}% away — price magnet DOWN")
+
+    # ── 1H FVG (lebih kuat dari 15M) ────────────────────────
+    fvg_1h = tf_1h.get("fvg", {})
+    if fvg_1h.get("fvg_type") == "BULLISH":
+        d = fvg_1h.get("bullish_fvg", {}).get("distance_pct", 999)
+        if 0 < d < 4: pump_score += 10; reasons.append(f"✅ 1H: Bullish FVG +{d:.1f}% below — 1H support magnet")
+    elif fvg_1h.get("fvg_type") == "BEARISH":
+        d = fvg_1h.get("bearish_fvg", {}).get("distance_pct", 999)
+        if 0 < d < 4: dump_score += 10; reasons.append(f"🔴 1H: Bearish FVG -{d:.1f}% above — 1H resistance magnet")
+
+    # ── 4H FVG (paling kuat setelah Daily) ──────────────────
+    fvg_4h = tf_4h.get("fvg", {})
+    if fvg_4h.get("fvg_type") == "BULLISH":
+        d = fvg_4h.get("bullish_fvg", {}).get("distance_pct", 999)
+        if 0 < d < 6: pump_score += 14; reasons.append(f"✅ 4H: Bullish FVG +{d:.1f}% below — major 4H support zone")
+    elif fvg_4h.get("fvg_type") == "BEARISH":
+        d = fvg_4h.get("bearish_fvg", {}).get("distance_pct", 999)
+        if 0 < d < 6: dump_score += 14; reasons.append(f"🔴 4H: Bearish FVG -{d:.1f}% above — major 4H resistance zone")
+
+    # ── Multi-TF FVG Confluence (4H + 1H searah) ────────────
+    _fvg4_type = fvg_4h.get("fvg_type")
+    _fvg1_type = fvg_1h.get("fvg_type")
+    _fvg15_type = fvg.get("fvg_type")
+    if _fvg4_type == "BULLISH" and _fvg1_type == "BULLISH":
+        pump_score += 8; reasons.append("🔥 Multi-TF FVG confluence (4H+1H Bullish) — zona support sangat kuat")
+    elif _fvg4_type == "BEARISH" and _fvg1_type == "BEARISH":
+        dump_score += 8; reasons.append("🔥 Multi-TF FVG confluence (4H+1H Bearish) — zona resistance sangat kuat")
+    if _fvg4_type == _fvg1_type == _fvg15_type == "BULLISH":
+        pump_score += 5; reasons.append("🔥🔥 Triple-TF FVG aligned BULLISH (4H+1H+15M)")
+    elif _fvg4_type == _fvg1_type == _fvg15_type == "BEARISH":
+        dump_score += 5; reasons.append("🔥🔥 Triple-TF FVG aligned BEARISH (4H+1H+15M)")
+
+    # ── Daily FVG — highest-timeframe confluence (strongest level) ──
+    if daily_fvg:
+        _dfvg_type = daily_fvg.get("fvg_type")
+        if _dfvg_type == "BULLISH":
+            _dfvg = daily_fvg.get("bullish_fvg", {})
+            _dd   = _dfvg.get("distance_pct", 999)
+            if 0 < _dd < 10:
+                pump_score += 15; reasons.append(f"🌟 Daily FVG Bullish {_dd:.1f}% below — zona support MAJOR")
+                if _fvg4_type == "BULLISH":
+                    pump_score += 8; reasons.append("🔥🔥🔥 Daily+4H+1H FVG stacked BULLISH — institutional zone!")
+        elif _dfvg_type == "BEARISH":
+            _dfvg = daily_fvg.get("bearish_fvg", {})
+            _dd   = _dfvg.get("distance_pct", 999)
+            if 0 < _dd < 10:
+                dump_score += 15; reasons.append(f"🌟 Daily FVG Bearish {_dd:.1f}% above — zona resistance MAJOR")
+                if _fvg4_type == "BEARISH":
+                    dump_score += 8; reasons.append("🔥🔥🔥 Daily+4H+1H FVG stacked BEARISH — institutional zone!")
 
     ob4 = tf_4h.get("order_blocks", {})
     ob1 = tf_1h.get("order_blocks", {})
@@ -4962,7 +5022,8 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                                news_sentiment: dict = None,
                                with_risk: bool = True,
                                with_claude: bool = False,
-                               realtime: dict = None) -> list:
+                               realtime: dict = None,
+                               daily_fvg: dict = None) -> list:
     """
     Build rich analysis block per koin.
     v14: AI chain — Groq (cepat) → Gemini (grounding) → Claude (fallback)
@@ -5041,10 +5102,26 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
     fvg = tf_15m.get("fvg", {})
     if fvg.get("fvg_type") == "BULLISH" and fvg.get("bullish_fvg"):
         d = fvg["bullish_fvg"]["distance_pct"]
-        lines.append(f"🧲 Bullish FVG: {d:+.1f}% away")
+        lines.append(f"🧲 Bullish FVG 15M: {d:+.1f}% away")
     elif fvg.get("fvg_type") == "BEARISH" and fvg.get("bearish_fvg"):
         d = fvg["bearish_fvg"]["distance_pct"]
-        lines.append(f"🧲 Bearish FVG: {d:+.1f}% away")
+        lines.append(f"🧲 Bearish FVG 15M: {d:+.1f}% away")
+
+    # ── Daily FVG (strongest level, institutional) ──
+    if daily_fvg:
+        _dfvg_type = daily_fvg.get("fvg_type")
+        if _dfvg_type == "BULLISH" and daily_fvg.get("bullish_fvg"):
+            _dfvg = daily_fvg["bullish_fvg"]
+            _dd   = _dfvg.get("distance_pct", 999)
+            _db   = _dfvg.get("bottom", 0)
+            _dt   = _dfvg.get("top", 0)
+            lines.append(f"🌟 <b>Daily FVG BULLISH</b>: {_dd:+.1f}% away  [{fmt_num(_db)} – {fmt_num(_dt)}]")
+        elif _dfvg_type == "BEARISH" and daily_fvg.get("bearish_fvg"):
+            _dfvg = daily_fvg["bearish_fvg"]
+            _dd   = _dfvg.get("distance_pct", 999)
+            _db   = _dfvg.get("bottom", 0)
+            _dt   = _dfvg.get("top", 0)
+            lines.append(f"🌟 <b>Daily FVG BEARISH</b>: {_dd:+.1f}% away  [{fmt_num(_db)} – {fmt_num(_dt)}]")
 
     # ── Rejection ──
     rej = tf_15m.get("rejection", {})
@@ -5738,10 +5815,16 @@ def handle_analyze_command(user_input: str, chat_id: str):
             chat_id)
         return
 
+    # Daily FVG — institutional-level confluence zone
+    try:
+        daily_fvg = get_daily_fvg(binance_sym)
+    except Exception:
+        daily_fvg = {}
+
     # v14: real-time momentum untuk /analyze juga
     realtime_momentum = detect_realtime_momentum(binance_sym)
 
-    confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi, realtime_momentum)
+    confluence = calculate_confluence_v4(tf_4h, tf_1h, tf_15m, oi, realtime_momentum, daily_fvg)
     prepump    = detect_prepump(binance_sym, tf_1h, tf_4h, oi, tf_15m)
     predump    = detect_predump(binance_sym, tf_1h, tf_4h, oi)
     eqh_eql    = tf_1h.get("liquidity", {})
@@ -5782,7 +5865,8 @@ def handle_analyze_command(user_input: str, chat_id: str):
         with_gemini=True, prepump=prepump, predump=predump,
         scalp=scalp, swing=swing,
         news_sentiment=news_s, with_risk=True,
-        realtime=realtime_momentum
+        realtime=realtime_momentum,
+        daily_fvg=daily_fvg
     )
     lines.extend(coin_lines)
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")

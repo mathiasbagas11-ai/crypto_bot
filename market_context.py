@@ -397,6 +397,69 @@ def get_btc_dominance() -> dict:
     return empty
 
 
+# ── USDT Dominance Trend ──────────────────────
+
+def get_usdt_dominance() -> dict:
+    """
+    CoinGecko /api/v3/global — USDT dominance %.
+    Tracks 3 readings to determine trend.
+    USDT.D rising = risk-off (crypto bearish), falling = bullish.
+
+    Returns:
+      usdt_dom_pct: float
+      trend:        RISING | FALLING | STABLE
+      readings:     list of last 3 dominance values
+    """
+    cache = _cache.get("usdt_dominance")
+    if cache and time.time() - cache["_ts"] < _DOMINANCE_TTL:
+        return cache
+
+    empty = {"usdt_dom_pct": 5.0, "trend": "STABLE",
+             "readings": [], "_ts": 0, "_error": True}
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/global",
+            timeout=10,
+        )
+        if not r.ok:
+            raise ValueError(f"HTTP {r.status_code}")
+
+        data = r.json().get("data", {})
+        dom  = data.get("market_cap_percentage", {}).get("usdt", 5.0)
+
+        # Build rolling readings (max 3)
+        prev = _cache.get("usdt_dominance", {})
+        prev_readings = prev.get("readings", []) if prev else []
+        readings = (prev_readings + [round(dom, 2)])[-3:]
+
+        if len(readings) >= 2:
+            delta = readings[-1] - readings[0]
+            if delta > 0.2:
+                trend = "RISING"
+            elif delta < -0.2:
+                trend = "FALLING"
+            else:
+                trend = "STABLE"
+        else:
+            trend = "STABLE"
+
+        result = {
+            "usdt_dom_pct": round(dom, 2),
+            "trend":        trend,
+            "readings":     readings,
+            "_ts":          time.time(),
+            "_error":       False,
+        }
+        _cache["usdt_dominance"] = result
+        return result
+    except Exception as e:
+        log.warning(f"USDT dominance fetch error: {e}")
+
+    empty["_ts"] = time.time()
+    _cache["usdt_dominance"] = empty
+    return empty
+
+
 # ── Aggregated Market Context ─────────────────
 
 def get_market_context() -> dict:
@@ -423,6 +486,7 @@ def get_market_context() -> dict:
     brd  = get_market_breadth()
     vol  = get_volatility_regime()
     dom  = get_btc_dominance()
+    usdt_dom = get_usdt_dominance()
 
     reasons   = []
     long_pen  = 0
@@ -496,6 +560,32 @@ def get_market_context() -> dict:
         short_pen += 3
         reasons.append(f"₿ BTC Dominance: {dom_pct:.1f}% FALLING — altseason, SHORT -3pt")
 
+    # ── USDT Dominance ──
+    usdt_trend = usdt_dom["trend"]
+    usdt_pct   = usdt_dom["usdt_dom_pct"]
+    if len(usdt_dom.get("readings", [])) >= 2:
+        usdt_delta = abs(usdt_dom["readings"][-1] - usdt_dom["readings"][0])
+    else:
+        usdt_delta = 0.0
+    if usdt_trend == "RISING" and usdt_delta > 0.5:
+        # USDT.D rising sharply = crypto capital fleeing to stablecoins = bearish for all crypto
+        long_pen  += 8
+        short_pen -= 5  # boost SHORT (cap at 0 below)
+        short_pen  = max(0, short_pen)
+        reasons.append(f"💵 USDT.D: {usdt_pct:.2f}% RISING (+{usdt_delta:.2f}%) — capital flight to stable, LONG -8pt / SHORT +5pt")
+    elif usdt_trend == "RISING":
+        long_pen += 4
+        reasons.append(f"💵 USDT.D: {usdt_pct:.2f}% RISING — mild risk-off, LONG -4pt")
+    elif usdt_trend == "FALLING" and usdt_delta > 0.5:
+        # USDT.D falling = stable coins rotating into crypto = bullish
+        short_pen += 5
+        long_pen  -= 4  # mild LONG boost, cap at 0
+        long_pen   = max(0, long_pen)
+        reasons.append(f"💵 USDT.D: {usdt_pct:.2f}% FALLING (-{usdt_delta:.2f}%) — stablecoin rotation into crypto, SHORT +5pt / LONG boost")
+    elif usdt_trend == "FALLING":
+        short_pen += 3
+        reasons.append(f"💵 USDT.D: {usdt_pct:.2f}% FALLING — mild risk-on, SHORT +3pt")
+
     # ── Overall Bias ──
     if long_pen >= 25 or long_blk:
         overall = "RISK_OFF"
@@ -509,18 +599,19 @@ def get_market_context() -> dict:
         overall = "NEUTRAL"
 
     return {
-        "fear_greed":   fg,
-        "btc_regime":   btcr,
-        "breadth":      brd,
-        "volatility":   vol,
-        "btc_dom":      dom,
-        "overall_bias": overall,
-        "long_penalty": long_pen,
-        "short_penalty": short_pen,
-        "long_blocked": long_blk,
-        "short_blocked": short_blk,
-        "reasons":      reasons,
-        "_ts":          time.time(),
+        "fear_greed":     fg,
+        "btc_regime":     btcr,
+        "breadth":        brd,
+        "volatility":     vol,
+        "btc_dom":        dom,
+        "usdt_dominance": usdt_dom,
+        "overall_bias":   overall,
+        "long_penalty":   long_pen,
+        "short_penalty":  short_pen,
+        "long_blocked":   long_blk,
+        "short_blocked":  short_blk,
+        "reasons":        reasons,
+        "_ts":            time.time(),
     }
 
 
@@ -549,12 +640,13 @@ def apply_market_context_to_score(
 
 def format_market_context_block(ctx: dict, compact: bool = False) -> str:
     """Format market context for Telegram display."""
-    fg   = ctx.get("fear_greed", {})
-    btcr = ctx.get("btc_regime", {})
-    brd  = ctx.get("breadth", {})
-    vol  = ctx.get("volatility", {})
-    dom  = ctx.get("btc_dom", {})
-    bias = ctx.get("overall_bias", "NEUTRAL")
+    fg      = ctx.get("fear_greed", {})
+    btcr    = ctx.get("btc_regime", {})
+    brd     = ctx.get("breadth", {})
+    vol     = ctx.get("volatility", {})
+    dom     = ctx.get("btc_dom", {})
+    usdt_d  = ctx.get("usdt_dominance", {})
+    bias    = ctx.get("overall_bias", "NEUTRAL")
 
     bias_emoji = {"RISK_ON": "🟢", "RISK_OFF": "🔴", "NEUTRAL": "⚪"}.get(bias, "⚪")
     fg_emoji   = "😱" if fg.get("value", 50) <= 20 else \
@@ -574,6 +666,9 @@ def format_market_context_block(ctx: dict, compact: bool = False) -> str:
             f"{brd_emoji} Breadth {brd.get('bullish_pct','?'):.0f}%↑"
         )
 
+    usdt_trend_emoji = "📈" if usdt_d.get("trend") == "RISING" else \
+                       "📉" if usdt_d.get("trend") == "FALLING" else "➡️"
+
     lines = [
         "─────── MARKET CONTEXT ───────",
         f"{bias_emoji} Overall Bias   : *{bias}*",
@@ -584,6 +679,7 @@ def format_market_context_block(ctx: dict, compact: bool = False) -> str:
         f"{brd.get('bearish_pct','?'):.0f}% bearish ({brd.get('coins_sampled','?')} coins)",
         f"⚡ Volatility     : {vol.get('regime','?')} (ATR ratio {vol.get('ratio',1):.2f}x)",
         f"₿ BTC Dominance  : {dom.get('dominance_pct','?'):.1f}% ({dom.get('trend','?')})",
+        f"{usdt_trend_emoji} USDT Dominance : {usdt_d.get('usdt_dom_pct','?'):.2f}% ({usdt_d.get('trend','?')})",
     ]
     if ctx.get("reasons"):
         lines.append("")
