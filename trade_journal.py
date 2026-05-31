@@ -152,6 +152,17 @@ def _cf_bg(sid, r1, r2, c1, c2, cond_type, val, bg):
 
 def _setup_dashboard(spreadsheet):
     try:
+        # ── Set locale ke en_US supaya formula pakai koma (bukan titik koma) ──
+        try:
+            spreadsheet.batch_update({"requests": [{
+                "updateSpreadsheetProperties": {
+                    "properties": {"locale": "en_US"},
+                    "fields": "locale",
+                }
+            }]})
+        except Exception as e:
+            log.warning(f"Set locale error (lanjut): {e}")
+
         # ── Hapus & buat ulang Dashboard ────────────────────────
         try:
             spreadsheet.del_worksheet(spreadsheet.worksheet("Dashboard"))
