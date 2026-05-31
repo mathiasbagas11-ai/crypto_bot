@@ -11,6 +11,14 @@ from pathlib import Path
 log = logging.getLogger("trade_journal")
 
 try:
+    from supabase_sync import push_trade, push_balance
+    SUPABASE_MODULE = True
+except ImportError:
+    SUPABASE_MODULE = False
+    def push_trade(t): return False
+    def push_balance(e, a, b, n=""): return False
+
+try:
     import gspread
     from google.oauth2.service_account import Credentials
     GSPREAD_OK = True
@@ -241,6 +249,9 @@ def set_initial_balance(amount: float) -> str:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
         ws.append_row([_now(), "INITIAL BALANCE", amount, amount, "Set awal"], value_input_option="RAW")
         _setup_dashboard(sheet)
+    try:
+        push_balance("INITIAL BALANCE", amount, amount, "Set awal")
+    except Exception: pass
     return f"✅ Saldo awal diset: <b>${amount:,.2f} USDT</b>"
 
 def _update_balance(pnl: float, note: str = ""):
@@ -252,6 +263,9 @@ def _update_balance(pnl: float, note: str = ""):
     if sheet:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
         ws.append_row([_now(), "PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note], value_input_option="RAW")
+    try:
+        push_balance("PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note)
+    except Exception: pass
 
 def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, note="", image_url="") -> dict:
     pos_size = round(margin_usdt * leverage, 2)
@@ -270,10 +284,16 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
         except Exception as e:
             log.error(f"Append error: {e}")
     _update_balance(pnl_usdt, f"{coin} {direction} {result}")
-    return {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
-            "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
-            "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,
-            "result": result, "note": note, "sheets_ok": sheets_ok, "balance_after": get_current_balance()}
+    result_dict = {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
+                   "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
+                   "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,
+                   "result": result, "note": note, "sheets_ok": sheets_ok, "balance_after": get_current_balance()}
+    # Sync ke Supabase (non-blocking, tidak ganggu flow utama)
+    try:
+        push_trade(result_dict)
+    except Exception as e:
+        log.warning(f"supabase push_trade error: {e}")
+    return result_dict
 
 def format_trade_logged(t: dict) -> str:
     ed = "🟢" if t["direction"] == "LONG" else "🔴"
