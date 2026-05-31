@@ -6477,6 +6477,41 @@ def handle_btresult_wrapper(chat_id: str):
     _bt_result(chat_id, send_telegram)
 
 
+def run_btall_scheduled():
+    """
+    Scheduled auto-batch-backtest (silent, tanpa spam Telegram).
+    Generate/refresh btall_results.json supaya GATE 3 pakai cache cepat
+    bukan live backtest per-signal. Dijadwalkan harian (cache valid 7 hari).
+    """
+    if not BACKTEST_MODULE:
+        return
+    try:
+        from backtest_engine import run_batch_backtest
+
+        all_coins = get_top_coins()
+        if not all_coins:
+            log.warning("auto-btall: gagal fetch coin list, skip")
+            return
+
+        top20 = sorted(all_coins, key=lambda c: c.get("market_cap", 0), reverse=True)[:20]
+        symbols = []
+        for c in top20:
+            sym = c.get("symbol", "").upper()
+            if sym and sym not in ("USDT", "BUSD", "USDC", "DAI"):
+                symbols.append(sym + "USDT")
+
+        if not symbols:
+            log.warning("auto-btall: symbol list kosong, skip")
+            return
+
+        log.info(f"🧪 auto-btall: backtest {len(symbols)} coins (combined, 30d)...")
+        results = run_batch_backtest(symbols, strategy="combined", days=30)
+        n_valid = sum(1 for r in results if r.get("_grade") in ("STRONG", "MODERATE", "WEAK"))
+        log.info(f"✅ auto-btall selesai: {len(results)} coins, {n_valid} punya data valid → cache updated")
+    except Exception as e:
+        log.error(f"auto-btall error: {e}", exc_info=True)
+
+
 def handle_btall_command(args: str, chat_id: str):
     """
     /btall [days] — Batch backtest top 20 coins × combined strategy.
@@ -7687,9 +7722,15 @@ def run_gated_scan():
                 from confirmed_signal import _quick_backtest_validate
                 bt_dir = "LONG" if pump_dir else "SHORT"
                 bt_result = _quick_backtest_validate(analysis_sym, bt_dir)
-                bt_pass   = bt_result.get("valid", False) and bt_result.get("profit_factor", 0) >= GATE_BT_PF_MIN
                 bt_pf     = bt_result.get("profit_factor", 0)
-                bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
+                # Data belum cukup → lolos (lagi ngumpulin data, jangan blok).
+                # Data cukup → baru cek PF harus ≥ minimum.
+                if bt_result.get("insufficient_data"):
+                    bt_pass   = bt_result.get("valid", True)
+                    bt_reason = f"Backtest: {bt_result.get('reason', 'data belum cukup')}"
+                else:
+                    bt_pass   = bt_result.get("valid", False) and bt_pf >= GATE_BT_PF_MIN
+                    bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
             except Exception:
                 bt_pass   = True  # fallback: tidak block kalau BT error
                 bt_reason = "Backtest not available (fallback pass)"
@@ -8358,10 +8399,16 @@ if __name__ == "__main__":
     if RISK_MODULE:
         scheduler.add_job(risk_reset_daily, "cron", hour=0, minute=0, id="risk_daily_reset")
 
+    # Auto-btall: refresh cache backtest harian (jam 01:00 UTC) + sekali saat start.
+    # Gate 3 pakai cache ini supaya tidak live-backtest tiap signal.
+    if BACKTEST_MODULE:
+        scheduler.add_job(run_btall_scheduled, "cron", hour=1, minute=0, id="auto_btall")
+        threading.Thread(target=run_btall_scheduled, daemon=True).start()
+
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
-        f"Risk reset=00:00 UTC"
+        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC"
     )
 
     try:
