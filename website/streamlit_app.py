@@ -1,5 +1,5 @@
 import streamlit as st
-import json, pathlib
+import json, pathlib, time
 from datetime import datetime, timezone, timedelta
 
 st.set_page_config(
@@ -9,13 +9,80 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── auto-refresh ──────────────────────────────────────────
+from streamlit_autorefresh import st_autorefresh
+st_autorefresh(interval=30_000, key="autorefresh")   # tiap 30 detik
+
 ROOT      = pathlib.Path(__file__).parent.parent
 HERE      = pathlib.Path(__file__).parent
 PORT_FILE = HERE / "my_portfolio.json"
+WIB       = timezone(timedelta(hours=7))
 
-WIB = timezone(timedelta(hours=7))
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+SHEET_TRADES  = "Trades"
+SHEET_BALANCE = "Balance"
 
-# ── I/O helpers ──────────────────────────────────────────
+# ── Google Sheets connection ──────────────────────────────
+@st.cache_resource(ttl=60)
+def get_gsheet():
+    """Buat koneksi ke Google Sheets. Cache 60 detik."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        # Ambil credentials dari st.secrets (Streamlit Cloud) atau env
+        if "google" in st.secrets:
+            creds_dict = dict(st.secrets["google"])
+            # Streamlit secrets menyimpan newline sebagai literal \\n
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+            spreadsheet_id = st.secrets.get("SPREADSHEET_ID", "")
+        else:
+            import os
+            creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+            spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID", "")
+            if not creds_json or not spreadsheet_id:
+                return None, None, "Credentials belum diset"
+            creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
+
+        client = gspread.authorize(creds)
+        sheet  = client.open_by_key(spreadsheet_id)
+        return sheet, spreadsheet_id, None
+    except Exception as e:
+        return None, None, str(e)
+
+
+@st.cache_data(ttl=30)   # cache 30 detik, auto-expired bareng autorefresh
+def fetch_trades():
+    sheet, _, err = get_gsheet()
+    if not sheet:
+        return [], err
+    try:
+        ws   = sheet.worksheet(SHEET_TRADES)
+        rows = ws.get_all_records()
+        return rows, None
+    except Exception as e:
+        return [], str(e)
+
+
+@st.cache_data(ttl=30)
+def fetch_balance_history():
+    sheet, _, err = get_gsheet()
+    if not sheet:
+        return [], err
+    try:
+        ws   = sheet.worksheet(SHEET_BALANCE)
+        rows = ws.get_all_records()
+        return rows, None
+    except Exception as e:
+        return [], str(e)
+
+
+# ── local JSON helpers ────────────────────────────────────
 def load_json(fname, default=None):
     p = ROOT / fname
     if p.exists():
@@ -45,6 +112,12 @@ def fmt_time(ts):
         return dt.strftime("%d %b %H:%M")
     except: return str(ts)[:16]
 
+def fmt_usdt(v, sign=True):
+    if v is None: return "—"
+    color = "#00e676" if v >= 0 else "#ff4757"
+    s = f"+${v:,.2f}" if (sign and v > 0) else f"${v:,.2f}"
+    return f'<span style="color:{color};font-weight:700">{s}</span>'
+
 # ── CSS ──────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -55,7 +128,7 @@ html,body,[class*="css"]{ font-family:'Inter',sans-serif!important }
 section[data-testid="stSidebar"]{ background:#0d1117;border-right:1px solid #1e2a38 }
 .block-container{ padding:1.5rem 2rem 4rem!important;max-width:1500px!important }
 
-.kpi{ background:#0f1621;border:1px solid #1e2a38;border-radius:14px;padding:20px 22px;position:relative;overflow:hidden }
+.kpi{ background:#0f1621;border:1px solid #1e2a38;border-radius:14px;padding:20px 22px;position:relative;overflow:hidden;height:100% }
 .kpi::before{ content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#00d4ff,#7c3aed) }
 .kpi-label{ font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-bottom:6px }
 .kpi-val{ font-size:28px;font-weight:900;font-family:'JetBrains Mono',monospace;line-height:1 }
@@ -73,52 +146,69 @@ section[data-testid="stSidebar"]{ background:#0d1117;border-right:1px solid #1e2
 .chip{ display:inline-block;background:#131920;border:1px solid #1e2a38;border-radius:6px;padding:3px 9px;font-size:11px;color:#94a3b8;margin:2px }
 .prog-wrap{ background:#1e2a38;border-radius:100px;height:7px;overflow:hidden;margin-top:6px }
 .prog-fill{ height:100%;border-radius:100px }
-
+.sync-badge{ display:inline-flex;align-items:center;gap:6px;background:#00e67622;border:1px solid #00e67644;color:#00e676;font-size:11px;font-weight:700;padding:3px 12px;border-radius:100px }
+.err-badge{ display:inline-flex;align-items:center;gap:6px;background:#ff475722;border:1px solid #ff475744;color:#ff4757;font-size:11px;font-weight:700;padding:3px 12px;border-radius:100px }
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.4)}}
 .live-dot{ display:inline-block;width:8px;height:8px;background:#00e676;border-radius:50%;animation:pulse 1.5s infinite;margin-right:5px }
-
-/* streamlit widget overrides */
-div[data-testid="stNumberInput"] input,
-div[data-testid="stTextInput"] input,
-div[data-testid="stSelectbox"] select,
-textarea{ background:#0f1621!important;border:1px solid #1e2a38!important;color:#e2e8f0!important;border-radius:8px!important }
-div[data-testid="stForm"]{ background:#0f1621;border:1px solid #1e2a38;border-radius:14px;padding:20px }
 </style>
 """, unsafe_allow_html=True)
 
-# ── load data ─────────────────────────────────────────────
-outcomes  = load_json("signal_outcomes.json", [])
-pending   = load_json("pending_signals.json", [])
+# ── load all data ─────────────────────────────────────────
+outcomes    = load_json("signal_outcomes.json", [])
+pending     = load_json("pending_signals.json", [])
 lessons_raw = load_json("lessons.json", {})
-lessons   = lessons_raw.get("lessons", []) if isinstance(lessons_raw, dict) else lessons_raw
-decisions = load_json("decision_log.json", [])
-port      = load_portfolio()
+lessons     = lessons_raw.get("lessons", []) if isinstance(lessons_raw, dict) else lessons_raw
+decisions   = load_json("decision_log.json", [])
+port        = load_portfolio()
 
-# ── derived stats ─────────────────────────────────────────
+# Google Sheets data
+gs_trades, gs_trades_err   = fetch_trades()
+gs_balance, gs_balance_err = fetch_balance_history()
+gs_ok = gs_trades_err is None and gs_balance_err is None
+
+# ── Derived stats dari Sheets ─────────────────────────────
+def parse_float(v):
+    try: return float(str(v).replace(",","").replace("$","").strip())
+    except: return 0.0
+
+if gs_trades:
+    all_closed = gs_trades  # list of dicts dari get_all_records()
+    gs_pnl_usdt   = [parse_float(t.get("PnL (USDT)", 0)) for t in all_closed]
+    gs_total_pnl  = sum(gs_pnl_usdt)
+    gs_wins       = sum(1 for t in all_closed if str(t.get("Result","")).upper()=="WIN")
+    gs_losses     = sum(1 for t in all_closed if str(t.get("Result","")).upper()=="LOSS")
+    gs_wr         = gs_wins / len(all_closed) * 100 if all_closed else 0
+    gs_best       = max(gs_pnl_usdt, default=0)
+    gs_worst      = min(gs_pnl_usdt, default=0)
+    gs_wins_vals  = [p for p in gs_pnl_usdt if p > 0]
+    gs_loss_vals  = [p for p in gs_pnl_usdt if p < 0]
+    gs_pf         = abs(sum(gs_wins_vals)/sum(gs_loss_vals)) if sum(gs_loss_vals) != 0 else 0
+    gs_avg_win    = sum(gs_wins_vals)/len(gs_wins_vals) if gs_wins_vals else 0
+    gs_avg_loss   = sum(gs_loss_vals)/len(gs_loss_vals) if gs_loss_vals else 0
+else:
+    all_closed    = []
+    gs_total_pnl = gs_wins = gs_losses = gs_wr = gs_best = gs_worst = gs_pf = 0
+    gs_avg_win = gs_avg_loss = 0
+
+if gs_balance:
+    cur_bal  = parse_float(gs_balance[-1].get("Balance After (USDT)", 0))
+    init_bal = parse_float(gs_balance[0].get("Balance After (USDT)", 0))
+else:
+    cur_bal  = port.get("current_balance", 0)
+    init_bal = port.get("initial_balance", 0)
+
+roi = (cur_bal - init_bal) / init_bal * 100 if init_bal else 0
+
+# bot signal stats
 total    = len(outcomes)
 tp_hit   = sum(1 for s in outcomes if s["status"] == "TP_HIT")
 sl_hit   = sum(1 for s in outcomes if s["status"] == "SL_HIT")
 exp_w    = sum(1 for s in outcomes if s["status"] == "EXPIRED_WIN")
-exp_l    = sum(1 for s in outcomes if s["status"] == "EXPIRED_LOSS")
 win_rate = (tp_hit + exp_w) / total * 100 if total else 0
 pnls     = [s.get("pnl_pct", 0) for s in outcomes if s.get("pnl_pct") is not None]
-total_pnl_pct = sum(pnls)
-avg_score = sum(s.get("score", 0) for s in outcomes) / total if total else 0
-wins_pnl  = [p for p in pnls if p > 0]
-loss_pnl  = [p for p in pnls if p < 0]
-pf        = abs(sum(wins_pnl)/sum(loss_pnl)) if sum(loss_pnl) != 0 else 0
 
-# portfolio stats
-closed    = port.get("closed_trades", [])
-open_pos  = port.get("open_positions", [])
-total_pnl_usdt   = sum(t.get("pnl_usdt", 0) for t in closed)
-total_wins_usdt  = sum(t.get("pnl_usdt", 0) for t in closed if t.get("pnl_usdt", 0) > 0)
-total_loss_usdt  = sum(t.get("pnl_usdt", 0) for t in closed if t.get("pnl_usdt", 0) < 0)
-n_wins    = sum(1 for t in closed if t.get("pnl_usdt", 0) > 0)
-n_losses  = sum(1 for t in closed if t.get("pnl_usdt", 0) < 0)
-port_wr   = n_wins / len(closed) * 100 if closed else 0
-cur_bal   = port.get("current_balance", 0)
-init_bal  = port.get("initial_balance", 0)
+# open positions dari portfolio lokal
+open_pos    = port.get("open_positions", [])
 open_margin = sum(p.get("margin", 0) for p in open_pos)
 unrealized  = sum(p.get("unrealized_pnl", 0) for p in open_pos)
 
@@ -131,113 +221,147 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Set / Update Balance
-    st.markdown("### 💰 Saldo Trading")
-    with st.form("set_balance"):
-        new_bal = st.number_input("Balance (USDT)", min_value=0.0, value=float(cur_bal) if cur_bal else 0.0, step=10.0, format="%.2f")
-        bal_note = st.text_input("Catatan (opsional)", placeholder="Deposit, profit withdraw...")
-        if st.form_submit_button("💾 Simpan Saldo", use_container_width=True):
-            old = port.get("current_balance", 0)
-            if not port.get("balance_set"):
-                port["initial_balance"] = new_bal
-                port["balance_set"] = True
-            port["current_balance"] = new_bal
-            port.setdefault("balance_history", []).append({
-                "ts": now_str(), "event": "UPDATE",
-                "old_balance": old, "new_balance": new_bal, "note": bal_note
-            })
-            save_portfolio(port)
-            st.success(f"Saldo diupdate: ${new_bal:,.2f}")
-            st.rerun()
+    # Status koneksi Sheets
+    if gs_ok:
+        st.markdown(f'<div class="sync-badge">● Sheets terhubung · {datetime.now(WIB).strftime("%H:%M")}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="err-badge">✕ Sheets offline</div>', unsafe_allow_html=True)
+        if gs_trades_err:
+            st.caption(f"Error: {gs_trades_err[:80]}")
 
     st.divider()
 
-    # ── Quick stats sidebar
-    if port.get("balance_set"):
-        pnl_color = "#00e676" if total_pnl_usdt >= 0 else "#ff4757"
-        roi = (cur_bal - init_bal) / init_bal * 100 if init_bal else 0
-        roi_color = "#00e676" if roi >= 0 else "#ff4757"
-        st.markdown(f"""
-        <div style='margin-bottom:8px'>
-          <div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px'>Balance</div>
-          <div style='font-size:24px;font-weight:900;font-family:"JetBrains Mono";color:#e2e8f0'>${cur_bal:,.2f}</div>
-          <div style='font-size:12px;color:{roi_color};margin-top:2px'>{'+' if roi>=0 else ''}{roi:.2f}% ROI</div>
-        </div>
-        <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px'>
-          <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
-            <div style='font-size:10px;color:#64748b;margin-bottom:4px'>REALIZED P&L</div>
-            <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{pnl_color}'>{'+' if total_pnl_usdt>=0 else ''}{total_pnl_usdt:,.2f}</div>
-          </div>
-          <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
-            <div style='font-size:10px;color:#64748b;margin-bottom:4px'>UNREALIZED</div>
-            <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{"#00e676" if unrealized>=0 else "#ff4757"}'>{'+' if unrealized>=0 else ''}{unrealized:,.2f}</div>
-          </div>
-          <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
-            <div style='font-size:10px;color:#64748b;margin-bottom:4px'>WIN RATE</div>
-            <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{"#00e676" if port_wr>=50 else "#ff4757"}'>{port_wr:.0f}%</div>
-          </div>
-          <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
-            <div style='font-size:10px;color:#64748b;margin-bottom:4px'>OPEN POS</div>
-            <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:#00d4ff'>{len(open_pos)}</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+    # ── Setup Sheets credentials (kalau belum terhubung)
+    if not gs_ok:
+        with st.expander("⚙️ Setup Google Sheets", expanded=True):
+            st.markdown("""
+            **Cara setup:**
+            1. Buka [Streamlit Cloud App Settings](https://share.streamlit.io)
+            2. Masuk ke app → **Settings → Secrets**
+            3. Paste format berikut:
+
+            ```toml
+            SPREADSHEET_ID = "id_spreadsheet_kamu"
+
+            [google]
+            type = "service_account"
+            project_id = "..."
+            private_key_id = "..."
+            private_key = "-----BEGIN RSA PRIVATE KEY-----\\n..."
+            client_email = "...@....iam.gserviceaccount.com"
+            client_id = "..."
+            token_uri = "https://oauth2.googleapis.com/token"
+            ```
+            """)
+
+    st.markdown("### 💼 Open Positions")
+    if open_pos:
+        for p in open_pos:
+            sign  = 1 if p["direction"]=="LONG" else -1
+            cur   = p.get("current_price", p["entry"])
+            unr   = sign*(cur-p["entry"])/p["entry"]*p["position_size"]
+            unr_c = "#00e676" if unr>=0 else "#ff4757"
+            st.markdown(f"""
+            <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px;margin-bottom:8px'>
+              <div style='display:flex;justify-content:space-between'>
+                <span style='font-weight:800;font-family:"JetBrains Mono"'>{p['coin']}</span>
+                <span style='color:{"#00e676" if p["direction"]=="LONG" else "#ff4757"};font-weight:700'>{'▲' if p['direction']=='LONG' else '▼'} {p['direction']}</span>
+              </div>
+              <div style='font-size:12px;color:#64748b;margin-top:4px'>Entry: ${p['entry']:,.4f} · {p['leverage']}x</div>
+              <div style='font-size:14px;color:{unr_c};font-weight:700;font-family:"JetBrains Mono";margin-top:4px'>{unr:+,.2f} USDT</div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.caption("Tidak ada posisi terbuka")
+
+    st.divider()
+
+    # Balance summary sidebar
+    bal_c = "#00e676" if roi >= 0 else "#ff4757"
+    st.markdown(f"""
+    <div style='margin-bottom:8px'>
+      <div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px'>
+        Balance {'(dari Sheets)' if gs_ok else '(lokal)'}
+      </div>
+      <div style='font-size:26px;font-weight:900;font-family:"JetBrains Mono";color:#e2e8f0'>${cur_bal:,.2f}</div>
+      <div style='font-size:12px;color:{bal_c};margin-top:2px'>{'+' if roi>=0 else ''}{roi:.2f}% ROI dari ${init_bal:,.2f}</div>
+    </div>
+    <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px'>
+      <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
+        <div style='font-size:10px;color:#64748b;margin-bottom:4px'>REALIZED P&L</div>
+        <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{"#00e676" if gs_total_pnl>=0 else "#ff4757"}'>{'+$' if gs_total_pnl>=0 else '-$'}{abs(gs_total_pnl):,.2f}</div>
+      </div>
+      <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
+        <div style='font-size:10px;color:#64748b;margin-bottom:4px'>UNREALIZED</div>
+        <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{"#00e676" if unrealized>=0 else "#ff4757"}'>{unrealized:+,.2f}</div>
+      </div>
+      <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
+        <div style='font-size:10px;color:#64748b;margin-bottom:4px'>WIN RATE</div>
+        <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:{"#00e676" if gs_wr>=50 else "#ff4757"}'>{gs_wr:.0f}%</div>
+      </div>
+      <div style='background:#0f1621;border:1px solid #1e2a38;border-radius:10px;padding:12px'>
+        <div style='font-size:10px;color:#64748b;margin-bottom:4px'>TRADES</div>
+        <div style='font-size:16px;font-weight:800;font-family:"JetBrains Mono";color:#00d4ff'>{len(all_closed)}</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.divider()
     st.markdown(f"""
     <div style='font-size:12px;color:#64748b;text-align:center'>
-      <span class='live-dot'></span>
+      <span class='live-dot'></span>Auto-refresh 30 detik<br>
       {datetime.now(WIB).strftime('%d %b %Y %H:%M WIB')}<br>
       {len(pending)} pending bot · {total} sinyal tracked
     </div>
     """, unsafe_allow_html=True)
 
 # ── HEADER ────────────────────────────────────────────────
-st.markdown("""
-<div style='display:flex;align-items:center;gap:12px;margin-bottom:4px'>
-  <div style='width:10px;height:10px;background:#00d4ff;border-radius:50%;box-shadow:0 0 10px #00d4ff'></div>
-  <span style='font-size:22px;font-weight:900;letter-spacing:-.5px'>CryptoBot <span style="color:#00d4ff">v13</span> · Personal Dashboard</span>
-</div>
-""", unsafe_allow_html=True)
+hc1, hc2 = st.columns([3,1])
+with hc1:
+    st.markdown("""
+    <div style='display:flex;align-items:center;gap:12px;margin-bottom:4px'>
+      <div style='width:10px;height:10px;background:#00d4ff;border-radius:50%;box-shadow:0 0 10px #00d4ff'></div>
+      <span style='font-size:22px;font-weight:900;letter-spacing:-.5px'>CryptoBot <span style="color:#00d4ff">v13</span> · Personal Dashboard</span>
+    </div>
+    """, unsafe_allow_html=True)
+with hc2:
+    if gs_ok:
+        st.markdown(f'<div style="text-align:right;padding-top:6px"><span class="sync-badge">● Live dari Sheets · {datetime.now(WIB).strftime("%H:%M:%S")}</span></div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div style="text-align:right;padding-top:6px"><span class="err-badge">✕ Sheets offline — setup di sidebar</span></div>', unsafe_allow_html=True)
+
 st.divider()
 
 # ── TABS ──────────────────────────────────────────────────
-tab_port, tab_pending, tab_history, tab_coins, tab_lessons, tab_log = st.tabs([
-    "💼 Portfolio",
-    f"⏳ Pending ({len(pending)})",
-    f"📋 Signal History ({total})",
-    f"🪙 Coin Stats ({len(set(s['symbol'] for s in outcomes))})",
+tab_port, tab_open, tab_pending, tab_history, tab_coins, tab_lessons, tab_log = st.tabs([
+    "📊 Portfolio",
+    f"📍 Open Positions ({len(open_pos)})",
+    f"⏳ Bot Pending ({len(pending)})",
+    f"📋 Trade History ({len(all_closed)})",
+    f"🪙 Coin Stats",
     f"🧠 Lessons ({len(lessons)})",
     f"📡 Decision Log",
 ])
 
 # ══════════════════════════════════════════════════════════
-# TAB 0 — PORTFOLIO / PERSONAL TRACKING
+# TAB 0 — PORTFOLIO OVERVIEW
 # ══════════════════════════════════════════════════════════
 with tab_port:
-    if not port.get("balance_set"):
-        st.warning("⬅️ Set balance dulu di sidebar kiri sebelum mulai tracking.")
-
-    # ── KPI row
-    c1,c2,c3,c4,c5 = st.columns(5)
-    kpi_data = [
-        (c1, "Balance Sekarang", f"${cur_bal:,.2f}", f"Initial ${init_bal:,.2f}",
-         "#00d4ff"),
-        (c2, "Realized P&L", f"${total_pnl_usdt:+,.2f}",
-         f"{'+' if (cur_bal-init_bal)/init_bal*100>=0 else ''}{(cur_bal-init_bal)/init_bal*100:.2f}% ROI" if init_bal else "Set balance dulu",
-         "#00e676" if total_pnl_usdt>=0 else "#ff4757"),
-        (c3, "Unrealized P&L", f"${unrealized:+,.2f}",
-         f"{len(open_pos)} posisi terbuka · margin ${open_margin:,.2f}",
+    # KPI row
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    kpis = [
+        (c1, "Balance", f"${cur_bal:,.2f}", f"ROI {roi:+.2f}%", "#00d4ff"),
+        (c2, "Realized P&L", f"${gs_total_pnl:+,.2f}", f"{len(all_closed)} trades ditutup",
+         "#00e676" if gs_total_pnl>=0 else "#ff4757"),
+        (c3, "Unrealized", f"${unrealized:+,.2f}", f"{len(open_pos)} posisi terbuka · margin ${open_margin:,.2f}",
          "#00e676" if unrealized>=0 else "#ff4757"),
-        (c4, "Win / Loss", f"{n_wins} / {n_losses}",
-         f"Win rate {port_wr:.1f}% · {len(closed)} trades",
-         "#00e676" if port_wr>=50 else "#ff4757"),
-        (c5, "Best / Worst Trade",
-         f"${max((t.get('pnl_usdt',0) for t in closed), default=0):+,.2f}",
-         f"Worst: ${min((t.get('pnl_usdt',0) for t in closed), default=0):+,.2f}",
-         "#ffd32a"),
+        (c4, "Win Rate", f"{gs_wr:.1f}%", f"{gs_wins} win · {gs_losses} loss",
+         "#00e676" if gs_wr>=50 else "#ff4757"),
+        (c5, "Profit Factor", f"{gs_pf:.2f}", f"Avg win ${gs_avg_win:+,.2f} / loss ${gs_avg_loss:,.2f}",
+         "#00e676" if gs_pf>=1 else "#ff4757"),
+        (c6, "Best / Worst", f"${gs_best:+,.2f}", f"Worst: ${gs_worst:,.2f}", "#ffd32a"),
     ]
-    for col, label, val, sub, color in kpi_data:
+    for col,label,val,sub,color in kpis:
         with col:
             st.markdown(f"""
             <div class="kpi">
@@ -246,221 +370,231 @@ with tab_port:
               <div class="kpi-sub">{sub}</div>
             </div>""", unsafe_allow_html=True)
 
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    left, right = st.columns([1.1, 0.9])
+    left, right = st.columns([1.4, 0.6])
 
-    # ── Open Positions
     with left:
-        st.markdown('<div class="sec-label">Live Positions</div><div class="sec-title">Posisi Terbuka</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-label">Equity Curve</div><div class="sec-title">Pertumbuhan Balance</div>', unsafe_allow_html=True)
 
-        with st.expander("➕ Tambah Posisi Baru", expanded=len(open_pos)==0):
-            with st.form("add_position", clear_on_submit=True):
-                fc1,fc2 = st.columns(2)
-                coin      = fc1.text_input("Coin", placeholder="BTC, ETH, SOL...").upper().replace("USDT","")
-                direction = fc2.selectbox("Arah", ["LONG","SHORT"])
-                fc3,fc4,fc5 = st.columns(3)
-                entry     = fc3.number_input("Entry Price ($)", min_value=0.0, format="%.4f")
-                margin    = fc4.number_input("Margin (USDT)", min_value=0.0, format="%.2f")
-                leverage  = fc5.number_input("Leverage (x)", min_value=1, max_value=125, value=1)
-                fc6,fc7 = st.columns(2)
-                tp_price  = fc6.number_input("Take Profit ($)", min_value=0.0, format="%.4f")
-                sl_price  = fc7.number_input("Stop Loss ($)", min_value=0.0, format="%.4f")
-                note      = st.text_input("Catatan", placeholder="Setup reason, confluence level...")
-                if st.form_submit_button("🚀 Buka Posisi", use_container_width=True):
-                    if coin and entry > 0 and margin > 0:
-                        pos = {
-                            "id": int(datetime.now().timestamp()*1000),
-                            "coin": coin, "direction": direction,
-                            "entry": entry, "margin": margin, "leverage": leverage,
-                            "position_size": round(margin * leverage, 2),
-                            "tp": tp_price, "sl": sl_price,
-                            "current_price": entry, "unrealized_pnl": 0.0,
-                            "note": note, "opened_at": now_str(),
-                        }
-                        port.setdefault("open_positions", []).append(pos)
-                        save_portfolio(port)
-                        st.success(f"✅ Posisi {coin} {direction} dibuka!")
-                        st.rerun()
-                    else:
-                        st.error("Lengkapi coin, entry price, dan margin dulu.")
-
-        if not open_pos:
-            st.info("Belum ada posisi terbuka.")
-        else:
-            for i, pos in enumerate(open_pos):
-                cur  = pos.get("current_price", pos["entry"])
-                sign = 1 if pos["direction"] == "LONG" else -1
-                unr  = sign * (cur - pos["entry"]) / pos["entry"] * pos["position_size"]
-                unr_pct = sign * (cur - pos["entry"]) / pos["entry"] * 100
-                pnl_color = "#00e676" if unr >= 0 else "#ff4757"
-                dir_color = "#00e676" if pos["direction"]=="LONG" else "#ff4757"
-                dir_arrow = "▲" if pos["direction"]=="LONG" else "▼"
-
-                tp_dist = ((pos["tp"] - pos["entry"]) / pos["entry"] * 100) if pos["tp"] else None
-                sl_dist = ((pos["sl"] - pos["entry"]) / pos["entry"] * 100) if pos["sl"] else None
-
-                with st.container():
-                    st.markdown(f"""
-                    <div class="card" style="border-left:3px solid {pnl_color}">
-                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                        <div style="display:flex;align-items:center;gap:10px">
-                          <span style="font-size:17px;font-weight:800;font-family:'JetBrains Mono'">{pos['coin']}USDT</span>
-                          <span style="color:{dir_color};font-weight:700">{dir_arrow} {pos['direction']}</span>
-                          <span style="background:#1e2a38;color:#94a3b8;font-size:11px;padding:2px 8px;border-radius:6px">{pos['leverage']}x</span>
-                        </div>
-                        <span style="font-size:12px;color:#64748b">{fmt_time(pos.get('opened_at',''))}</span>
-                      </div>
-                      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:12px">
-                        <div><div style="font-size:10px;color:#64748b">Entry</div><div class="mono" style="font-weight:700">${pos['entry']:,.4f}</div></div>
-                        <div><div style="font-size:10px;color:#64748b">Pos Size</div><div class="mono" style="font-weight:700">${pos['position_size']:,.2f}</div></div>
-                        <div><div style="font-size:10px;color:#64748b">TP</div><div class="mono" style="color:#00e676">${pos['tp']:,.4f}{f' ({tp_dist:+.2f}%)' if tp_dist else ''}</div></div>
-                        <div><div style="font-size:10px;color:#64748b">SL</div><div class="mono" style="color:#ff4757">${pos['sl']:,.4f}{f' ({sl_dist:+.2f}%)' if sl_dist else ''}</div></div>
-                        <div><div style="font-size:10px;color:#64748b">Unrealized P&L</div><div class="mono" style="color:{pnl_color};font-weight:800">{unr:+,.2f} ({unr_pct:+.2f}%)</div></div>
-                      </div>
-                      {f'<div style="font-size:12px;color:#64748b;margin-bottom:10px">📝 {pos["note"]}</div>' if pos.get("note") else ""}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    cc1,cc2,cc3 = st.columns([2,1,1])
-                    with cc1:
-                        new_price = st.number_input(f"Update harga {pos['coin']}", min_value=0.0,
-                                                    value=float(pos.get("current_price", pos["entry"])),
-                                                    key=f"price_{pos['id']}", format="%.4f", label_visibility="visible")
-                    with cc2:
-                        if st.button("🔄 Update Harga", key=f"upd_{pos['id']}", use_container_width=True):
-                            port["open_positions"][i]["current_price"] = new_price
-                            unr_new = sign * (new_price - pos["entry"]) / pos["entry"] * pos["position_size"]
-                            port["open_positions"][i]["unrealized_pnl"] = round(unr_new, 2)
-                            save_portfolio(port)
-                            st.rerun()
-                    with cc3:
-                        if st.button("✅ Tutup Posisi", key=f"close_{pos['id']}", use_container_width=True):
-                            exit_price = pos.get("current_price", pos["entry"])
-                            pnl_usdt   = sign * (exit_price - pos["entry"]) / pos["entry"] * pos["position_size"]
-                            pnl_pct    = sign * (exit_price - pos["entry"]) / pos["entry"] * 100
-                            trade = {
-                                "id": pos["id"], "coin": pos["coin"], "direction": pos["direction"],
-                                "entry": pos["entry"], "exit": exit_price,
-                                "margin": pos["margin"], "leverage": pos["leverage"],
-                                "position_size": pos["position_size"],
-                                "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": round(pnl_pct, 2),
-                                "result": "WIN" if pnl_usdt > 0 else ("LOSS" if pnl_usdt < 0 else "BREAKEVEN"),
-                                "note": pos.get("note",""),
-                                "opened_at": pos.get("opened_at",""), "closed_at": now_str(),
-                            }
-                            port["closed_trades"].append(trade)
-                            port["open_positions"].pop(i)
-                            port["current_balance"] = round(port.get("current_balance", 0) + pnl_usdt, 2)
-                            port.setdefault("balance_history", []).append({
-                                "ts": now_str(), "event": "WIN" if pnl_usdt>0 else "LOSS",
-                                "pnl": round(pnl_usdt,2), "balance": port["current_balance"],
-                                "coin": pos["coin"]
-                            })
-                            save_portfolio(port)
-                            st.success(f"Posisi {pos['coin']} ditutup · P&L: ${pnl_usdt:+,.2f}")
-                            st.rerun()
-
-    # ── Closed Trades
-    with right:
-        st.markdown('<div class="sec-label">Trade History</div><div class="sec-title">Closed Trades</div>', unsafe_allow_html=True)
-
-        if not closed:
-            st.info("Belum ada trade yang ditutup.")
-        else:
-            # equity mini-chart dengan st.bar_chart sederhana
-            cum = 0
-            eq_labels, eq_vals = [], []
-            for t in closed:
-                cum += t.get("pnl_usdt", 0)
-                eq_labels.append(t.get("coin","?"))
-                eq_vals.append(round(cum, 2))
-
+        if gs_balance:
             import pandas as pd
-            df_eq = pd.DataFrame({"Cumulative P&L": eq_vals})
-            st.line_chart(df_eq, height=140, use_container_width=True)
+            bal_rows = [{"Waktu": r.get("Timestamp",""), "Balance": parse_float(r.get("Balance After (USDT)",0))} for r in gs_balance]
+            df_bal = pd.DataFrame(bal_rows)
+            if not df_bal.empty:
+                st.line_chart(df_bal.set_index("Waktu")["Balance"], height=240, use_container_width=True)
+        elif all_closed:
+            import pandas as pd
+            cum, vals = 0, []
+            for t in all_closed:
+                cum += parse_float(t.get("PnL (USDT)", 0))
+                vals.append({"Trade": t.get("Coin","?"), "Cumulative P&L": round(cum,2)})
+            df_eq = pd.DataFrame(vals)
+            st.line_chart(df_eq.set_index("Trade"), height=240, use_container_width=True)
+        else:
+            st.info("Belum ada data balance dari Sheets.")
 
+        # Tabel 10 trade terakhir
+        if all_closed:
+            st.markdown('<div class="sec-label" style="margin-top:24px">Trade Terbaru</div>', unsafe_allow_html=True)
+            recent_trades = list(reversed(all_closed))[:10]
             rows = ""
-            for t in sorted(closed, key=lambda x: x.get("closed_at",""), reverse=True):
-                p = t.get("pnl_usdt", 0)
-                pct = t.get("pnl_pct", 0)
-                rc = "#00e676" if p>0 else "#ff4757"
-                dir_c = "#00e676" if t["direction"]=="LONG" else "#ff4757"
-                res_label = "✅ WIN" if t["result"]=="WIN" else ("❌ LOSS" if t["result"]=="LOSS" else "➖ BE")
+            for t in recent_trades:
+                pnl   = parse_float(t.get("PnL (USDT)",0))
+                pnlp  = parse_float(t.get("PnL (%)",0))
+                res   = str(t.get("Result","")).upper()
+                rc    = "#00e676" if res=="WIN" else "#ff4757" if res=="LOSS" else "#ffd32a"
+                dc    = "#00e676" if str(t.get("Direction","")).upper()=="LONG" else "#ff4757"
+                da    = "▲" if str(t.get("Direction","")).upper()=="LONG" else "▼"
                 rows += f"""<tr>
-                  <td class="mono" style="font-weight:700;color:#e2e8f0">{t['coin']}</td>
-                  <td style="color:{dir_c};font-weight:700">{'▲' if t['direction']=='LONG' else '▼'} {t['direction']}</td>
-                  <td class="mono" style="font-size:12px">${t['entry']:,.4f}<br><span style="color:#64748b">→${t['exit']:,.4f}</span></td>
-                  <td><span style="color:{rc};font-weight:700">{res_label}</span></td>
-                  <td class="mono" style="color:{rc};font-weight:700">{p:+,.2f}<br><span style="font-size:11px">{pct:+.2f}%</span></td>
-                  <td style="color:#64748b;font-size:11px">{fmt_time(t.get('closed_at',''))}</td>
+                  <td style="color:#64748b;font-size:12px">{fmt_time(t.get('Timestamp',''))}</td>
+                  <td class="mono" style="font-weight:700;color:#e2e8f0">{t.get('Coin','—')}</td>
+                  <td style="color:{dc};font-weight:700">{da} {t.get('Direction','—')}</td>
+                  <td class="mono">${parse_float(t.get('Entry Price',0)):,.4f}</td>
+                  <td style="color:#94a3b8;font-size:12px">{t.get('Leverage','—')}x · ${parse_float(t.get('Margin (USDT)',0)):,.2f}</td>
+                  <td><span style="background:{rc}22;color:{rc};border:1px solid {rc}55;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700">{'✅ WIN' if res=='WIN' else '❌ LOSS' if res=='LOSS' else '➖ BE'}</span></td>
+                  <td class="mono" style="color:{rc};font-weight:700">{pnl:+,.2f} ({pnlp:+.2f}%)</td>
+                  <td style="color:#64748b;font-size:12px">{t.get('Note','')[:30]}</td>
                 </tr>"""
-
             st.markdown(f"""
             <div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:14px">
               <table class="tbl">
-                <thead><tr><th>Coin</th><th>Arah</th><th>Entry/Exit</th><th>Hasil</th><th>P&L</th><th>Waktu</th></tr></thead>
+                <thead><tr><th>Waktu</th><th>Coin</th><th>Arah</th><th>Entry</th><th>Size</th><th>Hasil</th><th>P&L</th><th>Note</th></tr></thead>
                 <tbody>{rows}</tbody>
               </table>
             </div>""", unsafe_allow_html=True)
 
-        # Manual add closed trade
-        with st.expander("➕ Input Trade Manual"):
-            with st.form("add_closed", clear_on_submit=True):
-                mc1,mc2 = st.columns(2)
-                m_coin  = mc1.text_input("Coin").upper().replace("USDT","")
-                m_dir   = mc2.selectbox("Arah", ["LONG","SHORT"], key="m_dir")
-                mc3,mc4,mc5 = st.columns(3)
-                m_entry  = mc3.number_input("Entry ($)", min_value=0.0, format="%.4f", key="m_entry")
-                m_exit   = mc4.number_input("Exit ($)", min_value=0.0, format="%.4f", key="m_exit")
-                m_margin = mc5.number_input("Margin (USDT)", min_value=0.0, format="%.2f", key="m_margin")
-                mc6,mc7 = st.columns(2)
-                m_lev    = mc6.number_input("Leverage", min_value=1, max_value=125, value=1, key="m_lev")
-                m_note   = mc7.text_input("Catatan", key="m_note")
-                m_date   = st.date_input("Tanggal trade")
-                if st.form_submit_button("💾 Simpan Trade", use_container_width=True):
-                    if m_coin and m_entry>0 and m_exit>0 and m_margin>0:
-                        sign   = 1 if m_dir=="LONG" else -1
-                        pos_sz = m_margin * m_lev
-                        pnl_u  = sign * (m_exit - m_entry) / m_entry * pos_sz
-                        pnl_p  = sign * (m_exit - m_entry) / m_entry * 100
-                        trade  = {
-                            "id": int(datetime.now().timestamp()*1000),
-                            "coin": m_coin, "direction": m_dir,
-                            "entry": m_entry, "exit": m_exit,
-                            "margin": m_margin, "leverage": m_lev,
-                            "position_size": round(pos_sz,2),
-                            "pnl_usdt": round(pnl_u,2), "pnl_pct": round(pnl_p,2),
-                            "result": "WIN" if pnl_u>0 else ("LOSS" if pnl_u<0 else "BREAKEVEN"),
-                            "note": m_note,
-                            "opened_at": str(m_date), "closed_at": str(m_date),
-                        }
-                        port["closed_trades"].append(trade)
-                        port["current_balance"] = round(port.get("current_balance",0)+pnl_u,2)
-                        save_portfolio(port)
-                        st.success(f"Trade {m_coin} disimpan · P&L ${pnl_u:+,.2f}")
-                        st.rerun()
-                    else:
-                        st.error("Lengkapi semua field.")
+    with right:
+        st.markdown('<div class="sec-label">Distribusi</div><div class="sec-title">Win vs Loss</div>', unsafe_allow_html=True)
+
+        # Pie-like stats
+        total_trades = len(all_closed)
+        if total_trades:
+            n_be = total_trades - gs_wins - gs_losses
+            be_pct = n_be/total_trades*100 if total_trades else 0
+            be_html = (
+                f'<div style="margin-bottom:16px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">'
+                f'<span style="color:#ffd32a;font-weight:700">➖ BE</span>'
+                f'<span style="font-weight:700;color:#ffd32a">{n_be} ({be_pct:.1f}%)</span></div>'
+                f'<div class="prog-wrap"><div class="prog-fill" style="width:{be_pct:.0f}%;background:#ffd32a"></div></div></div>'
+            ) if n_be else ""
+            st.markdown(f"""
+            <div class="card">
+              <div style="margin-bottom:16px">
+                <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+                  <span style="color:#00e676;font-weight:700">✅ Win</span>
+                  <span style="font-family:'JetBrains Mono';font-weight:700;color:#00e676">{gs_wins} ({gs_wr:.1f}%)</span>
+                </div>
+                <div class="prog-wrap"><div class="prog-fill" style="width:{gs_wr:.0f}%;background:#00e676"></div></div>
+              </div>
+              <div style="margin-bottom:16px">
+                <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+                  <span style="color:#ff4757;font-weight:700">❌ Loss</span>
+                  <span style="font-family:'JetBrains Mono';font-weight:700;color:#ff4757">{gs_losses} ({gs_losses/total_trades*100:.1f}%)</span>
+                </div>
+                <div class="prog-wrap"><div class="prog-fill" style="width:{gs_losses/total_trades*100:.0f}%;background:#ff4757"></div></div>
+              </div>
+              {be_html}
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Per-coin P&L dari Sheets
+            coin_pnl = {}
+            for t in all_closed:
+                c = t.get("Coin","?")
+                if c not in coin_pnl: coin_pnl[c] = {"pnl":0,"trades":0,"wins":0}
+                coin_pnl[c]["pnl"]    += parse_float(t.get("PnL (USDT)",0))
+                coin_pnl[c]["trades"] += 1
+                if str(t.get("Result","")).upper()=="WIN": coin_pnl[c]["wins"] += 1
+
+            st.markdown('<div class="sec-label" style="margin-top:20px">P&L per Coin</div>', unsafe_allow_html=True)
+            for coin, cs in sorted(coin_pnl.items(), key=lambda x:-x[1]["pnl"]):
+                wr_c = cs["wins"]/cs["trades"]*100 if cs["trades"] else 0
+                pc   = "#00e676" if cs["pnl"]>=0 else "#ff4757"
+                st.markdown(f"""
+                <div style="display:flex;justify-content:space-between;padding:10px 14px;background:#0f1621;border:1px solid #1e2a38;border-radius:10px;margin-bottom:6px">
+                  <div>
+                    <span style="font-weight:800;font-family:'JetBrains Mono'">{coin}</span>
+                    <span style="font-size:11px;color:#64748b;margin-left:8px">{cs['trades']} trade · {wr_c:.0f}% WR</span>
+                  </div>
+                  <span style="color:{pc};font-weight:700;font-family:'JetBrains Mono'">{cs['pnl']:+,.2f}</span>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.info("Belum ada trade di Sheets.")
 
 # ══════════════════════════════════════════════════════════
-# TAB 1 — PENDING
+# TAB 1 — OPEN POSITIONS (manual input lokal)
+# ══════════════════════════════════════════════════════════
+with tab_open:
+    st.markdown('<div class="sec-label">Live</div><div class="sec-title">Posisi Terbuka</div>', unsafe_allow_html=True)
+
+    with st.expander("➕ Tambah Posisi Baru", expanded=len(open_pos)==0):
+        with st.form("add_position", clear_on_submit=True):
+            fc1,fc2 = st.columns(2)
+            coin      = fc1.text_input("Coin", placeholder="BTC, ETH, SOL...").upper().replace("USDT","")
+            direction = fc2.selectbox("Arah", ["LONG","SHORT"])
+            fc3,fc4,fc5 = st.columns(3)
+            entry    = fc3.number_input("Entry Price ($)", min_value=0.0, format="%.4f")
+            margin   = fc4.number_input("Margin (USDT)", min_value=0.0, format="%.2f")
+            leverage = fc5.number_input("Leverage (x)", min_value=1, max_value=125, value=1)
+            fc6,fc7 = st.columns(2)
+            tp_price = fc6.number_input("Take Profit ($)", min_value=0.0, format="%.4f")
+            sl_price = fc7.number_input("Stop Loss ($)", min_value=0.0, format="%.4f")
+            note     = st.text_input("Catatan", placeholder="Setup, confluence level...")
+            if st.form_submit_button("🚀 Buka Posisi", use_container_width=True):
+                if coin and entry > 0 and margin > 0:
+                    pos = {"id":int(time.time()*1000),"coin":coin,"direction":direction,
+                           "entry":entry,"margin":margin,"leverage":leverage,
+                           "position_size":round(margin*leverage,2),
+                           "tp":tp_price,"sl":sl_price,"current_price":entry,
+                           "unrealized_pnl":0.0,"note":note,"opened_at":now_str()}
+                    port.setdefault("open_positions",[]).append(pos)
+                    save_portfolio(port)
+                    st.success(f"✅ Posisi {coin} {direction} dibuka!")
+                    st.rerun()
+                else:
+                    st.error("Lengkapi coin, entry price, dan margin.")
+
+    if not open_pos:
+        st.info("Tidak ada posisi terbuka. Tambah di atas atau masuk trade via bot Telegram.")
+    else:
+        for i, pos in enumerate(open_pos):
+            sign  = 1 if pos["direction"]=="LONG" else -1
+            cur   = pos.get("current_price", pos["entry"])
+            unr   = sign*(cur-pos["entry"])/pos["entry"]*pos["position_size"]
+            unrp  = sign*(cur-pos["entry"])/pos["entry"]*100
+            pc    = "#00e676" if unr>=0 else "#ff4757"
+            dc    = "#00e676" if pos["direction"]=="LONG" else "#ff4757"
+            tp_d  = (pos["tp"]-pos["entry"])/pos["entry"]*100 if pos.get("tp") else None
+            sl_d  = (pos["sl"]-pos["entry"])/pos["entry"]*100 if pos.get("sl") else None
+
+            st.markdown(f"""
+            <div class="card" style="border-left:3px solid {pc}">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="font-size:17px;font-weight:800;font-family:'JetBrains Mono'">{pos['coin']}USDT</span>
+                  <span style="color:{dc};font-weight:700">{'▲' if pos['direction']=='LONG' else '▼'} {pos['direction']}</span>
+                  <span style="background:#1e2a38;color:#94a3b8;font-size:11px;padding:2px 8px;border-radius:6px">{pos['leverage']}x</span>
+                </div>
+                <span style="font-size:12px;color:#64748b">{fmt_time(pos.get('opened_at',''))}</span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:12px">
+                <div><div style="font-size:10px;color:#64748b">Entry</div><div class="mono" style="font-weight:700">${pos['entry']:,.4f}</div></div>
+                <div><div style="font-size:10px;color:#64748b">Pos Size</div><div class="mono">${pos['position_size']:,.2f}</div></div>
+                <div><div style="font-size:10px;color:#64748b">TP</div><div class="mono" style="color:#00e676">${pos.get('tp',0):,.4f}{f' ({tp_d:+.2f}%)' if tp_d else ''}</div></div>
+                <div><div style="font-size:10px;color:#64748b">SL</div><div class="mono" style="color:#ff4757">${pos.get('sl',0):,.4f}{f' ({sl_d:.2f}%)' if sl_d else ''}</div></div>
+                <div><div style="font-size:10px;color:#64748b">Unrealized P&L</div><div class="mono" style="color:{pc};font-weight:800">{unr:+,.2f} ({unrp:+.2f}%)</div></div>
+              </div>
+              {f'<div style="font-size:12px;color:#64748b;margin-bottom:8px">📝 {pos["note"]}</div>' if pos.get("note") else ""}
+            </div>""", unsafe_allow_html=True)
+
+            cc1,cc2,cc3 = st.columns([2,1,1])
+            with cc1:
+                new_price = st.number_input(f"Harga terkini {pos['coin']}", min_value=0.0,
+                    value=float(pos.get("current_price",pos["entry"])),
+                    key=f"price_{pos['id']}", format="%.4f")
+            with cc2:
+                if st.button("🔄 Update", key=f"upd_{pos['id']}", use_container_width=True):
+                    port["open_positions"][i]["current_price"] = new_price
+                    unr_new = sign*(new_price-pos["entry"])/pos["entry"]*pos["position_size"]
+                    port["open_positions"][i]["unrealized_pnl"] = round(unr_new,2)
+                    save_portfolio(port)
+                    st.rerun()
+            with cc3:
+                if st.button("✅ Tutup", key=f"close_{pos['id']}", use_container_width=True):
+                    exit_price = pos.get("current_price",pos["entry"])
+                    pnl_u  = sign*(exit_price-pos["entry"])/pos["entry"]*pos["position_size"]
+                    pnl_p  = sign*(exit_price-pos["entry"])/pos["entry"]*100
+                    trade  = {"id":pos["id"],"coin":pos["coin"],"direction":pos["direction"],
+                              "entry":pos["entry"],"exit":exit_price,"margin":pos["margin"],
+                              "leverage":pos["leverage"],"position_size":pos["position_size"],
+                              "pnl_usdt":round(pnl_u,2),"pnl_pct":round(pnl_p,2),
+                              "result":"WIN" if pnl_u>0 else ("LOSS" if pnl_u<0 else "BREAKEVEN"),
+                              "note":pos.get("note",""),"opened_at":pos.get("opened_at",""),"closed_at":now_str()}
+                    port["closed_trades"].append(trade)
+                    port["open_positions"].pop(i)
+                    port["current_balance"] = round(port.get("current_balance",0)+pnl_u,2)
+                    save_portfolio(port)
+                    st.success(f"Ditutup · P&L ${pnl_u:+,.2f}")
+                    st.rerun()
+
+# ══════════════════════════════════════════════════════════
+# TAB 2 — BOT PENDING
 # ══════════════════════════════════════════════════════════
 with tab_pending:
-    st.markdown('<div class="sec-label">Live Watchlist</div><div class="sec-title">Sinyal Pending Bot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-label">Live Watchlist Bot</div><div class="sec-title">Sinyal Pending</div>', unsafe_allow_html=True)
     if not pending:
         st.info("Tidak ada sinyal pending saat ini.")
     else:
         for s in pending:
-            created = datetime.fromisoformat(s["created_at"].replace("Z","+00:00")).astimezone(WIB)
-            age_hrs = (datetime.now(WIB)-created).total_seconds()/3600
-            timeout = s.get("timeout_hours",24)
+            created  = datetime.fromisoformat(s["created_at"].replace("Z","+00:00")).astimezone(WIB)
+            age_hrs  = (datetime.now(WIB)-created).total_seconds()/3600
+            timeout  = s.get("timeout_hours",24)
             pct_done = min(age_hrs/timeout*100,100)
             dist_tp  = (s.get("tp",s["entry_price"])-s["entry_price"])/s["entry_price"]*100
             dist_sl  = (s.get("sl",s["entry_price"])-s["entry_price"])/s["entry_price"]*100
             reasons  = " ".join(f'<span class="chip">{r[:55]}</span>' for r in s.get("reasons",[])[:3])
-            dir_c    = "#00e676" if s["direction"]=="LONG" else "#ff4757"
-            dir_a    = "▲" if s["direction"]=="LONG" else "▼"
+            dc       = "#00e676" if s["direction"]=="LONG" else "#ff4757"
             bar_c    = "#ff4757" if pct_done>80 else "#ffd32a" if pct_done>50 else "#00d4ff"
 
             st.markdown(f"""
@@ -468,16 +602,16 @@ with tab_pending:
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
                 <div style="display:flex;align-items:center;gap:10px">
                   <span style="font-size:17px;font-weight:800;font-family:'JetBrains Mono'">{s['symbol']}</span>
-                  <span style="color:{dir_c};font-weight:700">{dir_a} {s['direction']}</span>
+                  <span style="color:{dc};font-weight:700">{'▲' if s['direction']=='LONG' else '▼'} {s['direction']}</span>
                   <span style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff44;padding:2px 10px;border-radius:100px;font-size:11px;font-weight:700">{s.get('signal_type','—')}</span>
                 </div>
                 <span style="color:#ffd32a;font-weight:700;font-family:'JetBrains Mono'">{s.get('score','—')}/100</span>
               </div>
               <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px">
                 <div><div style="font-size:10px;color:#64748b">Entry</div><div class="mono" style="font-weight:700">${s['entry_price']:,.4f}</div></div>
-                <div><div style="font-size:10px;color:#64748b">TP</div><div class="mono" style="color:#00e676;font-weight:700">${s.get('tp',0):,.4f} ({dist_tp:+.2f}%)</div></div>
-                <div><div style="font-size:10px;color:#64748b">SL</div><div class="mono" style="color:#ff4757;font-weight:700">${s.get('sl',0):,.4f} ({dist_sl:.2f}%)</div></div>
-                <div><div style="font-size:10px;color:#64748b">Confluence</div><div style="font-weight:700;font-size:13px">{s.get('confluence_level','—')}</div></div>
+                <div><div style="font-size:10px;color:#64748b">TP</div><div class="mono" style="color:#00e676">${s.get('tp',0):,.4f} ({dist_tp:+.2f}%)</div></div>
+                <div><div style="font-size:10px;color:#64748b">SL</div><div class="mono" style="color:#ff4757">${s.get('sl',0):,.4f} ({dist_sl:.2f}%)</div></div>
+                <div><div style="font-size:10px;color:#64748b">Confluence</div><div style="font-weight:700">{s.get('confluence_level','—')}</div></div>
               </div>
               <div style="margin-bottom:10px">{reasons}</div>
               <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-bottom:5px">
@@ -488,69 +622,66 @@ with tab_pending:
             </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# TAB 2 — SIGNAL HISTORY
+# TAB 3 — FULL TRADE HISTORY dari Sheets
 # ══════════════════════════════════════════════════════════
 with tab_history:
-    st.markdown('<div class="sec-label">Riwayat Bot</div><div class="sec-title">Semua Signal</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-label">Google Sheets</div><div class="sec-title">Semua Trade</div>', unsafe_allow_html=True)
 
-    def status_badge(s):
-        m = {"TP_HIT":("#00e676","✅ TP"),"SL_HIT":("#ff4757","❌ SL"),
-             "EXPIRED_WIN":("#ffd32a","⏱ EXP W"),"EXPIRED_LOSS":("#ff9800","⏱ EXP L")}
-        c,l = m.get(s,("#64748b",s))
-        return f'<span style="background:{c}22;color:{c};border:1px solid {c}55;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700">{l}</span>'
+    if not gs_ok:
+        st.warning("Sambungkan Google Sheets dulu untuk melihat full history.")
+        # fallback: tampilkan signal outcomes bot
+        st.markdown("**Signal outcomes bot (fallback):**")
 
-    f1,f2,f3 = st.columns(3)
-    fs  = f1.multiselect("Status", ["TP_HIT","SL_HIT","EXPIRED_WIN","EXPIRED_LOSS"])
-    fd  = f2.multiselect("Arah", ["LONG","SHORT"])
-    ft  = f3.multiselect("Type", list({s["signal_type"] for s in outcomes}))
+    f1,f2 = st.columns(2)
+    fdir  = f1.multiselect("Filter Arah", ["LONG","SHORT"])
+    fres  = f2.multiselect("Filter Hasil", ["WIN","LOSS","BREAKEVEN"])
 
-    filt = outcomes[:]
-    if fs: filt = [s for s in filt if s["status"] in fs]
-    if fd: filt = [s for s in filt if s["direction"] in fd]
-    if ft: filt = [s for s in filt if s["signal_type"] in ft]
-    filt = sorted(filt, key=lambda x: x.get("created_at",""), reverse=True)
+    source = all_closed if gs_ok else []
+    if fdir: source = [t for t in source if str(t.get("Direction","")).upper() in fdir]
+    if fres: source = [t for t in source if str(t.get("Result","")).upper() in fres]
 
+    source = list(reversed(source))
     rows = ""
-    for s in filt:
-        p = s.get("pnl_pct")
-        pc = "#00e676" if p and p>=0 else "#ff4757"
-        dc = "#00e676" if s["direction"]=="LONG" else "#ff4757"
-        da = "▲" if s["direction"]=="LONG" else "▼"
+    for t in source:
+        pnl  = parse_float(t.get("PnL (USDT)",0))
+        pnlp = parse_float(t.get("PnL (%)",0))
+        res  = str(t.get("Result","")).upper()
+        rc   = "#00e676" if res=="WIN" else "#ff4757" if res=="LOSS" else "#ffd32a"
+        dc   = "#00e676" if str(t.get("Direction","")).upper()=="LONG" else "#ff4757"
+        da   = "▲" if str(t.get("Direction","")).upper()=="LONG" else "▼"
         rows += f"""<tr>
-          <td class="mono" style="font-weight:700;color:#e2e8f0">{s['symbol']}</td>
-          <td style="color:{dc};font-weight:700">{da} {s['direction']}</td>
-          <td style="font-size:12px;color:#94a3b8">{s.get('signal_type','—')}</td>
-          <td class="mono">${s.get('entry_price',0):,.4f}</td>
-          <td class="mono" style="color:#00e676">${s.get('tp',0):,.4f}</td>
-          <td class="mono" style="color:#ff4757">${s.get('sl',0):,.4f}</td>
-          <td>{status_badge(s['status'])}</td>
-          <td class="mono" style="color:{pc};font-weight:700">{f'{p:+.2f}%' if p is not None else '—'}</td>
-          <td style="color:#ffd32a;font-weight:700">{s.get('score','—')}</td>
-          <td style="color:#64748b;font-size:12px">{fmt_time(s.get('created_at',''))}</td>
+          <td style="color:#64748b;font-size:12px">{fmt_time(t.get('Timestamp',''))}</td>
+          <td class="mono" style="font-weight:700;color:#e2e8f0">{t.get('Coin','—')}</td>
+          <td style="color:{dc};font-weight:700">{da} {t.get('Direction','—')}</td>
+          <td class="mono">${parse_float(t.get('Entry Price',0)):,.4f}</td>
+          <td style="color:#94a3b8;font-size:12px">{t.get('Leverage','—')}x</td>
+          <td class="mono" style="color:#64748b">${parse_float(t.get('Margin (USDT)',0)):,.2f}</td>
+          <td><span style="background:{rc}22;color:{rc};border:1px solid {rc}55;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700">{'✅ WIN' if res=='WIN' else '❌ LOSS' if res=='LOSS' else '➖ BE'}</span></td>
+          <td class="mono" style="color:{rc};font-weight:700">{pnl:+,.2f}<br><span style="font-size:11px">{pnlp:+.2f}%</span></td>
+          <td style="color:#64748b;font-size:11px">{str(t.get('Note',''))[:35]}</td>
         </tr>"""
 
-    st.markdown(f"""
-    <div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:14px;margin-top:8px">
-      <table class="tbl">
-        <thead><tr><th>Symbol</th><th>Arah</th><th>Type</th><th>Entry</th><th>TP</th><th>SL</th>
-          <th>Status</th><th>P&L %</th><th>Score</th><th>Waktu</th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
-    </div>
-    <div style="color:#64748b;font-size:12px;margin-top:8px">{len(filt)} / {total} sinyal</div>
-    """, unsafe_allow_html=True)
+    if rows:
+        st.markdown(f"""
+        <div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:14px;margin-top:8px">
+          <table class="tbl">
+            <thead><tr><th>Waktu</th><th>Coin</th><th>Arah</th><th>Entry</th><th>Lev</th><th>Margin</th><th>Hasil</th><th>P&L</th><th>Note</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+        <div style="color:#64748b;font-size:12px;margin-top:8px">{len(source)} trades</div>""", unsafe_allow_html=True)
+    elif gs_ok:
+        st.info("Belum ada trade di spreadsheet.")
 
 # ══════════════════════════════════════════════════════════
-# TAB 3 — COIN STATS
+# TAB 4 — COIN STATS (dari bot signals)
 # ══════════════════════════════════════════════════════════
 with tab_coins:
-    st.markdown('<div class="sec-label">Per Koin</div><div class="sec-title">Performa Tiap Coin</div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="sec-label">Bot Signals</div><div class="sec-title">Performa Per Coin</div>', unsafe_allow_html=True)
     coin_stats = {}
     for s in outcomes:
         sym = s["symbol"]
-        if sym not in coin_stats:
-            coin_stats[sym] = {"total":0,"wins":0,"losses":0,"pnl":0.0,"signals":[]}
+        if sym not in coin_stats: coin_stats[sym] = {"total":0,"wins":0,"losses":0,"pnl":0.0,"signals":[]}
         coin_stats[sym]["total"] += 1
         if s["status"] in ("TP_HIT","EXPIRED_WIN"): coin_stats[sym]["wins"] += 1
         elif s["status"] in ("SL_HIT","EXPIRED_LOSS"): coin_stats[sym]["losses"] += 1
@@ -570,13 +701,12 @@ with tab_coins:
     for sym, stat in sorted_coins:
         wr  = stat["wins"]/stat["total"]*100 if stat["total"] else 0
         pnl = stat["pnl"]
-        pc  = "#00e676" if wr>=60 else "#ffd32a" if wr>=40 else "#ff4757"
+        wc  = "#00e676" if wr>=60 else "#ffd32a" if wr>=40 else "#ff4757"
         nc  = "#00e676" if pnl>=0 else "#ff4757"
         recent = sorted(stat["signals"], key=lambda x: x.get("created_at",""), reverse=True)[:5]
         dots = "".join(f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{dot_color(s["status"])};margin:1px" title="{s["status"]}"></span>' for s in recent)
-
         st.markdown(f"""
-        <div class="card" style="margin-bottom:10px">
+        <div class="card" style="margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div style="display:flex;align-items:center;gap:14px">
               <span style="font-size:17px;font-weight:800;font-family:'JetBrains Mono'">{sym}</span>
@@ -584,37 +714,35 @@ with tab_coins:
               <span>5 terakhir: {dots}</span>
             </div>
             <div style="display:flex;gap:20px;text-align:right">
-              <div><div style="font-size:10px;color:#64748b">Win Rate</div><div style="font-size:20px;font-weight:800;font-family:'JetBrains Mono';color:{pc}">{wr:.0f}%</div></div>
+              <div><div style="font-size:10px;color:#64748b">Win Rate</div><div style="font-size:20px;font-weight:800;font-family:'JetBrains Mono';color:{wc}">{wr:.0f}%</div></div>
               <div><div style="font-size:10px;color:#64748b">Total P&L</div><div style="font-size:20px;font-weight:800;font-family:'JetBrains Mono';color:{nc}">{'+' if pnl>=0 else ''}{pnl:.2f}%</div></div>
               <div><div style="font-size:10px;color:#64748b">TP/SL</div><div style="font-size:16px;font-weight:700"><span style="color:#00e676">{stat['wins']}</span>/<span style="color:#ff4757">{stat['losses']}</span></div></div>
             </div>
           </div>
-          <div class="prog-wrap" style="margin-top:10px"><div class="prog-fill" style="width:{wr:.0f}%;background:{pc}"></div></div>
+          <div class="prog-wrap" style="margin-top:10px"><div class="prog-fill" style="width:{wr:.0f}%;background:{wc}"></div></div>
         </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# TAB 4 — LESSONS
+# TAB 5 — LESSONS
 # ══════════════════════════════════════════════════════════
 with tab_lessons:
-    st.markdown('<div class="sec-label">Learning Engine</div><div class="sec-title">Lessons yang Dipelajari Bot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-label">Learning Engine</div><div class="sec-title">Lessons Bot</div>', unsafe_allow_html=True)
     if not lessons:
         st.info("Belum ada lessons.")
     else:
-        of = st.selectbox("Filter outcome", ["Semua","good","poor","neutral"])
+        of = st.selectbox("Filter", ["Semua","good","poor","neutral"])
         shown = lessons if of=="Semua" else [l for l in lessons if l.get("outcome")==of]
-        shown = sorted(shown, key=lambda x: x.get("created_at",""), reverse=True)
-        for les in shown[:40]:
+        for les in sorted(shown, key=lambda x:x.get("created_at",""), reverse=True)[:40]:
             out = les.get("outcome","—")
             c   = "#00e676" if out=="good" else "#ff4757" if out=="poor" else "#ffd32a"
-            conf= les.get("confidence",0)
-            tags= " ".join(f'<span class="chip">{t}</span>' for t in les.get("tags",[]))
             p   = les.get("pnl_pct")
             ps  = f' · P&L: <span style="color:{"#00e676" if p and p>=0 else "#ff4757"}">{p:+.2f}%</span>' if p is not None else ""
+            tags= " ".join(f'<span class="chip">{t}</span>' for t in les.get("tags",[]))
             st.markdown(f"""
             <div class="card" style="margin-bottom:8px;border-left:3px solid {c}">
               <div style="display:flex;justify-content:space-between;margin-bottom:8px">
                 <div><span style="background:{c}22;color:{c};border:1px solid {c}55;padding:2px 10px;border-radius:100px;font-size:11px;font-weight:700">{out.upper()}</span>
-                  <span style="font-size:11px;color:#64748b;margin-left:10px">confidence {conf:.0%}{ps}</span></div>
+                  <span style="font-size:11px;color:#64748b;margin-left:10px">conf {les.get('confidence',0):.0%}{ps}</span></div>
                 <span style="font-size:11px;color:#64748b">{fmt_time(les.get('created_at',''))}</span>
               </div>
               <div style="font-size:14px;color:#cbd5e1;line-height:1.6">{les.get('rule','')}</div>
@@ -622,14 +750,14 @@ with tab_lessons:
             </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# TAB 5 — DECISION LOG
+# TAB 6 — DECISION LOG
 # ══════════════════════════════════════════════════════════
 with tab_log:
     st.markdown('<div class="sec-label">Bot Activity</div><div class="sec-title">Decision Log</div>', unsafe_allow_html=True)
     if not decisions:
         st.info("Belum ada decision log.")
     else:
-        recent = sorted(decisions, key=lambda x: x.get("ts",""), reverse=True)[:60]
+        recent = sorted(decisions, key=lambda x:x.get("ts",""), reverse=True)[:60]
         rows = ""
         for d in recent:
             dec = d.get("decision","—")
@@ -637,7 +765,7 @@ with tab_log:
             top = " ".join(f'<span class="chip">{r[:50]}</span>' for r in (d.get("top_reasons") or [])[:2])
             rows += f"""<tr>
               <td style="color:#64748b;font-size:12px">{fmt_time(d.get('ts',''))}</td>
-              <td class="mono" style="font-weight:700;color:#e2e8f0">{d.get('symbol','—')}</td>
+              <td class="mono" style="font-weight:700">{d.get('symbol','—')}</td>
               <td style="font-size:12px;color:#94a3b8">{d.get('actor','—')}</td>
               <td><span style="background:{c}22;color:{c};border:1px solid {c}55;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:700">{dec}</span></td>
               <td style="color:#ffd32a;font-family:'JetBrains Mono';font-weight:700">{d.get('score','—')}</td>
