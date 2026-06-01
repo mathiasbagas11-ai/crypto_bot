@@ -303,11 +303,11 @@ NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 # v15: DeepSeek — primary AI strategist sebelum sinyal dikirim ke Telegram
 DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
 
-# v15: Room routing — pisahkan pesan ke room Telegram yang berbeda
-# Fallback ke TELEGRAM_CHAT_ID kalau room khusus belum diset
-SIGNAL_CHAT_ID        = os.getenv("SIGNAL_CHAT_ID", "")        or None
-MARKET_UPDATE_CHAT_ID = os.getenv("MARKET_UPDATE_CHAT_ID", "") or None
-TRADE_REPORT_CHAT_ID  = os.getenv("TRADE_REPORT_CHAT_ID", "")  or None
+# v15: Topic routing — pisahkan pesan ke topic (thread) berbeda dalam satu grup
+# Set THREAD_ID tiap topic di .env (ambil dari URL: t.me/c/groupid/THREAD_ID)
+SIGNAL_THREAD_ID        = os.getenv("SIGNAL_THREAD_ID", "")        or None
+MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
+TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -4911,8 +4911,13 @@ def _sanitize_ai_output(text: str) -> str:
 
     return text.strip()
 
-def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
-    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None)."""
+def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
+                  thread_id: str = None):
+    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None).
+
+    thread_id: message_thread_id untuk Telegram Topics (forum supergroup).
+               Kalau diset, pesan masuk ke topic yang sesuai dalam grup yang sama.
+    """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
         return None
@@ -4927,6 +4932,15 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
     max_len = 4000
     chunks  = [html_message[i:i+max_len] for i in range(0, len(html_message), max_len)]
 
+    # Build base payload — tambahkan message_thread_id kalau ada
+    def _make_payload(text: str, plain: bool = False) -> dict:
+        p = {"chat_id": target, "text": text}
+        if not plain:
+            p["parse_mode"] = "HTML"
+        if thread_id:
+            p["message_thread_id"] = int(thread_id)
+        return p
+
     first_message_id = None
     for chunk in chunks:
         sent = False
@@ -4935,7 +4949,7 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
             try:
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": chunk, "parse_mode": "HTML"},
+                    json=_make_payload(chunk),
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4964,7 +4978,7 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
                 plain = re.sub(r"<[^>]+>", "", chunk)   # strip HTML tags
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": plain},
+                    json=_make_payload(plain, plain=True),
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4989,18 +5003,18 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
 # ─────────────────────────────────────────────
 
 def send_signal(message: str, parse_mode: str = None):
-    """Kirim sinyal ke Signal Room (SIGNAL_CHAT_ID). Fallback ke default chat."""
-    return send_telegram(message, chat_id=SIGNAL_CHAT_ID, parse_mode=parse_mode)
+    """Kirim sinyal ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau thread belum diset."""
+    return send_telegram(message, thread_id=SIGNAL_THREAD_ID, parse_mode=parse_mode)
 
 
 def send_market_update(message: str, parse_mode: str = None):
-    """Kirim news/market update ke Market Update Room (MARKET_UPDATE_CHAT_ID)."""
-    return send_telegram(message, chat_id=MARKET_UPDATE_CHAT_ID, parse_mode=parse_mode)
+    """Kirim news/market update ke topic Market Update (MARKET_UPDATE_THREAD_ID)."""
+    return send_telegram(message, thread_id=MARKET_UPDATE_THREAD_ID, parse_mode=parse_mode)
 
 
 def send_trade_report(message: str, parse_mode: str = None):
-    """Kirim trade outcome/report ke Trade Reports Room (TRADE_REPORT_CHAT_ID)."""
-    return send_telegram(message, chat_id=TRADE_REPORT_CHAT_ID, parse_mode=parse_mode)
+    """Kirim trade outcome/report ke topic Trade Reports (TRADE_REPORT_THREAD_ID)."""
+    return send_telegram(message, thread_id=TRADE_REPORT_THREAD_ID, parse_mode=parse_mode)
 
 
 # ─────────────────────────────────────────────
