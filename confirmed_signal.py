@@ -51,10 +51,17 @@ except ImportError:
 
 # ── News Gate ───────────────────────────────
 try:
-    from news_sentiment import get_news_gate
+    from news_sentiment import get_news_gate, get_structured_news_for_ai
     NEWS_GATE_MODULE = True
 except ImportError:
     NEWS_GATE_MODULE = False
+
+# ── DeepSeek AI ─────────────────────────────
+try:
+    from deepseek_ai import deepseek_signal_review
+    DEEPSEEK_MODULE = True
+except ImportError:
+    DEEPSEEK_MODULE = False
 
 # ── Auto Validator ─────────────────────────
 try:
@@ -466,19 +473,44 @@ def compute_master_score(
 
 def _quick_backtest_validate(symbol: str, direction: str) -> dict:
     """
-    Jalankan quick backtest 7 hari untuk validasi.
-    Pilih strategy terbaik berdasarkan direction:
-      LONG  → coba scalp + prepump, ambil yang lebih bagus
-      SHORT → coba scalp + predump
+    Validasi backtest untuk coin.
+    Priority: cached /btall result (≤7 hari) → live 7-hari backtest.
+    Cached result jauh lebih cepat dan tidak spam API.
 
-    Return: {valid: bool, profit_factor: float, win_rate: float, strategy: str, reason: str}
+    Filosofi: backtest itu untuk MENGUMPULKAN data dulu. Kalau data belum cukup
+    (<BT_MIN_TRADES) → JANGAN blok (insufficient_data=True), biar coin tetap bisa
+    lolos sambil ngumpulin track record. Baru kalau data SUDAH cukup tapi PF jelek
+    → signal ditahan (valid=False).
     """
+    # ── 1. Cek cached btall result terlebih dahulu ──
+    try:
+        from backtest_engine import get_coin_bt_grade
+        cached = get_coin_bt_grade(symbol, max_age_hours=168)
+        if cached and not cached.get("error") and cached.get("total_trades", 0) >= BT_MIN_TRADES:
+            pf    = cached.get("profit_factor", 0)
+            wr    = cached.get("win_rate", 0)
+            n     = cached.get("total_trades", 0)
+            grade = cached.get("_grade", "UNKNOWN")
+            valid = pf >= BT_MIN_PROFIT_FACTOR
+            reason = (
+                f"Cache btall ({grade}): PF={pf:.2f}, WR={wr:.0f}%, {n} trades"
+                if valid else
+                f"Cache btall ({grade}) GAGAL: PF={pf:.2f} < {BT_MIN_PROFIT_FACTOR}"
+            )
+            log.info(f"  {symbol}: backtest from cache — {reason}")
+            return {"valid": valid, "profit_factor": pf, "win_rate": wr,
+                    "trades": n, "strategy": "cached_combined",
+                    "insufficient_data": False, "reason": reason}
+    except Exception as e:
+        log.debug(f"Cache lookup error: {e}")
+
+    # ── 2. Fallback: live quick backtest ──
     try:
         from backtest_engine import run_backtest
     except ImportError:
-        log.warning("backtest_engine tidak tersedia — skip validation")
         return {"valid": True, "profit_factor": 1.0, "win_rate": 50.0,
-                "strategy": "none", "reason": "backtest_engine unavailable, bypassed"}
+                "strategy": "none", "insufficient_data": True,
+                "reason": "backtest_engine unavailable, bypassed"}
 
     strategies = ["scalp", "prepump"] if direction == "LONG" else ["scalp", "predump"]
     best_result = None
@@ -499,30 +531,24 @@ def _quick_backtest_validate(symbol: str, direction: str) -> dict:
             log.debug(f"Quick BT {strat} error: {e}")
 
     if best_result is None:
-        # Tidak ada data cukup → bypass validation
+        # Data belum cukup → bypass (lagi ngumpulin data), JANGAN blok.
         return {"valid": True, "profit_factor": 0.0, "win_rate": 0.0,
-                "strategy": "none", "reason": f"Tidak cukup data BT (<{BT_MIN_TRADES} trades)"}
+                "strategy": "none", "insufficient_data": True,
+                "reason": f"Data BT belum cukup (<{BT_MIN_TRADES} trades) — lolos sambil ngumpulin data"}
 
-    pf  = best_result.get("profit_factor", 0)
-    wr  = best_result.get("win_rate", 0)
-    n   = best_result.get("total_trades", 0)
+    pf    = best_result.get("profit_factor", 0)
+    wr    = best_result.get("win_rate", 0)
+    n     = best_result.get("total_trades", 0)
     strat = best_result.get("_strategy", "?")
-
-    valid  = pf >= BT_MIN_PROFIT_FACTOR
+    valid = pf >= BT_MIN_PROFIT_FACTOR
     reason = (
         f"BT {strat} {BT_DAYS}d: PF={pf:.2f}, WR={wr:.0f}%, {n} trades"
         if valid else
         f"BT {strat} {BT_DAYS}d GAGAL: PF={pf:.2f} < {BT_MIN_PROFIT_FACTOR} — signal ditahan"
     )
-
-    return {
-        "valid":          valid,
-        "profit_factor":  pf,
-        "win_rate":       wr,
-        "trades":         n,
-        "strategy":       strat,
-        "reason":         reason,
-    }
+    return {"valid": valid, "profit_factor": pf, "win_rate": wr,
+            "trades": n, "strategy": strat,
+            "insufficient_data": False, "reason": reason}
 
 
 # ─────────────────────────────────────────────
@@ -679,7 +705,7 @@ def generate_confirmed_signal(
             # Fetch BTC 4H context untuk validator
             btc_tf4h_ctx = None
             try:
-                from crypto_screening_bot_v12 import analyze_timeframe
+                from crypto_screening_bot_v13 import analyze_timeframe
                 btc_tf4h_ctx = analyze_timeframe("BTCUSDT", "4h")
             except Exception:
                 pass
@@ -754,7 +780,7 @@ def generate_confirmed_signal(
     except Exception as e:
         log.debug(f"Feedback check error: {e}")
     try:
-        from crypto_screening_bot_v12 import calculate_trade_plan
+        from crypto_screening_bot_v13 import calculate_trade_plan
         atr_1h = tf_1h.get("atr", 0)
         bt_dir = "PUMP" if direction == "LONG" else "DUMP"
         trade  = calculate_trade_plan(price, bt_dir, atr_1h, tf_4h, tf_1h, tf_15m)
@@ -779,6 +805,59 @@ def generate_confirmed_signal(
                 "tp1_basis": "-4% target", "tp2_basis": "-7% target",
                 "entry_type": "MARKET", "rr": 2.0,
             }
+
+    # 5b. DeepSeek strategic review — adjust entry/TP/SL + news context
+    ai_review = None
+    if DEEPSEEK_MODULE:
+        try:
+            import os as _os
+            _ds_key = _os.getenv("DEEPSEEK_API_KEY", "")
+            if _ds_key:
+                _news_ctx = None
+                if NEWS_GATE_MODULE:
+                    try:
+                        _news_ctx = get_structured_news_for_ai(symbol)
+                    except Exception:
+                        pass
+                ai_review = deepseek_signal_review(
+                    symbol       = symbol,
+                    direction    = direction,
+                    trade        = trade,
+                    master_score = master["master_score"],
+                    reasons      = master.get("reasons", []),
+                    oi_data      = oi_data,
+                    tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
+                    news_context = _news_ctx,
+                    signal_type  = "CONFIRMED",
+                )
+                if ai_review:
+                    # SKIP verdict → batalkan sinyal
+                    if ai_review.get("ai_verdict") == "SKIP":
+                        log.info(f"  {symbol}: DeepSeek SKIP — AI tidak konfirmasi sinyal confirmed")
+                        return None
+                    # Apply price adjustments
+                    if ai_review.get("was_adjusted"):
+                        trade = dict(trade)
+                        trade["entry"] = ai_review["entry"]
+                        trade["tp1"]   = ai_review["tp1"]
+                        trade["tp2"]   = ai_review["tp2"]
+                        trade["sl"]    = ai_review["sl"]
+                        log.info(
+                            f"  {symbol}: DeepSeek adjusted prices "
+                            f"entry={ai_review['entry']:.4f} tp1={ai_review['tp1']:.4f}"
+                        )
+                    # Apply score adjustment
+                    if ai_review.get("score_adj", 0) != 0:
+                        master["master_score"] = max(
+                            0, min(100, master["master_score"] + ai_review["score_adj"])
+                        )
+                    # Store insight in master for formatter
+                    if ai_review.get("insight"):
+                        master["ai_insight"]  = ai_review["insight"]
+                        master["ai_verdict"]  = ai_review.get("ai_verdict", "CONFIRM")
+                        master["ai_adjusted"] = ai_review.get("was_adjusted", False)
+        except Exception as _ds_e:
+            log.warning(f"DeepSeek review error {symbol}: {_ds_e}")
 
     # 6. Set cooldown
     _set_signal_cooldown(symbol)
@@ -1033,13 +1112,30 @@ def format_confirmed_signal_message(signal: dict) -> str:
             f"💡 _Jalankan `/signalbt {sym_key.replace('USDT', '')} 30` untuk lihat historical signal accuracy_",
         ]
 
+    # v15: DeepSeek AI insight
+    ai_insight = signal.get("ai_insight", "")
+    if ai_insight:
+        ai_verdict  = signal.get("ai_verdict", "CONFIRM")
+        ai_adjusted = signal.get("ai_adjusted", False)
+        _v_emoji    = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(ai_verdict, "🤖")
+        lines += [
+            "",
+            "─────── 🤖 DeepSeek AI ───────",
+            f"{_v_emoji} <b>{ai_verdict}</b>",
+        ]
+        for _il in ai_insight.split("\n"):
+            if _il.strip():
+                lines.append(f"  {_il.strip()}")
+        if ai_adjusted:
+            lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
     lines += [
         "",
         "─────── MANAJEMEN RISIKO ───────",
         f"💡 SL wajib! Entry market, TP partial di TP1 (50%)",
         f"   Gunakan `/risk` untuk hitung ukuran posisi",
         "",
-        f"⚠️ _Sinyal ini divalidasi backtest {BT_DAYS}h + 7-layer auto-check. DYOR._",
+        f"⚠️ _Sinyal ini divalidasi backtest {BT_DAYS}h + 7-layer auto-check + DeepSeek AI. DYOR._",
     ]
 
     return "\n".join(lines)
@@ -1128,17 +1224,26 @@ def run_confirmed_signal_scan(
             if tracker_on_signal_sent:
                 trade = signal.get("trade", {})
                 try:
-                    tracker_on_signal_sent(
-                        symbol          = symbol,
-                        signal_type     = "CONFIRMED",
-                        direction       = signal["direction"],
-                        entry_price     = price,
-                        tp              = float(trade.get("tp1", 0) or 0),
-                        sl              = float(trade.get("sl", 0) or 0),
-                        score           = signal["master_score"],
-                        confluence_level= signal["confidence"],
-                        reasons         = signal.get("reasons", [])[:3],
-                    )
+                    _dir    = signal["direction"]
+                    _tp_val = float(trade.get("tp1", 0) or 0)
+                    _sl_val = float(trade.get("sl", 0) or 0)
+                    _entry  = float(trade.get("entry") or price)
+                    _sane   = (_dir == "LONG"  and _tp_val > _entry) or \
+                              (_dir == "SHORT" and _tp_val < _entry)
+                    if _sane and _tp_val and _sl_val:
+                        tracker_on_signal_sent(
+                            symbol          = symbol,
+                            signal_type     = "CONFIRMED",
+                            direction       = _dir,
+                            entry_price     = _entry,
+                            tp              = _tp_val,
+                            sl              = _sl_val,
+                            score           = signal["master_score"],
+                            confluence_level= signal["confidence"],
+                            reasons         = signal.get("reasons", [])[:3],
+                        )
+                    else:
+                        log.warning(f"⚠️ CONFIRMED sanity fail {symbol}: dir={_dir} entry={_entry} tp={_tp_val}")
                 except Exception as e:
                     log.debug(f"Tracker record error: {e}")
 

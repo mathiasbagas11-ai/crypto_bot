@@ -1,0 +1,8 @@
+{
+  "initial_balance": 0,
+  "current_balance": 0,
+  "balance_set": false,
+  "open_positions": [],
+  "closed_trades": [],
+  "balance_history": []
+}

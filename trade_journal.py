@@ -11,6 +11,14 @@ from pathlib import Path
 log = logging.getLogger("trade_journal")
 
 try:
+    from supabase_sync import push_trade, push_balance
+    SUPABASE_MODULE = True
+except ImportError:
+    SUPABASE_MODULE = False
+    def push_trade(t): return False
+    def push_balance(e, a, b, n=""): return False
+
+try:
     import gspread
     from google.oauth2.service_account import Credentials
     GSPREAD_OK = True
@@ -78,136 +86,499 @@ def _ws(spreadsheet, title, headers):
 
 
 
+def _rgb(r, g, b):
+    return {"red": r / 255, "green": g / 255, "blue": b / 255}
+
+def _cell_fmt(sid, r1, r2, c1, c2, fmt):
+    return {"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                  "startColumnIndex": c1, "endColumnIndex": c2},
+        "cell": {"userEnteredFormat": fmt},
+        "fields": "userEnteredFormat",
+    }}
+
+def _merge(sid, r1, r2, c1, c2):
+    return {"mergeCells": {
+        "range": {"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                  "startColumnIndex": c1, "endColumnIndex": c2},
+        "mergeType": "MERGE_ALL",
+    }}
+
+def _col_w(sid, c1, c2, px):
+    return {"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "COLUMNS",
+                  "startIndex": c1, "endIndex": c2},
+        "properties": {"pixelSize": px}, "fields": "pixelSize",
+    }}
+
+def _row_h(sid, r1, r2, px):
+    return {"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "ROWS",
+                  "startIndex": r1, "endIndex": r2},
+        "properties": {"pixelSize": px}, "fields": "pixelSize",
+    }}
+
+def _border(sid, r1, r2, c1, c2, color=None):
+    if color is None:
+        color = {"red": 0.2, "green": 0.25, "blue": 0.35}
+    side = {"style": "SOLID", "colorStyle": {"rgbColor": color}}
+    return {"updateBorders": {
+        "range": {"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                  "startColumnIndex": c1, "endColumnIndex": c2},
+        "top": side, "bottom": side, "left": side, "right": side,
+        "innerHorizontal": side, "innerVertical": side,
+    }}
+
+def _cf_text(sid, r1, r2, c1, c2, cond_type, val, fg, bold=True):
+    return {"addConditionalFormatRule": {"rule": {
+        "ranges": [{"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                    "startColumnIndex": c1, "endColumnIndex": c2}],
+        "booleanRule": {
+            "condition": {"type": cond_type, "values": [{"userEnteredValue": val}]},
+            "format": {"textFormat": {"bold": bold, "foregroundColorStyle": {"rgbColor": fg}}},
+        },
+    }, "index": 0}}
+
+def _cf_bg(sid, r1, r2, c1, c2, cond_type, val, bg):
+    return {"addConditionalFormatRule": {"rule": {
+        "ranges": [{"sheetId": sid, "startRowIndex": r1, "endRowIndex": r2,
+                    "startColumnIndex": c1, "endColumnIndex": c2}],
+        "booleanRule": {
+            "condition": {"type": cond_type, "values": [{"userEnteredValue": val}]},
+            "format": {"backgroundColor": bg},
+        },
+    }, "index": 0}}
+
+
 def _setup_dashboard(spreadsheet):
     try:
+        # ── Set locale ke en_US supaya formula pakai koma (bukan titik koma) ──
         try:
-            old = spreadsheet.worksheet("Dashboard")
-            spreadsheet.del_worksheet(old)
+            spreadsheet.batch_update({"requests": [{
+                "updateSpreadsheetProperties": {
+                    "properties": {"locale": "en_US"},
+                    "fields": "locale",
+                }
+            }]})
+        except Exception as e:
+            log.warning(f"Set locale error (lanjut): {e}")
+
+        # ── Hapus & buat ulang Dashboard ────────────────────────
+        try:
+            spreadsheet.del_worksheet(spreadsheet.worksheet("Dashboard"))
         except Exception:
             pass
-
-        ws = spreadsheet.add_worksheet(title="Dashboard", rows=100, cols=20)
+        ws = spreadsheet.add_worksheet(title="Dashboard", rows=80, cols=14)
         spreadsheet.reorder_worksheets(
             [ws] + [s for s in spreadsheet.worksheets() if s.title != "Dashboard"]
         )
+        sid = ws.id
 
-        # ── SEMUA FORMULA HARDCODED PLAIN STRING ──────────────────────────────
-        # Kutip di dalam formula Sheets = single quote '
-        # Ini fix root cause #ERROR: tidak ada f-string atau variable injection
-        # ─────────────────────────────────────────────────────────────────────
+        # ── Warna palette ────────────────────────────────────────
+        C_BG_HEADER   = _rgb(10,  18,  40)    # navy gelap — judul utama
+        C_BG_KPI      = _rgb(15,  25,  55)    # navy medium — KPI box
+        C_BG_SECTION  = _rgb(20,  35,  70)    # navy — section header
+        C_BG_TH       = _rgb(25,  45,  90)    # biru — table header
+        C_BG_ROW_ALT  = _rgb(16,  22,  44)    # alternating rows
+        C_BG_DARK     = _rgb(12,  18,  36)    # base dark
+        C_BG_EQUITY   = _rgb(10,  18,  40)
 
-        F_TOTAL_TRADE   = "=COUNTA(Trades!A2:A10000)"
-        F_WIN_ALL       = '=COUNTIF(Trades!J2:J10000,"WIN")'
-        F_LOSS_ALL      = '=COUNTIF(Trades!J2:J10000,"LOSS")'
-        F_WINRATE_ALL   = '=IFERROR(ROUND(COUNTIF(Trades!J2:J10000,"WIN")/COUNTA(Trades!J2:J10000)*100,1),0)'
-        F_PNL_ALL       = "=IFERROR(ROUND(SUM(Trades!H2:H10000),2),0)"
-        F_AVG_WIN_ALL   = '=IFERROR(ROUND(AVERAGEIF(Trades!J2:J10000,"WIN",Trades!H2:H10000),2),0)'
-        F_AVG_LOSS_ALL  = '=IFERROR(ROUND(AVERAGEIF(Trades!J2:J10000,"LOSS",Trades!H2:H10000),2),0)'
-        F_BEST_ALL      = "=IFERROR(ROUND(MAX(Trades!H2:H10000),2),0)"
-        F_WORST_ALL     = "=IFERROR(ROUND(MIN(Trades!H2:H10000),2),0)"
-        F_PF_ALL        = '=IFERROR(ROUND(SUMIF(Trades!J2:J10000,"WIN",Trades!H2:H10000)/ABS(SUMIF(Trades!J2:J10000,"LOSS",Trades!H2:H10000)),2),0)'
-        F_LS_ALL        = '=IFERROR(COUNTIF(Trades!C2:C10000,"LONG")&" : "&COUNTIF(Trades!C2:C10000,"SHORT"),"0 : 0")'
-        # INDEX+COUNTA untuk saldo terakhir - tidak pakai MATCH(9^9) yg salah kalau saldo turun
-        F_SALDO         = "=IFERROR(INDEX(Balance!D2:D10000,COUNTA(Balance!D2:D10000)),0)"
+        C_WHITE       = _rgb(255, 255, 255)
+        C_ACCENT      = _rgb(0,   180, 255)   # cyan accent
+        C_GREEN       = _rgb(0,   200, 100)
+        C_RED         = _rgb(255,  70,  70)
+        C_YELLOW      = _rgb(255, 200,  50)
+        C_MUTED       = _rgb(140, 160, 200)
 
-        # Minggu ini - TEXT(TODAY()-7,"yyyy-mm-dd") dibandingkan LEFT(Timestamp,10)
-        F_TRADE_WEEK    = '=IFERROR(SUMPRODUCT((LEN(Trades!A2:A10000)>0)*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),0)'
-        F_WIN_WEEK      = '=IFERROR(SUMPRODUCT((Trades!J2:J10000="WIN")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),0)'
-        F_LOSS_WEEK     = '=IFERROR(SUMPRODUCT((Trades!J2:J10000="LOSS")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),0)'
-        F_WINRATE_WEEK  = '=IFERROR(ROUND(SUMPRODUCT((Trades!J2:J10000="WIN")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd")))/SUMPRODUCT((LEN(Trades!A2:A10000)>0)*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd")))*100,1),0)'
-        # N() wrap kolom H untuk handle cell kosong supaya tidak error
-        F_PNL_WEEK      = '=IFERROR(ROUND(SUMPRODUCT((LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))*N(Trades!H2:H10000)),2),0)'
-        F_BEST_WEEK     = '=IFERROR(ROUND(MAXIFS(Trades!H2:H10000,Trades!A2:A10000,">="&TEXT(TODAY()-7,"yyyy-mm-dd")),2),0)'
-        F_WORST_WEEK    = '=IFERROR(ROUND(MINIFS(Trades!H2:H10000,Trades!A2:A10000,">="&TEXT(TODAY()-7,"yyyy-mm-dd")),2),0)'
-        F_LONG_WEEK     = '=IFERROR(SUMPRODUCT((Trades!C2:C10000="LONG")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),0)'
-        F_SHORT_WEEK    = '=IFERROR(SUMPRODUCT((Trades!C2:C10000="SHORT")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),0)'
-        F_LS_WEEK       = '=IFERROR(SUMPRODUCT((Trades!C2:C10000="LONG")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd")))&" : "&SUMPRODUCT((Trades!C2:C10000="SHORT")*(LEFT(Trades!A2:A10000,10)>=TEXT(TODAY()-7,"yyyy-mm-dd"))),"0 : 0")'
+        ALIGN_C = {"horizontalAlignment": "CENTER"}
+        ALIGN_R = {"horizontalAlignment": "RIGHT"}
+        ALIGN_L = {"horizontalAlignment": "LEFT"}
 
-        # QUERY per coin - TANPA label clause (sumber error di locale non-EN Google Sheets)
-        # headers=0 karena kita pakai manual header row di atas QUERY
-        F_QUERY_COIN    = "=IFERROR(QUERY(Trades!B2:J10000,\"select B, count(B), countif(J, 'WIN'), countif(J, 'LOSS'), round(countif(J, 'WIN')/count(B)*100,1), round(sum(H),2), round(avg(H),2), round(max(H),2) where B <> '' group by B order by sum(H) desc\",0),\"Belum ada data\")"
+        def txt(bold=False, size=10, fg=None, italic=False):
+            t = {"bold": bold, "fontSize": size, "italic": italic}
+            if fg:
+                t["foregroundColorStyle"] = {"rgbColor": fg}
+            return {"textFormat": t}
 
-        F_SPARKLINE     = '=IFERROR(SPARKLINE(Balance!D2:D10000,{"charttype","line";"color","#00C853";"linewidth",3}),"Belum ada data")'
+        def cell(bg=None, text_fmt=None, align=None, wrap=None):
+            f = {}
+            if bg:   f["backgroundColor"] = bg
+            if text_fmt: f["textFormat"]   = text_fmt
+            if align:    f.update(align)
+            if wrap:     f["wrapStrategy"] = wrap
+            return f
+
+        # ── Formulas ────────────────────────────────────────────
+        # Saldo = Initial Balance + SUM semua PnL dari Trades
+        # Lebih akurat daripada ambil entry terakhir Balance sheet
+        F_INIT_BAL     = '=IFERROR(SUMIF(Balance!B2:B10000,"INITIAL BALANCE",Balance!D2:D10000),0)'
+        F_SALDO        = '=IFERROR(ROUND(SUMIF(Balance!B2:B10000,"INITIAL BALANCE",Balance!D2:D10000)+SUM(Trades!H2:H10000),2),0)'
+        F_TOTAL        = "=COUNTA(Trades!A2:A10000)"
+        F_WIN          = '=COUNTIF(Trades!J2:J10000,"WIN")'
+        F_LOSS         = '=COUNTIF(Trades!J2:J10000,"LOSS")'
+        F_WR           = '=IFERROR(ROUND(COUNTIF(Trades!J2:J10000,"WIN")/COUNTA(Trades!J2:J10000)*100,1)&"%","-")'
+        F_PNL          = "=IFERROR(ROUND(SUM(Trades!H2:H10000),2),0)"
+        F_PF           = '=IFERROR(ROUND(SUMIF(Trades!J2:J10000,"WIN",Trades!H2:H10000)/ABS(SUMIF(Trades!J2:J10000,"LOSS",Trades!H2:H10000)),2),"-")'
+        F_AVG_WIN      = '=IFERROR(ROUND(AVERAGEIF(Trades!J2:J10000,"WIN",Trades!H2:H10000),2),0)'
+        F_AVG_LOSS     = '=IFERROR(ROUND(AVERAGEIF(Trades!J2:J10000,"LOSS",Trades!H2:H10000),2),0)'
+        F_BEST         = "=IFERROR(ROUND(MAX(Trades!H2:H10000),2),0)"
+        F_WORST        = "=IFERROR(ROUND(MIN(Trades!H2:H10000),2),0)"
+        F_LS           = '=IFERROR(COUNTIF(Trades!C2:C10000,"LONG")&" L  /  "&COUNTIF(Trades!C2:C10000,"SHORT")&" S","0 / 0")'
+
+        _W  = 'TEXT(TODAY()-7,"yyyy-mm-dd")'
+        _TS = "LEFT(Trades!A2:A10000,10)"
+        _RES= "Trades!J2:J10000"
+        _PNL= "Trades!H2:H10000"
+        _DIR= "Trades!C2:C10000"
+
+        F_TW   = f'=IFERROR(SUMPRODUCT((LEN(Trades!A2:A10000)>0)*({_TS}>={_W})),0)'
+        F_WW   = f'=IFERROR(SUMPRODUCT(({_RES}="WIN")*({_TS}>={_W})),0)'
+        F_LW   = f'=IFERROR(SUMPRODUCT(({_RES}="LOSS")*({_TS}>={_W})),0)'
+        F_WRW  = f'=IFERROR(ROUND(SUMPRODUCT(({_RES}="WIN")*({_TS}>={_W}))/SUMPRODUCT((LEN(Trades!A2:A10000)>0)*({_TS}>={_W}))*100,1)&"%","-")'
+        F_PNLW = f'=IFERROR(ROUND(SUMPRODUCT(({_TS}>={_W})*N({_PNL})),2),0)'
+        F_BW   = f'=IFERROR(ROUND(MAXIFS({_PNL},Trades!A2:A10000,">="&{_W}),2),0)'
+        F_WW2  = f'=IFERROR(ROUND(MINIFS({_PNL},Trades!A2:A10000,">="&{_W}),2),0)'
+        F_LSW  = f'=IFERROR(SUMPRODUCT(({_DIR}="LONG")*({_TS}>={_W}))&" L  /  "&SUMPRODUCT(({_DIR}="SHORT")*({_TS}>={_W}))&" S","0 / 0")'
+
+        F_QUERY = "=IFERROR(QUERY(Trades!B2:J10000,\"select B, count(B), countif(J, 'WIN'), countif(J, 'LOSS'), round(countif(J, 'WIN')/count(B)*100,1), round(sum(H),2), round(avg(H),2), round(max(H),2), round(min(H),2) where B <> '' group by B order by sum(H) desc\",0),\"Belum ada data\")"
+        F_SPARK = '=IFERROR(SPARKLINE(Balance!D2:D10000,{"charttype","line";"color","#00C853";"linewidth",2;"nan policy","skip"})," ")'
+
+        # ── Layout data ──────────────────────────────────────────
+        # 14 kolom: A-N (index 0-13)
+        # Col layout:
+        #   A(0)=spacer  B(1-2)=KPI label  C(3-4)=KPI value  ...repeated x6
+        #   Full width cols for section headers, tables
+
+        # Pakai layout sederhana: 9 kolom (A-I)
+        # A: label all-time   B: value all-time   C: spacer
+        # D: label week       E: value week       F: spacer
+        # G-I: equity / extra
+
+        NC = 9  # number of columns used
 
         data = [
-            # R1 Title
-            ["🚀 CRYPTO TRADE DASHBOARD", "", "", "", "", "", "", ""],
-            # R2 spacer
-            ["", "", "", "", "", "", "", ""],
-            # R3 section headers
-            ["📊 OVERVIEW ALL TIME", "", "", "", "📅 MINGGU INI (7 HARI)", "", "", ""],
-            # R4-R15 data rows: Label | blank | Value | blank | Label | blank | Value | blank
-            ["Total Trade",           "", F_TOTAL_TRADE,  "", "Trade Minggu Ini",       "", F_TRADE_WEEK,    ""],
-            ["Win",                   "", F_WIN_ALL,       "", "Win Minggu Ini",          "", F_WIN_WEEK,      ""],
-            ["Loss",                  "", F_LOSS_ALL,      "", "Loss Minggu Ini",         "", F_LOSS_WEEK,     ""],
-            ["Win Rate %",            "", F_WINRATE_ALL,   "", "Win Rate Minggu Ini %",   "", F_WINRATE_WEEK,  ""],
-            ["Total PnL (USDT)",      "", F_PNL_ALL,       "", "PnL Minggu Ini",          "", F_PNL_WEEK,      ""],
-            ["Avg Win (USDT)",        "", F_AVG_WIN_ALL,   "", "Best Trade Minggu Ini",   "", F_BEST_WEEK,     ""],
-            ["Avg Loss (USDT)",       "", F_AVG_LOSS_ALL,  "", "Worst Trade Minggu Ini",  "", F_WORST_WEEK,    ""],
-            ["Best Trade (USDT)",     "", F_BEST_ALL,      "", "Long Minggu Ini",         "", F_LONG_WEEK,     ""],
-            ["Worst Trade (USDT)",    "", F_WORST_ALL,     "", "Short Minggu Ini",        "", F_SHORT_WEEK,    ""],
-            ["Profit Factor",         "", F_PF_ALL,        "", "Long vs Short Minggu",    "", F_LS_WEEK,       ""],
-            ["Long vs Short",         "", F_LS_ALL,        "", "",                        "", "",               ""],
-            ["Saldo Sekarang (USDT)", "", F_SALDO,         "", "",                        "", "",               ""],
-            # R16 spacer
-            ["", "", "", "", "", "", "", ""],
-            # R17 per coin header
-            ["🪙 PER COIN BREAKDOWN", "", "", "", "", "", "", ""],
-            # R18 manual table headers
-            ["Coin", "Total Trade", "Win", "Loss", "Win Rate %", "Total PnL (USDT)", "Avg PnL (USDT)", "Best Trade"],
-            # R19 QUERY
-            [F_QUERY_COIN, "", "", "", "", "", "", ""],
-            # R20-21 spacer
-            ["", "", "", "", "", "", "", ""],
-            ["", "", "", "", "", "", "", ""],
-            # R22 equity header
-            ["📈 EQUITY CURVE (Saldo dari waktu ke waktu)", "", "", "", "", "", "", ""],
-            # R23 sparkline
-            [F_SPARKLINE, "", "", "", "", "", "", ""],
+            # Row 1: MAIN TITLE (A1:I1)
+            ["🤖  CRYPTO TRADE JOURNAL  v13", "", "", "", "", "", "", "", ""],
+            # Row 2: subtitle
+            ["Semua angka otomatis update dari bot Telegram", "", "", "", "", "", "", "", ""],
+            # Row 3: spacer
+            [""] * NC,
+            # Row 4: KPI LABELS row
+            ["💰 SALDO SEKARANG", "", "🏦 MODAL AWAL", "", "📈 TOTAL P&L", "", "🎯 WIN RATE", "", ""],
+            # Row 5: KPI VALUES row
+            [F_SALDO, "", F_INIT_BAL, "", F_PNL, "", F_WR, "", ""],
+            # Row 6: KPI labels row 2
+            ["⚡ PROFIT FACTOR", "", "🏆 BEST TRADE", "", "💔 WORST TRADE", "", "📊 TOTAL TRADES", "", ""],
+            # Row 7: KPI values row 2
+            [F_PF, "", F_BEST, "", F_WORST, "", F_TOTAL, "", ""],
+            # Row 8: spacer
+            [""] * NC,
+            # Row 9: section headers
+            ["📊  ALL TIME", "", "", "📅  MINGGU INI  (7 HARI)", "", "", "📈  EQUITY CURVE", "", ""],
+            # Row 10-18: two-column stats + sparkline spanning
+            ["Total Trade",    F_TOTAL,   "", "Total Trade",    F_TW,    "", F_SPARK, "", ""],
+            ["Win",            F_WIN,     "", "Win",            F_WW,    "", "",       "", ""],
+            ["Loss",           F_LOSS,    "", "Loss",           F_LW,    "", "",       "", ""],
+            ["Win Rate",       F_WR,      "", "Win Rate",       F_WRW,   "", "",       "", ""],
+            ["Total P&L",      F_PNL,     "", "Total P&L",      F_PNLW,  "", "",       "", ""],
+            ["Avg Win",        F_AVG_WIN, "", "Best Trade",     F_BW,    "", "",       "", ""],
+            ["Avg Loss",       F_AVG_LOSS,"", "Worst Trade",    F_WW2,   "", "",       "", ""],
+            ["Best Trade",     F_BEST,    "", "Long vs Short",  F_LSW,   "", "",       "", ""],
+            ["Worst Trade",    F_WORST,   "", "",               "",      "", "",       "", ""],
+            # Row 19: spacer
+            [""] * NC,
+            # Row 20: per coin header
+            ["🪙  PER COIN BREAKDOWN", "", "", "", "", "", "", "", ""],
+            # Row 21: table headers
+            ["Coin", "Trades", "Win", "Loss", "Win Rate %", "Total PnL (USDT)", "Avg PnL", "Best Trade", "Worst Trade"],
+            # Row 22: QUERY (spans from A22)
+            [F_QUERY, "", "", "", "", "", "", "", ""],
         ]
 
         ws.update("A1", data, value_input_option="USER_ENTERED")
 
-        sid = ws.id
-        requests = [
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 8},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 16}, "backgroundColor": {"red": 0.05, "green": 0.05, "blue": 0.1}}}, "fields": "userEnteredFormat"}},
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 2, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 8},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 11}, "backgroundColor": {"red": 0.1, "green": 0.15, "blue": 0.25}}}, "fields": "userEnteredFormat"}},
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 16, "endRowIndex": 17, "startColumnIndex": 0, "endColumnIndex": 8},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 11}, "backgroundColor": {"red": 0.1, "green": 0.15, "blue": 0.25}}}, "fields": "userEnteredFormat"}},
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 17, "endRowIndex": 18, "startColumnIndex": 0, "endColumnIndex": 8},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.15, "green": 0.2, "blue": 0.3}}}, "fields": "userEnteredFormat"}},
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 0, "endColumnIndex": 1},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}}, "fields": "userEnteredFormat"}},
-            {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 4, "endColumnIndex": 5},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}}, "fields": "userEnteredFormat"}},
-            {"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1}, "properties": {"pixelSize": 200}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3}, "properties": {"pixelSize": 160}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 4, "endIndex": 5}, "properties": {"pixelSize": 200}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 6, "endIndex": 7}, "properties": {"pixelSize": 160}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 22, "endIndex": 23}, "properties": {"pixelSize": 120}, "fields": "pixelSize"}},
+        # ── batchUpdate requests ─────────────────────────────────
+        reqs = []
+
+        # Merge cells for title, subtitle, section headers, KPI boxes
+        reqs += [
+            _merge(sid, 0, 1, 0, NC),   # R1: title full width
+            _merge(sid, 1, 2, 0, NC),   # R2: subtitle
+            _merge(sid, 3, 4, 0, 2),    # KPI label: Saldo
+            _merge(sid, 3, 4, 2, 4),    # KPI label: PnL
+            _merge(sid, 3, 4, 4, 6),    # KPI label: Win Rate
+            _merge(sid, 3, 4, 6, 9),    # KPI label: Profit Factor
+            _merge(sid, 4, 5, 0, 2),    # KPI value: Saldo
+            _merge(sid, 4, 5, 2, 4),    # KPI value: PnL
+            _merge(sid, 4, 5, 4, 6),    # KPI value: Win Rate
+            _merge(sid, 4, 5, 6, 9),    # KPI value: Profit Factor
+            _merge(sid, 5, 6, 0, 2),    # KPI2 label: Best
+            _merge(sid, 5, 6, 2, 4),    # KPI2 label: Worst
+            _merge(sid, 5, 6, 4, 6),    # KPI2 label: L/S
+            _merge(sid, 5, 6, 6, 9),    # KPI2 label: Total
+            _merge(sid, 6, 7, 0, 2),    # KPI2 val: Best
+            _merge(sid, 6, 7, 2, 4),    # KPI2 val: Worst
+            _merge(sid, 6, 7, 4, 6),    # KPI2 val: L/S
+            _merge(sid, 6, 7, 6, 9),    # KPI2 val: Total
+            _merge(sid, 8, 9, 0, 3),    # Section: All Time
+            _merge(sid, 8, 9, 3, 6),    # Section: Week
+            _merge(sid, 8, 9, 6, 9),    # Section: Equity header
+            _merge(sid, 9, 18, 6, 9),   # Sparkline big cell
+            _merge(sid, 19, 20, 0, NC), # spacer
+            _merge(sid, 20, 21, 0, NC), # Per coin header full width
         ]
 
-        cf = [
-            {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 2, "endColumnIndex": 3}],
-                "booleanRule": {"condition": {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]}, "format": {"textFormat": {"bold": True, "foregroundColorStyle": {"rgbColor": {"red": 0.0, "green": 0.8, "blue": 0.2}}}}}}, "index": 0}},
-            {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 2, "endColumnIndex": 3}],
-                "booleanRule": {"condition": {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}]}, "format": {"textFormat": {"bold": True, "foregroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.2, "blue": 0.2}}}}}}, "index": 1}},
-            {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 6, "endColumnIndex": 7}],
-                "booleanRule": {"condition": {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]}, "format": {"textFormat": {"bold": True, "foregroundColorStyle": {"rgbColor": {"red": 0.0, "green": 0.8, "blue": 0.2}}}}}}, "index": 2}},
-            {"addConditionalFormatRule": {"rule": {"ranges": [{"sheetId": sid, "startRowIndex": 3, "endRowIndex": 15, "startColumnIndex": 6, "endColumnIndex": 7}],
-                "booleanRule": {"condition": {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}]}, "format": {"textFormat": {"bold": True, "foregroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.2, "blue": 0.2}}}}}}, "index": 3}},
+        # Row heights
+        reqs += [
+            _row_h(sid, 0, 1, 52),   # title
+            _row_h(sid, 1, 2, 28),   # subtitle
+            _row_h(sid, 2, 3, 12),   # spacer
+            _row_h(sid, 3, 4, 22),   # KPI label
+            _row_h(sid, 4, 5, 44),   # KPI value big
+            _row_h(sid, 5, 6, 22),   # KPI2 label
+            _row_h(sid, 6, 7, 44),   # KPI2 value big
+            _row_h(sid, 7, 8, 16),   # spacer
+            _row_h(sid, 8, 9, 30),   # section header
+            _row_h(sid, 9, 18, 26),  # stats rows
+            _row_h(sid, 18, 19, 12), # spacer
+            _row_h(sid, 20, 21, 32), # per coin header
+            _row_h(sid, 21, 22, 26), # table header
         ]
 
-        spreadsheet.batch_update({"requests": requests + cf})
-        log.info("Dashboard sheet berhasil dibuat")
+        # Column widths
+        reqs += [
+            _col_w(sid, 0, 1, 170),  # A: all-time label
+            _col_w(sid, 1, 2, 110),  # B: all-time value
+            _col_w(sid, 2, 3, 24),   # C: spacer
+            _col_w(sid, 3, 4, 170),  # D: week label
+            _col_w(sid, 4, 5, 110),  # E: week value
+            _col_w(sid, 5, 6, 24),   # F: spacer
+            _col_w(sid, 6, 7, 100),  # G: equity / coin
+            _col_w(sid, 7, 8, 100),  # H
+            _col_w(sid, 8, 9, 100),  # I
+        ]
+
+        # Freeze no rows (dashboard tidak perlu freeze)
+        reqs.append({"updateSheetProperties": {
+            "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 0}},
+            "fields": "gridProperties.frozenRowCount",
+        }})
+
+        # ── Formatting ───────────────────────────────────────────
+
+        # R1: Main title
+        reqs.append(_cell_fmt(sid, 0, 1, 0, NC, {
+            **cell(bg=C_BG_HEADER),
+            **txt(bold=True, size=18, fg=C_ACCENT),
+            **ALIGN_C,
+        }))
+
+        # R2: subtitle
+        reqs.append(_cell_fmt(sid, 1, 2, 0, NC, {
+            **cell(bg=C_BG_HEADER),
+            **txt(bold=False, size=9, fg=C_MUTED, italic=True),
+            **ALIGN_C,
+        }))
+
+        # R3 spacer
+        reqs.append(_cell_fmt(sid, 2, 3, 0, NC, cell(bg=C_BG_DARK)))
+
+        # KPI label rows (R4, R6)
+        for r in [3, 5]:
+            reqs.append(_cell_fmt(sid, r, r+1, 0, NC, {
+                **cell(bg=C_BG_KPI),
+                **txt(bold=True, size=9, fg=C_MUTED),
+                **ALIGN_C,
+            }))
+
+        # KPI value rows (R5, R7) — big font, centered
+        for r in [4, 6]:
+            reqs.append(_cell_fmt(sid, r, r+1, 0, NC, {
+                **cell(bg=C_BG_KPI),
+                **txt(bold=True, size=22, fg=C_WHITE),
+                **ALIGN_C,
+            }))
+
+        # Borders around KPI boxes
+        for c1, c2 in [(0,2),(2,4),(4,6),(6,9)]:
+            reqs.append(_border(sid, 3, 7, c1, c2, color={"red":0.1,"green":0.15,"blue":0.3}))
+
+        # R8 spacer
+        reqs.append(_cell_fmt(sid, 7, 8, 0, NC, cell(bg=C_BG_DARK)))
+
+        # R9: section headers
+        for c1, c2, accent in [(0,3,C_ACCENT),(3,6,C_YELLOW),(6,9,C_GREEN)]:
+            reqs.append(_cell_fmt(sid, 8, 9, c1, c2, {
+                **cell(bg=C_BG_SECTION),
+                **txt(bold=True, size=11, fg=accent),
+                **ALIGN_C,
+            }))
+
+        # Stats rows R10-R18: alternating, label bold left, value right
+        for i in range(9):
+            row = 9 + i
+            bg  = C_BG_ROW_ALT if i % 2 == 0 else C_BG_DARK
+            # label cols A & D
+            reqs.append(_cell_fmt(sid, row, row+1, 0, 1, {**cell(bg=bg), **txt(bold=True, size=10, fg=C_MUTED), **ALIGN_L}))
+            reqs.append(_cell_fmt(sid, row, row+1, 3, 4, {**cell(bg=bg), **txt(bold=True, size=10, fg=C_MUTED), **ALIGN_L}))
+            # value cols B & E
+            reqs.append(_cell_fmt(sid, row, row+1, 1, 2, {**cell(bg=bg), **txt(bold=True, size=11, fg=C_WHITE), **ALIGN_R}))
+            reqs.append(_cell_fmt(sid, row, row+1, 4, 5, {**cell(bg=bg), **txt(bold=True, size=11, fg=C_WHITE), **ALIGN_R}))
+            # spacer cols
+            reqs.append(_cell_fmt(sid, row, row+1, 2, 3, cell(bg=bg)))
+            reqs.append(_cell_fmt(sid, row, row+1, 5, 6, cell(bg=bg)))
+
+        # Sparkline merged cell
+        reqs.append(_cell_fmt(sid, 9, 18, 6, 9, {**cell(bg=_rgb(10,22,38)), **ALIGN_C}))
+
+        # R20 spacer
+        reqs.append(_cell_fmt(sid, 19, 20, 0, NC, cell(bg=C_BG_DARK)))
+
+        # R21: Per coin section header
+        reqs.append(_cell_fmt(sid, 20, 21, 0, NC, {
+            **cell(bg=C_BG_SECTION),
+            **txt(bold=True, size=12, fg=C_YELLOW),
+            **ALIGN_L,
+        }))
+
+        # R22: Table header
+        reqs.append(_cell_fmt(sid, 21, 22, 0, NC, {
+            **cell(bg=C_BG_TH),
+            **txt(bold=True, size=10, fg=C_ACCENT),
+            **ALIGN_C,
+        }))
+
+        # R23+: QUERY result rows (alternating)
+        reqs.append(_cell_fmt(sid, 22, 60, 0, NC, {
+            **cell(bg=C_BG_DARK),
+            **txt(size=10, fg=C_WHITE),
+            **ALIGN_C,
+        }))
+
+        spreadsheet.batch_update({"requests": reqs})
+
+        # ── Conditional formatting (separate batch) ──────────────
+        cf_reqs = [
+            # PnL value (col B = index 1): positive green, negative red
+            _cf_text(sid, 4, 5, 0, 2, "NUMBER_GREATER", "0", C_GREEN),
+            _cf_text(sid, 4, 5, 0, 2, "NUMBER_LESS",    "0", C_RED),
+            _cf_text(sid, 6, 7, 0, 2, "NUMBER_GREATER", "0", C_GREEN),
+            _cf_text(sid, 6, 7, 0, 2, "NUMBER_LESS",    "0", C_RED),
+            # Stats value col B (all-time)
+            _cf_text(sid, 9, 18, 1, 2, "NUMBER_GREATER", "0", C_GREEN),
+            _cf_text(sid, 9, 18, 1, 2, "NUMBER_LESS",    "0", C_RED),
+            # Stats value col E (week)
+            _cf_text(sid, 9, 18, 4, 5, "NUMBER_GREATER", "0", C_GREEN),
+            _cf_text(sid, 9, 18, 4, 5, "NUMBER_LESS",    "0", C_RED),
+            # Per-coin total P&L col F (index 5): positive=green bg, negative=red bg
+            _cf_bg(sid, 22, 60, 5, 6, "NUMBER_GREATER", "0", _rgb(0, 60, 30)),
+            _cf_bg(sid, 22, 60, 5, 6, "NUMBER_LESS",    "0", _rgb(60, 15, 15)),
+        ]
+        spreadsheet.batch_update({"requests": cf_reqs})
+
+        # ── Format Trades sheet juga ────────────────────────────
+        _format_trades_sheet(spreadsheet)
+        # ── Format Balance sheet ────────────────────────────────
+        _format_balance_sheet(spreadsheet)
+
+        log.info("Dashboard berhasil diperbarui")
         return True
 
     except Exception as e:
         log.error(f"Setup dashboard error: {e}")
         return False
+
+
+def _format_trades_sheet(spreadsheet):
+    """Format sheet Trades: header bold, conditional formatting P&L & Result, col widths."""
+    try:
+        ws  = spreadsheet.worksheet("Trades")
+        sid = ws.id
+
+        reqs = [
+            # Header row (R1) — dark navy, cyan bold text
+            _cell_fmt(sid, 0, 1, 0, 12, {
+                **cell(bg=_rgb(15, 25, 55)),
+                **txt(bold=True, size=10, fg=_rgb(0, 180, 255)),
+                **{"horizontalAlignment": "CENTER"},
+            }),
+            # Freeze header
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }},
+            # Column widths: Timestamp(A), Coin(B), Direction(C), Entry(D),
+            #   Margin(E), Leverage(F), PositionSize(G), PnL_USDT(H), PnL%(I), Result(J), Note(K), ImageURL(L)
+            _col_w(sid, 0,  1, 160),  # Timestamp
+            _col_w(sid, 1,  2,  80),  # Coin
+            _col_w(sid, 2,  3,  80),  # Direction
+            _col_w(sid, 3,  4,  90),  # Entry Price
+            _col_w(sid, 4,  5,  90),  # Margin
+            _col_w(sid, 5,  6,  70),  # Leverage
+            _col_w(sid, 6,  7, 110),  # Position Size
+            _col_w(sid, 7,  8, 100),  # PnL USDT
+            _col_w(sid, 8,  9,  80),  # PnL %
+            _col_w(sid, 9, 10,  80),  # Result
+            _col_w(sid, 10,11, 200),  # Note
+        ]
+        spreadsheet.batch_update({"requests": reqs})
+
+        # Conditional formatting
+        GREEN = _rgb(0, 200, 100)
+        RED   = _rgb(255, 70, 70)
+        cf = [
+            # PnL (USDT) col H (index 7): green if >0, red if <0
+            _cf_text(sid, 1, 5000, 7, 8, "NUMBER_GREATER", "0", GREEN),
+            _cf_text(sid, 1, 5000, 7, 8, "NUMBER_LESS",    "0", RED),
+            # PnL % col I (index 8)
+            _cf_text(sid, 1, 5000, 8, 9, "NUMBER_GREATER", "0", GREEN),
+            _cf_text(sid, 1, 5000, 8, 9, "NUMBER_LESS",    "0", RED),
+            # Result col J (index 9): WIN=green bg, LOSS=red bg
+            _cf_bg(sid, 1, 5000, 9, 10, "TEXT_EQ", "WIN",  _rgb(0, 50, 25)),
+            _cf_bg(sid, 1, 5000, 9, 10, "TEXT_EQ", "LOSS", _rgb(55, 15, 15)),
+            # Direction col C (index 2): LONG=cyan text, SHORT=red text
+            _cf_text(sid, 1, 5000, 2, 3, "TEXT_EQ", "LONG",  _rgb(0, 180, 255)),
+            _cf_text(sid, 1, 5000, 2, 3, "TEXT_EQ", "SHORT", RED),
+        ]
+        spreadsheet.batch_update({"requests": cf})
+        log.info("Trades sheet formatted")
+    except Exception as e:
+        log.warning(f"Format Trades error: {e}")
+
+
+def _format_balance_sheet(spreadsheet):
+    """Format sheet Balance: header, col widths, conditional P&L."""
+    try:
+        ws  = spreadsheet.worksheet("Balance")
+        sid = ws.id
+        reqs = [
+            _cell_fmt(sid, 0, 1, 0, 5, {
+                **cell(bg=_rgb(15, 25, 55)),
+                **txt(bold=True, size=10, fg=_rgb(0, 180, 255)),
+                **{"horizontalAlignment": "CENTER"},
+            }),
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }},
+            _col_w(sid, 0, 1, 160),  # Timestamp
+            _col_w(sid, 1, 2, 110),  # Event
+            _col_w(sid, 2, 3, 110),  # Amount
+            _col_w(sid, 3, 4, 150),  # Balance After
+            _col_w(sid, 4, 5, 200),  # Note
+        ]
+        spreadsheet.batch_update({"requests": reqs})
+
+        cf = [
+            _cf_text(sid, 1, 5000, 2, 3, "NUMBER_GREATER", "0", _rgb(0, 200, 100)),
+            _cf_text(sid, 1, 5000, 2, 3, "NUMBER_LESS",    "0", _rgb(255, 70, 70)),
+            _cf_bg(sid, 1, 5000, 1, 2, "TEXT_EQ", "PROFIT", _rgb(0, 50, 25)),
+            _cf_bg(sid, 1, 5000, 1, 2, "TEXT_EQ", "LOSS",   _rgb(55, 15, 15)),
+        ]
+        spreadsheet.batch_update({"requests": cf})
+        log.info("Balance sheet formatted")
+    except Exception as e:
+        log.warning(f"Format Balance error: {e}")
 
 
 
@@ -241,6 +612,9 @@ def set_initial_balance(amount: float) -> str:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
         ws.append_row([_now(), "INITIAL BALANCE", amount, amount, "Set awal"], value_input_option="RAW")
         _setup_dashboard(sheet)
+    try:
+        push_balance("INITIAL BALANCE", amount, amount, "Set awal")
+    except Exception: pass
     return f"✅ Saldo awal diset: <b>${amount:,.2f} USDT</b>"
 
 def _update_balance(pnl: float, note: str = ""):
@@ -252,6 +626,9 @@ def _update_balance(pnl: float, note: str = ""):
     if sheet:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
         ws.append_row([_now(), "PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note], value_input_option="RAW")
+    try:
+        push_balance("PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note)
+    except Exception: pass
 
 def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, note="", image_url="") -> dict:
     pos_size = round(margin_usdt * leverage, 2)
@@ -270,10 +647,16 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
         except Exception as e:
             log.error(f"Append error: {e}")
     _update_balance(pnl_usdt, f"{coin} {direction} {result}")
-    return {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
-            "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
-            "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,
-            "result": result, "note": note, "sheets_ok": sheets_ok, "balance_after": get_current_balance()}
+    result_dict = {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
+                   "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
+                   "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,
+                   "result": result, "note": note, "sheets_ok": sheets_ok, "balance_after": get_current_balance()}
+    # Sync ke Supabase (non-blocking, tidak ganggu flow utama)
+    try:
+        push_trade(result_dict)
+    except Exception as e:
+        log.warning(f"supabase push_trade error: {e}")
+    return result_dict
 
 def format_trade_logged(t: dict) -> str:
     ed = "🟢" if t["direction"] == "LONG" else "🔴"

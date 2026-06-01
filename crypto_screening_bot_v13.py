@@ -74,12 +74,38 @@ except ImportError:
 
 # ── v9: Module imports ────────────────────────
 try:
-    from news_sentiment    import get_coin_sentiment, get_macro_sentiment, format_sentiment_block, get_news_gate
+    from news_sentiment    import (
+        get_coin_sentiment, get_macro_sentiment,
+        format_sentiment_block, get_news_gate,
+        get_structured_news_for_ai,
+    )
     NEWS_MODULE = True
 except ImportError:
     NEWS_MODULE = False
     log_tmp = logging.getLogger("v9")
     log_tmp.warning("news_sentiment.py tidak ditemukan — fitur news dinonaktifkan")
+
+# ── v15: DeepSeek AI — primary strategist ──────
+try:
+    from deepseek_ai import (
+        deepseek_signal_review,
+        deepseek_analyze_coin,
+        deepseek_free_ask,
+        deepseek_macro_analysis,
+        is_available as deepseek_available,
+    )
+    DEEPSEEK_MODULE = True
+except ImportError:
+    DEEPSEEK_MODULE = False
+    log_tmp = logging.getLogger("v15")
+    log_tmp.warning("deepseek_ai.py tidak ditemukan — DeepSeek AI dinonaktifkan")
+
+# ── News Agent (hourly auto-fetch) ─────────
+try:
+    from news_agent import run_news_fetch, get_cached_news, get_active_lessons_from_news
+    NEWS_AGENT_MODULE = True
+except ImportError:
+    NEWS_AGENT_MODULE = False
 
 # ── Market Context ─────────────────────────
 try:
@@ -120,6 +146,7 @@ try:
         handle_logoutcome_command, handle_lessons_command,
         handle_decisions_command, handle_evolve_command,
         handle_addlesson_command, get_performance_stats_text,
+        analyze_signal_outcomes_daily,
     )
     LEARNING_MODULE = True
 except ImportError:
@@ -165,6 +192,19 @@ try:
 except ImportError:
     TRACKER_MODULE = False
     logging.getLogger("v12").warning("signal_tracker.py tidak ditemukan — auto signal tracking dinonaktifkan")
+
+# ── Manual Trade Manager ──────────────────────
+try:
+    from trade_manager import (
+        record_trade, close_trade, get_active_trades,
+        check_active_trades, format_trade_opened,
+        format_trades_list, format_closed_trade, parse_trade_command,
+        set_balance, set_stake_pct, format_compound_status,
+    )
+    TRADE_MANAGER_MODULE = True
+except ImportError:
+    TRADE_MANAGER_MODULE = False
+    logging.getLogger("trade").warning("trade_manager.py tidak ditemukan — /trade dinonaktifkan")
 
 # ── v12: Confirmed Entry Signal ───────────────
 try:
@@ -260,13 +300,22 @@ CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 # v9: New module env vars
 NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 
-# v14: AI priority chain → Groq (fastest) → Gemini (search grounding) → Claude (fallback)
+# v15: DeepSeek — primary AI strategist sebelum sinyal dikirim ke Telegram
+DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
+
+# v15: Topic routing — pisahkan pesan ke topic (thread) berbeda dalam satu grup
+# Set THREAD_ID tiap topic di .env (ambil dari URL: t.me/c/groupid/THREAD_ID)
+SIGNAL_THREAD_ID        = os.getenv("SIGNAL_THREAD_ID", "")        or None
+MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
+TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
+
+# AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
 SCAN_INTERVAL_MINUTES   = 10
 TOP_COINS_COUNT         = 5
 PREPUMP_SCAN_INTERVAL   = 5    # menit — scan cepat, alert HANYA kalau HOT
-PREPUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
-PREDUMP_ALERT_THRESHOLD = 60   # score >= 60 → kirim alert (v14: turun dari 70)
+PREPUMP_ALERT_THRESHOLD = 65   # score >= 65 → kirim alert
+PREDUMP_ALERT_THRESHOLD = 65   # score >= 65 → kirim alert
 
 # CoinGecko filters
 MIN_MARKET_CAP       = 50_000_000
@@ -301,15 +350,15 @@ SCALP_TP_PCT            = 0.015   # scalp TP: 1.5%
 SCALP_SL_PCT            = 0.008   # scalp SL: 0.8%
 SWING_TP_PCT            = 0.055   # swing TP: 5.5%
 SWING_SL_PCT            = 0.025   # swing SL: 2.5%
-SCALP_MIN_SCORE         = 50      # minimal score buat scalp signal
-SCALP_ALERT_THRESHOLD   = 55      # score >= 55 → auto alert (v14: turun dari 65)
+SCALP_MIN_SCORE         = 55      # minimal score buat scalp signal
+SCALP_ALERT_THRESHOLD   = 62      # score >= 62 → auto alert
 
-# ── v14: SIGNAL GATE — relaxed untuk lebih banyak signal valid ─────────────
-GATE_MASTER_SCORE_MIN   = 55      # v14: turun dari 65 (formula baru berbasis conf_score)
-GATE_MONEYFLOW_TF_MIN   = 1       # v14: turun dari 2 — cukup 1 TF aligned
+# ── SIGNAL GATE ──────────────────────────────────────────────────────────────
+GATE_MASTER_SCORE_MIN   = 65      # min score buat sinyal lolos — lebih tinggi = lebih selektif
+GATE_MONEYFLOW_TF_MIN   = 2       # minimal 2 TF harus align money flow (4H+1H atau 1H+15M)
 GATE_BT_PF_MIN          = 1.0     # backtest profit factor minimum
 GATE_REQUIRE_ENTRY_MODE = True    # entry mode HARUS jelas (MOMENTUM_NOW atau RETEST_WAIT)
-GATE_COOLDOWN_HOURS     = 2       # v14: turun dari 4 jam
+GATE_COOLDOWN_HOURS     = 4       # cooldown per coin setelah sinyal dikirim
 HEARTBEAT_INTERVAL_HRS  = 4       # interval "no signal" update
 WATCHLIST_THRESHOLD     = 60      # master score ambang batas masuk watchlist
 
@@ -411,11 +460,12 @@ def _build_ob_mitigation_context(ob4: dict, ob1: dict, price: float, candles_4h:
         ob_bottom = ob.get("bottom", 0)
         ob_mid    = ob.get("mid", 0)
 
-        # Cek apakah ada candle yang pernah masuk ke dalam zone OB
-        touches = 0
-        for c in candles[-30:]:  # 30 candle terakhir
-            if c["low"] <= ob_top and c["high"] >= ob_bottom:
-                touches += 1
+        # Gunakan touches yang sudah dihitung di detect_order_blocks bila ada,
+        # fallback ke hitung ulang kalau field tidak tersedia
+        if "touches" in ob:
+            touches = ob["touches"]
+        else:
+            touches = sum(1 for c in candles[-30:] if c["low"] <= ob_top and c["high"] >= ob_bottom)
 
         if touches == 0:
             status = "🟢 FRESH (belum pernah disentuh)"
@@ -570,11 +620,18 @@ def claude_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     if swing and swing.get("score", 0) >= 50:
         swing_ctx = f"\nSwing Setup: {swing['label']} (score {swing['score']}/100, est hold {swing.get('hold_estimate','')})"
 
+    _c_regime_4h = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _c_adx_4h    = tf_4h.get("market_regime", {}).get("adx", 0)
+
     coin_name = symbol.replace("USDT", "")
     prompt = f"""Kamu adalah trader crypto senior. Tugasmu bukan menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
+ATURAN KERAS: Market Regime RANGING → wajib SKIP (fakeout sangat tinggi).
+ATURAN KERAS: TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
+ATURAN KERAS: Tidak ada OB/FVG fresh → wajib WAIT RETEST bukan ENTRY NOW.
 
 DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_c_regime_4h} (ADX={_c_adx_4h:.0f})
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')})
@@ -588,9 +645,9 @@ Jawab dalam Bahasa Indonesia, max 5-6 kalimat, format wajib:
 🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
 Alasan: [1-2 alasan paling decisive saja]
 
-📋 **Trade Plan**: Entry ... | SL ... | TP ... | Konfirmasi: ... (hanya jika bukan SKIP)
+📋 **Trade Plan**: Entry ... | SL ... | TP ... (wajib ≥ 2R) | Konfirmasi: ... (hanya jika bukan SKIP)
 
-⚠️ **Risk**: [satu hal yang bisa batalkan setup ini]"""
+⚠️ **Invalidasi**: [level/kondisi spesifik yang batalkan setup — pakai angka]"""
 
     try:
         r = requests.post(
@@ -726,10 +783,18 @@ def gemini_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     mf1  = tf_1h.get("money_flow", {})
     mf15 = tf_15m.get("money_flow", {})
 
+    _g_regime_4h = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _g_regime_1h = tf_1h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _g_adx_4h    = tf_4h.get("market_regime", {}).get("adx", 0)
+
     prompt = f"""Kamu adalah trader crypto senior — tugasmu BUKAN menjelaskan ulang data, tapi langsung kasih VERDICT actionable.
+ATURAN KERAS: Kalau Market Regime RANGING → wajib SKIP (ranging = noise tinggi, fakeout).
+ATURAN KERAS: Kalau TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
+ATURAN KERAS: Kalau tidak ada OB/FVG fresh sebagai entry zone → wajib WAIT RETEST, bukan ENTRY NOW.
 {sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
 DATA {coin_name} @ ${price}:
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_g_regime_4h} (ADX={_g_adx_4h:.0f}) | 1H: {_g_regime_1h}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M rejection: {rej.get('type','NONE')}
 - FVG 15M: {fvg.get('fvg_type','NONE')} | OI: {oi_data.get('oi_change_pct','N/A')}% | Funding: {oi_data.get('funding_rate','N/A')}%
 - MF → 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}
@@ -747,9 +812,9 @@ Format wajib:
 🎯 [LONG NOW / SHORT NOW / WAIT RETEST / SKIP]
 Alasan: [1-2 alasan paling decisive]
 
-📋 Trade Plan: Entry ... | SL ... | TP ... | Konfirmasi: ... (isi hanya jika bukan SKIP)
+📋 Trade Plan: Entry ... | SL ... | TP ... (wajib ≥ 2R) | Konfirmasi: ... (isi hanya jika bukan SKIP)
 
-⚠️ Risk: [satu hal yang bisa batalkan setup ini]"""
+⚠️ Invalidasi: [level/kondisi spesifik yang batalkan setup — pakai angka]"""
 
     return _gemini_request({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -908,6 +973,9 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
     system_msg = ("Kamu adalah trader crypto senior spesialis SMC dan order flow. "
                   "Tugasmu adalah memberi VERDICT yang langsung actionable — bukan menjelaskan ulang data. "
                   "Data teknikal sudah ditampilkan ke user, kamu cukup beri judgment: bisa entry atau tidak, kenapa, dan trade plan-nya. "
+                  "WAJIB SKIP kalau market RANGING (tidak ada trend jelas) — setup di ranging market = fakeout. "
+                  "WAJIB SKIP kalau R:R < 2:1 (TP terlalu dekat dari entry vs SL). "
+                  "WAJIB WAIT RETEST kalau tidak ada OB/FVG yang fresh sebagai entry zone. "
                   "Jawab singkat, padat, Bahasa Indonesia. Max 5-6 kalimat.")
 
     rsi_4h  = tf_4h.get("rsi", 0)
@@ -925,9 +993,14 @@ def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
         if v <= 40: return "bearish"
         return "neutral"
 
+    _regime_4h  = tf_4h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _regime_1h  = tf_1h.get("market_regime", {}).get("regime", "UNKNOWN")
+    _adx_4h     = tf_4h.get("market_regime", {}).get("adx", 0)
+
     user_msg = f"""{sym_memory_ctx + chr(10) if sym_memory_ctx else ""}
 DATA: {coin_name} @ ${price}
 - Signal: {confluence['direction']} | Score: {confluence['score']}/100
+- Market Regime → 4H: {_regime_4h} (ADX={_adx_4h:.0f}) | 1H: {_regime_1h}
 - 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | 15M Rejection: {rej.get('type','NONE')}
 - RSI → 4H: {rsi_4h:.0f} ({_rsi_label(rsi_4h)}) | 1H: {rsi_1h:.0f} ({_rsi_label(rsi_1h)}) | 15M: {rsi_15m:.0f} ({_rsi_label(rsi_15m)})
 - ATR 4H: {atr_4h:.4f} ({atr_4h/price*100:.2f}% dari harga) — ukuran candle normal
@@ -943,16 +1016,18 @@ DATA: {coin_name} @ ${price}
 
 INSTRUKSI:
 Berikan analisa singkat dalam Bahasa Indonesia — JANGAN ulangi data di atas, langsung ke kesimpulan dan judgment kamu.
+Kalau Market Regime = RANGING → wajib SKIP (jelaskan kenapa ranging = bahaya fakeout).
+Kalau TP < 2R dari entry → wajib SKIP atau WAIT RETEST.
 
 Format WAJIB (max 5-6 kalimat total):
 
 🎯 **[LONG NOW / SHORT NOW / WAIT RETEST / SKIP]**
 Kenapa verdict ini? Sebutkan 1-2 alasan PALING KUAT (bukan semua indikator, cukup yang decisive).
 
-📋 **Trade Plan** (isi hanya jika LONG NOW / SHORT NOW / WAIT RETEST):
-Entry: ... | SL: ... | TP: ... | Konfirmasi: ...
+📋 **Trade Plan** (isi hanya jika bukan SKIP, wajib cek R:R ≥ 2:1):
+Entry: ... | SL: ... | TP: ... (harus ≥ 2R) | Konfirmasi: ...
 
-⚠️ **Risk**: Satu hal yang bisa bikin setup ini gagal."""
+⚠️ **Risk / Invalidasi**: Level atau kondisi spesifik yang membatalkan setup ini."""
 
     result = _groq_request(
         messages=[
@@ -998,44 +1073,56 @@ def groq_signal_insight(
     if not GROQ_API_KEY:
         return ""
 
-    coin  = symbol.replace("USDT", "")
-    s4    = tf_4h.get("structure", {})
-    s1    = tf_1h.get("structure", {})
-    mf4   = tf_4h.get("money_flow", {})
-    mf1   = tf_1h.get("money_flow", {})
-    mf15  = tf_15m.get("money_flow", {})
-    em    = trade.get("entry_mode", "")
-    entry = trade.get("entry", 0)
-    tp1   = trade.get("tp1", 0)
-    sl    = trade.get("sl", 0)
+    coin    = symbol.replace("USDT", "")
+    s4      = tf_4h.get("structure", {})
+    s1      = tf_1h.get("structure", {})
+    mf4     = tf_4h.get("money_flow", {})
+    mf1     = tf_1h.get("money_flow", {})
+    mf15    = tf_15m.get("money_flow", {})
+    cp15    = tf_15m.get("candle_patterns", {})
+    cp1h    = tf_1h.get("candle_patterns", {})
+    em      = trade.get("entry_mode", "")
+    entry   = trade.get("entry", 0)
+    tp1     = trade.get("tp1", 0)
+    sl      = trade.get("sl", 0)
+    is_long = "LONG" in direction or "PUMP" in direction
+    bias_word = "LONG/bullish" if is_long else "SHORT/bearish"
 
-    gate_str = " | ".join(gate_reasons[:3])
+    gate_str  = " | ".join(gate_reasons[:3])
+    cp15_str  = f"{cp15.get('pattern','NONE')} ({cp15.get('direction','-')})" if cp15.get("pattern") not in (None, "NONE") else "tidak ada"
+    cp1h_str  = f"{cp1h.get('pattern','NONE')} ({cp1h.get('direction','-')})" if cp1h.get("pattern") not in (None, "NONE") else "tidak ada"
+
     user_msg = (
-        f"Signal {direction} {coin} lolos semua gate (score {master_score}/100).\n"
-        f"Gate passed: {gate_str}\n"
+        f"Setup {direction} ({bias_word}) {coin}, score {master_score}/100.\n"
+        f"Gate lolos: {gate_str}\n"
         f"Entry mode: {em} | Entry: {entry} | TP1: {tp1} | SL: {sl}\n"
-        f"4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')} | "
-        f"MF 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
-        f"MF 1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
-        f"MF 15M: {mf15.get('bias','?')} | "
-        f"Funding: {oi_data.get('funding_rate','N/A')}% | OI: {oi_data.get('oi_change_pct','N/A')}% | "
-        f"L/S global: {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | "
-        f"Top Trader: {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')}) | "
-        f"Basis: {oi_data.get('perp_spot_basis','N/A')}%\n\n"
-        f"Dalam 2-3 kalimat Bahasa Indonesia:\n"
-        f"1. Kenapa sinyal ini valid dan layak dieksekusi sekarang (sebutkan alasan paling kuat)\n"
-        f"2. Satu hal yang bisa bikin sinyal ini gagal / level invalidasi\n"
-        f"Jangan ulangi angka yang sudah ada di atas. Langsung ke judgment.\n"
-        f"JANGAN pakai markdown **bold** atau *italic* — cukup plain text dengan emoji."
+        f"Struktur — 4H: {s4.get('trend','?')} | 1H: {s1.get('trend','?')}\n"
+        f"Money Flow — 4H: {mf4.get('bias','?')}/{mf4.get('strength','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
+        f"1H: {mf1.get('bias','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | 15M: {mf15.get('bias','?')}\n"
+        f"Candle — 15M: {cp15_str} | 1H: {cp1h_str}\n"
+        f"Derivatif — Funding {oi_data.get('funding_rate','N/A')}% | OI {oi_data.get('oi_change_pct','N/A')}% | "
+        f"L/S {oi_data.get('ls_ratio','N/A')} ({oi_data.get('ls_bias','N/A')}) | "
+        f"Top Trader {oi_data.get('top_ls_ratio','N/A')} ({oi_data.get('top_ls_bias','N/A')}) | "
+        f"Basis {oi_data.get('perp_spot_basis','N/A')}%\n\n"
+        f"Kamu reviewer independen — TUGASMU mengkritik, bukan menjual setup. "
+        f"Jawab dalam Bahasa Indonesia, format persis seperti ini (3 baris, tiap baris diawali emoji):\n"
+        f"✅ EDGE: kenapa setup {bias_word} ini punya edge nyata SEKARANG — confluence faktor mana yg paling kuat & saling mendukung (bukan sekadar ngulang data, tapi APA artinya).\n"
+        f"⚠️ KONFLIK: sebutkan faktor yang KONTRA arah trade (mis. candle/MF/struktur TF yg berlawanan). Kalau ada konflik serius, bilang terus terang setup ini lemah. Kalau benar-benar clean, bilang 'tidak ada konflik berarti'.\n"
+        f"🛑 INVALIDASI: di level/kondisi harga SPESIFIK apa thesis ini batal (pakai angka, acuan ke SL {sl} atau level struktur). Bukan jawaban umum 'kalau sentimen berubah'.\n"
+        f"Maksimal 1-2 kalimat per baris. Tajam dan jujur. JANGAN markdown **bold**/*italic* — plain text + emoji saja."
     )
 
     result = _groq_request(
         messages=[
-            {"role": "system", "content": "Kamu trader crypto senior. Jawab singkat, langsung ke poin, Bahasa Indonesia. Plain text, tanpa markdown."},
+            {"role": "system", "content": (
+                "Kamu trader crypto senior yang bertugas sebagai DEVIL'S ADVOCATE untuk setiap setup. "
+                "Kamu tidak takut bilang sebuah sinyal lemah kalau datanya konflik. "
+                "Selalu sebut level harga konkret untuk invalidasi. Bahasa Indonesia, plain text tanpa markdown, langsung ke poin."
+            )},
             {"role": "user",   "content": user_msg},
         ],
-        max_tokens=250,
-        temperature=0.5,
+        max_tokens=320,
+        temperature=0.4,
     )
     return result or ""
 
@@ -1428,18 +1515,28 @@ def detect_order_blocks(candles: list) -> dict:
 
         if move_up and c["close"] < c["open"] and current_price > c["high"]:
             if result["bullish_ob"] is None:
+                ob_top_val    = round(c["open"], 6)
+                ob_bottom_val = round(c["close"], 6)
+                touches_bull  = sum(1 for cc in candles[-30:] if cc["low"] <= ob_top_val and cc["high"] >= ob_bottom_val)
                 result["bullish_ob"] = {
-                    "top": round(c["open"], 6), "bottom": round(c["close"], 6),
+                    "top": ob_top_val, "bottom": ob_bottom_val,
                     "mid": round((c["open"]+c["close"])/2, 6),
-                    "distance_pct": round(((current_price-c["close"])/current_price)*100, 2)
+                    "distance_pct": round(((current_price-c["close"])/current_price)*100, 2),
+                    "touches": touches_bull,
+                    "is_fresh": touches_bull <= 1,
                 }
 
         if move_down and c["close"] > c["open"] and current_price < c["low"]:
             if result["bearish_ob"] is None:
+                ob_top_val    = round(c["close"], 6)
+                ob_bottom_val = round(c["open"], 6)
+                touches_bear  = sum(1 for cc in candles[-30:] if cc["low"] <= ob_top_val and cc["high"] >= ob_bottom_val)
                 result["bearish_ob"] = {
-                    "top": round(c["close"], 6), "bottom": round(c["open"], 6),
+                    "top": ob_top_val, "bottom": ob_bottom_val,
                     "mid": round((c["open"]+c["close"])/2, 6),
-                    "distance_pct": round(((c["open"]-current_price)/current_price)*100, 2)
+                    "distance_pct": round(((c["open"]-current_price)/current_price)*100, 2),
+                    "touches": touches_bear,
+                    "is_fresh": touches_bear <= 1,
                 }
 
         if result["bullish_ob"] and result["bearish_ob"]:
@@ -1561,6 +1658,40 @@ def calculate_ema_series(candles: list, period: int) -> list:
         ema = price * k + ema * (1 - k)
         series.append(ema)
     return series
+
+
+def calculate_macd(candles: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    """MACD(12,26,9) — trend + momentum confirmation. Research: RSI+MACD combo ~77% win rate."""
+    empty = {"macd": None, "signal_line": None, "hist": None, "above": False,
+             "cross_bull": False, "cross_bear": False}
+    if len(candles) < slow + signal:
+        return empty
+    ema_f = calculate_ema_series(candles, fast)
+    ema_s = calculate_ema_series(candles, slow)
+    if not ema_f or not ema_s:
+        return empty
+    # ema_f has len(candles)-fast+1 values; ema_s has len(candles)-slow+1.
+    # offset aligns them to same candle: ema_f[slow-fast + j] vs ema_s[j]
+    offset = slow - fast
+    macd_line = [ema_f[offset + j] - ema_s[j] for j in range(len(ema_s))]
+    if len(macd_line) < signal:
+        return empty
+    k = 2.0 / (signal + 1)
+    sig_series = [float(np.mean(macd_line[:signal]))]
+    for v in macd_line[signal:]:
+        sig_series.append(v * k + sig_series[-1] * (1 - k))
+    m_last = macd_line[-1]
+    m_prev = macd_line[-2] if len(macd_line) > 1 else m_last
+    s_last = sig_series[-1]
+    s_prev = sig_series[-2] if len(sig_series) > 1 else s_last
+    return {
+        "macd":       round(m_last, 8),
+        "signal_line": round(s_last, 8),
+        "hist":       round(m_last - s_last, 8),
+        "above":      (m_last - s_last) > 0,
+        "cross_bull": m_prev < s_prev and m_last >= s_last,
+        "cross_bear": m_prev > s_prev and m_last <= s_last,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -1701,22 +1832,17 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
 
         result["mfi"] = round(mfi, 1)
 
+        # MFI kept for context/display only — score handled by RSI (avoids redundancy)
         if mfi >= 80:
             result["mfi_signal"] = "OVERBOUGHT"
-            score_pts -= 1  # overbought = potential outflow / reversal
-            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought, watch for outflow")
+            reasons.append(f"⚠️ MFI: {mfi:.0f} — overbought zone")
         elif mfi <= 20:
             result["mfi_signal"] = "OVERSOLD"
-            score_pts += 1  # oversold = potential inflow / reversal
-            reasons.append(f"💡 MFI: {mfi:.0f} — oversold, watch for inflow")
+            reasons.append(f"💡 MFI: {mfi:.0f} — oversold zone")
         elif mfi >= 60:
             result["mfi_signal"] = "BULLISH"
-            score_pts += 1
-            reasons.append(f"🟢 MFI: {mfi:.0f} — positive money flow dominan")
         elif mfi <= 40:
             result["mfi_signal"] = "BEARISH"
-            score_pts -= 1
-            reasons.append(f"🔴 MFI: {mfi:.0f} — negative money flow dominan")
         else:
             result["mfi_signal"] = "NEUTRAL"
 
@@ -2723,6 +2849,7 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "volume_coil":     detect_volume_coil(closed_candles),
         "sudden_breakout": detect_sudden_breakout(closed_candles),
         "adx":             calculate_adx(closed_candles).get("adx", 0),
+        "macd":            calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count":   len(closed_candles),
     }
@@ -2960,6 +3087,22 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
     elif _div_pp["bear_score"] >= 7:
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bearish Div — momentum downside lebih kuat dari upside")
+
+    # MACD confirmation (research: RSI+MACD combo ~77% win rate)
+    _macd_1h = tf_1h.get("macd", {})
+    _macd_4h = tf_4h.get("macd", {})
+    if _macd_1h.get("cross_bull"):
+        mom_score += 10
+        result["reasons"].append("📈 MACD 1H: Bullish crossover — momentum acceleration dikonfirmasi")
+    elif _macd_1h.get("above") and _macd_4h.get("above"):
+        mom_score += 6
+        result["reasons"].append("✅ MACD: 1H+4H histogram positif — sustained bullish momentum")
+    elif _macd_1h.get("above"):
+        mom_score += 3
+        result["reasons"].append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+    elif _macd_1h.get("cross_bear"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bearish crossover — momentum flip DOWN, hati-hati")
 
     result["momentum_score"] = min(mom_score, 35)
 
@@ -3449,6 +3592,22 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         mom_score = max(0, mom_score - 5)
         result["reasons"].append("⚠️ RSI Bullish Div — potensi bounce lebih besar dari dump")
 
+    # MACD confirmation (bearish side)
+    _macd_1h_pd = tf_1h.get("macd", {})
+    _macd_4h_pd = tf_4h.get("macd", {})
+    if _macd_1h_pd.get("cross_bear"):
+        mom_score += 10
+        result["reasons"].append("📉 MACD 1H: Bearish crossover — momentum flip DOWN dikonfirmasi")
+    elif not _macd_1h_pd.get("above", True) and not _macd_4h_pd.get("above", True):
+        mom_score += 6
+        result["reasons"].append("🔴 MACD: 1H+4H histogram negatif — sustained bearish momentum")
+    elif not _macd_1h_pd.get("above", True):
+        mom_score += 3
+        result["reasons"].append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
+    elif _macd_1h_pd.get("cross_bull"):
+        mom_score = max(0, mom_score - 7)
+        result["reasons"].append("⚠️ MACD 1H: Bullish crossover — momentum flip UP, kontra dump")
+
     result["momentum_score"] = min(mom_score, 35)
 
     # ── 3. OI + PRICE ACTION + ATR BEARISH ──────
@@ -3833,6 +3992,32 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
             dump_score += 12
             reasons.append(f"⚡ Sudden breakout DOWN (1H): vol {sb_1h['vol_spike']:.1f}x — momentum aktif")
 
+    # ── MACD Momentum Confirmation (research: RSI+MACD ~77% win rate) ──────
+    macd_4h = tf_4h.get("macd", {})
+    macd_1h = tf_1h.get("macd", {})
+    macd_1h_above = macd_1h.get("above", False)
+    macd_4h_above = macd_4h.get("above", False)
+
+    if macd_1h.get("cross_bull"):
+        pump_score += 14
+        reasons.append("📈 MACD 1H: Bullish crossover — momentum flip UP confirmed")
+    elif macd_1h_above and macd_4h_above:
+        pump_score += 8
+        reasons.append(f"✅ MACD 1H+4H: Histogram positif — bullish momentum sustained")
+    elif macd_1h_above:
+        pump_score += 4
+        reasons.append("🟢 MACD 1H: Histogram positif — mild bullish momentum")
+
+    if macd_1h.get("cross_bear"):
+        dump_score += 14
+        reasons.append("📉 MACD 1H: Bearish crossover — momentum flip DOWN confirmed")
+    elif not macd_1h_above and not macd_4h_above:
+        dump_score += 8
+        reasons.append(f"🔴 MACD 1H+4H: Histogram negatif — bearish momentum sustained")
+    elif not macd_1h_above:
+        dump_score += 4
+        reasons.append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
+
     rej = tf_15m.get("rejection", {})
     fvg = tf_15m.get("fvg", {})
 
@@ -3890,16 +4075,32 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
 
     if ob4.get("bullish_ob"):
         d = ob4["bullish_ob"].get("distance_pct", 999)
-        if d < 5: pump_score += 8; reasons.append(f"✅ 4H: Price near Bullish OB ({d:.1f}% away)")
+        if d < 5:
+            if ob4["bullish_ob"].get("is_fresh", True):
+                pump_score += 8; reasons.append(f"✅ 4H: Price near Bullish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 4H: Bullish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai support")
     if ob4.get("bearish_ob"):
         d = ob4["bearish_ob"].get("distance_pct", 999)
-        if d < 5: dump_score += 8; reasons.append(f"🔴 4H: Price near Bearish OB ({d:.1f}% away)")
+        if d < 5:
+            if ob4["bearish_ob"].get("is_fresh", True):
+                dump_score += 8; reasons.append(f"🔴 4H: Price near Bearish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 4H: Bearish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai resistance")
     if ob1.get("bullish_ob"):
         d = ob1["bullish_ob"].get("distance_pct", 999)
-        if d < 3: pump_score += 5; reasons.append(f"✅ 1H: Price near Bullish OB ({d:.1f}% away)")
+        if d < 3:
+            if ob1["bullish_ob"].get("is_fresh", True):
+                pump_score += 5; reasons.append(f"✅ 1H: Price near Bullish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 1H: Bullish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai support")
     if ob1.get("bearish_ob"):
         d = ob1["bearish_ob"].get("distance_pct", 999)
-        if d < 3: dump_score += 5; reasons.append(f"🔴 1H: Price near Bearish OB ({d:.1f}% away)")
+        if d < 3:
+            if ob1["bearish_ob"].get("is_fresh", True):
+                dump_score += 5; reasons.append(f"🔴 1H: Price near Bearish OB ({d:.1f}% away)")
+            else:
+                reasons.append(f"⚠️ 1H: Bearish OB ({d:.1f}% away) sudah MITIGATED — tidak valid sebagai resistance")
 
     oi_chg      = oi_data.get("oi_change_pct")
     ls_bias     = oi_data.get("ls_bias", "UNKNOWN")
@@ -4463,10 +4664,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         if ob4.get("bullish_ob") and ob4["bullish_ob"].get("distance_pct", 999) < 4:
             ob = ob4["bullish_ob"]
-            entry_candidates.append(("4H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 4, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("4H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 4, ob.get("bottom",price), ob.get("top",price)))
         if ob1.get("bullish_ob") and ob1["bullish_ob"].get("distance_pct", 999) < 5:
             ob = ob1["bullish_ob"]
-            entry_candidates.append(("1H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 3, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("1H_OB", round(ob.get("bottom", price)*1.002,8), ob.get("bottom",price), 3, ob.get("bottom",price), ob.get("top",price)))
         if fvg15.get("fvg_type") == "BULLISH" and fvg15.get("bullish_fvg"):
             fvg = fvg15["bullish_fvg"]
             if -3 < fvg.get("distance_pct", 999) < 0:
@@ -4552,10 +4755,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         if ob4.get("bearish_ob") and ob4["bearish_ob"].get("distance_pct", 999) < 4:
             ob = ob4["bearish_ob"]
-            entry_candidates.append(("4H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 4, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("4H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 4, ob.get("bottom",price), ob.get("top",price)))
         if ob1.get("bearish_ob") and ob1["bearish_ob"].get("distance_pct", 999) < 5:
             ob = ob1["bearish_ob"]
-            entry_candidates.append(("1H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 3, ob.get("bottom",price), ob.get("top",price)))
+            if ob.get("is_fresh", True):
+                entry_candidates.append(("1H_OB", round(ob.get("top",price)*0.998,8), ob.get("top",price), 3, ob.get("bottom",price), ob.get("top",price)))
         if fvg15.get("fvg_type") == "BEARISH" and fvg15.get("bearish_fvg"):
             fvg = fvg15["bearish_fvg"]
             if 0 < fvg.get("distance_pct", 999) < 3:
@@ -4706,8 +4911,13 @@ def _sanitize_ai_output(text: str) -> str:
 
     return text.strip()
 
-def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
-    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None)."""
+def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
+                  thread_id: str = None):
+    """Kirim pesan ke Telegram. Return message_id pesan pertama (atau None).
+
+    thread_id: message_thread_id untuk Telegram Topics (forum supergroup).
+               Kalau diset, pesan masuk ke topic yang sesuai dalam grup yang sama.
+    """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("Telegram credentials missing!")
         return None
@@ -4722,6 +4932,15 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
     max_len = 4000
     chunks  = [html_message[i:i+max_len] for i in range(0, len(html_message), max_len)]
 
+    # Build base payload — tambahkan message_thread_id kalau ada
+    def _make_payload(text: str, plain: bool = False) -> dict:
+        p = {"chat_id": target, "text": text}
+        if not plain:
+            p["parse_mode"] = "HTML"
+        if thread_id:
+            p["message_thread_id"] = int(thread_id)
+        return p
+
     first_message_id = None
     for chunk in chunks:
         sent = False
@@ -4730,7 +4949,7 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
             try:
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": chunk, "parse_mode": "HTML"},
+                    json=_make_payload(chunk),
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4759,7 +4978,7 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
                 plain = re.sub(r"<[^>]+>", "", chunk)   # strip HTML tags
                 r = requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": target, "text": plain},
+                    json=_make_payload(plain, plain=True),
                     timeout=15
                 )
                 if r.status_code == 200:
@@ -4778,6 +4997,24 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
 
     return first_message_id
 
+
+# ─────────────────────────────────────────────
+# ROOM-ROUTED SENDERS
+# ─────────────────────────────────────────────
+
+def send_signal(message: str, parse_mode: str = None):
+    """Kirim sinyal ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau thread belum diset."""
+    return send_telegram(message, thread_id=SIGNAL_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_market_update(message: str, parse_mode: str = None):
+    """Kirim news/market update ke topic Market Update (MARKET_UPDATE_THREAD_ID)."""
+    return send_telegram(message, thread_id=MARKET_UPDATE_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_trade_report(message: str, parse_mode: str = None):
+    """Kirim trade outcome/report ke topic Trade Reports (TRADE_REPORT_THREAD_ID)."""
+    return send_telegram(message, thread_id=TRADE_REPORT_THREAD_ID, parse_mode=parse_mode)
 
 
 # ─────────────────────────────────────────────
@@ -5074,6 +5311,13 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
 
     # ── Trade Plan ──
     if confluence["direction"] != "NEUTRAL" and confluence["level"] in ["EXCELLENT", "GOOD"]:
+        _t_dir  = trade.get("direction", "")
+        _t_tp1  = trade.get("tp1") or 0
+        _t_sl   = trade.get("sl") or 0
+        _t_ent  = trade.get("entry") or price
+        _tp_ok  = (_t_dir == "LONG"  and _t_tp1 > _t_ent) or \
+                  (_t_dir == "SHORT" and 0 < _t_tp1 < _t_ent)
+
         is_limit    = trade.get("is_limit", False)
         entry_icon  = "🎯" if is_limit else "⚡"
         entry_label = "LIMIT" if is_limit else "MARKET"
@@ -5082,16 +5326,19 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
         rr_ok       = tp1_r >= 2.0
 
         lines.append("")
-        lines.append(f"📍 <b>Trade Plan — {trade['direction']} ({entry_label})</b>")
-        lines.append(f"  {entry_icon} Entry : <code>{fmt_num(trade['entry'])}</code>  ← {trade.get('entry_type','')}")
-        lines.append(f"  🔴 SL    : <code>{fmt_num(trade['sl'])}</code>")
-        if trade.get("tp1"):
-            lines.append(f"  🟡 TP1   : <code>{fmt_num(trade['tp1'])}</code>  ← {trade.get('tp1_basis','')}  ({tp1_r}R)  50% close")
-        if trade.get("tp2"):
-            lines.append(f"  🟢 TP2   : <code>{fmt_num(trade['tp2'])}</code>  ← {trade.get('tp2_basis','')}  ({tp2_r}R)  runner")
-        lines.append(f"  R:R = {tp1_r}:1  {'✅' if rr_ok else '⚠️ &lt;2R — skip'}")
-        if not is_limit:
-            lines.append("  <i>⚠️ Tidak ada OB/FVG dekat — tunggu retrace dulu</i>")
+        if not _tp_ok or not _t_sl:
+            lines.append("📍 <b>Trade Plan</b> — <i>⚠️ setup belum valid, tunggu konfirmasi struktur dulu</i>")
+        else:
+            lines.append(f"📍 <b>Trade Plan — {_t_dir} ({entry_label})</b>")
+            lines.append(f"  {entry_icon} Entry : <code>{fmt_num(_t_ent)}</code>  ← {trade.get('entry_type','')}")
+            lines.append(f"  🔴 SL    : <code>{fmt_num(_t_sl)}</code>")
+            if trade.get("tp1"):
+                lines.append(f"  🟡 TP1   : <code>{fmt_num(trade['tp1'])}</code>  ← {trade.get('tp1_basis','')}  ({tp1_r}R)  50% close")
+            if trade.get("tp2"):
+                lines.append(f"  🟢 TP2   : <code>{fmt_num(trade['tp2'])}</code>  ← {trade.get('tp2_basis','')}  ({tp2_r}R)  runner")
+            lines.append(f"  R:R = {tp1_r}:1  {'✅' if rr_ok else '⚠️ &lt;2R — skip'}")
+            if not is_limit:
+                lines.append("  <i>⚠️ Tidak ada OB/FVG dekat — tunggu retrace dulu</i>")
 
     elif confluence["level"] == "FAIR":
         lines.append("🟡 <b>FAIR setup</b> — skip atau tunggu konfirmasi lebih lanjut")
@@ -5114,13 +5361,35 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             lines.append(format_risk_block(entry, sl, direc))
 
     # ── AI Insight untuk /analyze, /scalp, /prepump, dll ──
-    # Chain: Groq (primary, cepat) → Gemini (fallback, search grounding) → Claude (last resort)
+    # v15: DeepSeek primary → Groq fallback → Gemini fallback → Claude last resort
     if with_gemini:
         lines.append("")
         insight  = ""
         ai_label = ""
 
-        # 1. Groq — primary untuk on-demand analysis (cepat, llama-3.3-70b)
+        # 1. DeepSeek — primary AI strategist (analisa SMC + news + memory)
+        if DEEPSEEK_MODULE and DEEPSEEK_API_KEY and not insight:
+            _news_ctx = None
+            if NEWS_MODULE:
+                try:
+                    _news_ctx = get_structured_news_for_ai(symbol)
+                except Exception:
+                    pass
+            _sym_mem = None
+            try:
+                from symbol_memory import get_symbol_memory
+                _sym_mem = get_symbol_memory(symbol)
+            except Exception:
+                pass
+            insight = deepseek_analyze_coin(
+                symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
+                prepump, predump, scalp, swing,
+                news_context=_news_ctx, symbol_memory=_sym_mem,
+            )
+            if insight:
+                ai_label = "🤖 <b>AI Insight (DeepSeek):</b>"
+
+        # 2. Groq — fallback kalau DeepSeek tidak tersedia
         if GROQ_API_KEY and not insight:
             insight = groq_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5129,7 +5398,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Groq):</b>"
 
-        # 2. Gemini — fallback kalau Groq tidak merespons
+        # 3. Gemini — fallback dengan search grounding
         if GEMINI_API_KEY and not insight:
             insight = gemini_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5138,7 +5407,7 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
             if insight:
                 ai_label = "🤖 <b>AI Insight (Gemini):</b>"
 
-        # 3. Claude — last resort
+        # 4. Claude — last resort
         if ANTHROPIC_API_KEY and not insight:
             insight = claude_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
@@ -5161,8 +5430,8 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                 lines.append("🌐 <b>Sentiment &amp; Event Overlay:</b>")
                 lines.append(f"<i>{sentiment}</i>")
 
-    elif with_gemini and not GEMINI_API_KEY and not GROQ_API_KEY:
-        lines.append("\n⚠️ <i>Set GROQ_API_KEY atau GEMINI_API_KEY di .env untuk AI insight</i>")
+    elif with_gemini and not GEMINI_API_KEY and not GROQ_API_KEY and not DEEPSEEK_API_KEY:
+        lines.append("\n⚠️ <i>Set DEEPSEEK_API_KEY di .env untuk AI insight</i>")
 
     return lines
 
@@ -5320,7 +5589,10 @@ def build_prepump_message(candidates: list) -> str:
         if pp.get("funding_rate") is not None:
             lines.append(f"  Funding: {pp['funding_rate']:+.3f}% | RSI 1H: {pp.get('rsi',0):.0f}")
 
-        if trade and trade.get("direction") == "LONG":
+        _pp_tp1  = trade.get("tp1", 0) or 0 if trade else 0
+        _pp_ent  = trade.get("entry", 0) or 0 if trade else 0
+        _pp_ok   = trade and trade.get("direction") == "LONG" and _pp_tp1 > _pp_ent > 0 and trade.get("sl")
+        if _pp_ok:
             tp1_r = trade.get("tp1_r", 0)
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
@@ -5341,9 +5613,22 @@ def build_prepump_message(candidates: list) -> str:
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
             if trade.get("tp2"):
                 lines.append(f"  🟢 TP2   : {fmt_num(trade['tp2'])}  ({tp2_r}R) ← {trade.get('tp2_basis','')} | runner")
-            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R'}")
+            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
-            lines.append("  ⚠️ Trade plan tidak tersedia (data tidak cukup)")
+            lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
+
+        # v15: DeepSeek AI insight
+        if pp.get("ai_insight"):
+            _verdict = pp.get("ai_verdict", "CONFIRM")
+            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            for _line in pp["ai_insight"].split("\n"):
+                if _line.strip():
+                    lines.append(f"  {_line.strip()}")
+            if pp.get("ai_adjusted"):
+                lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5372,7 +5657,10 @@ def build_predump_message(candidates: list) -> str:
         if pd_c.get("funding_rate") is not None:
             lines.append(f"  Funding: {pd_c['funding_rate']:+.3f}% | RSI 1H: {pd_c.get('rsi',0):.0f}")
 
-        if trade and trade.get("direction") == "SHORT":
+        _pd_tp1  = trade.get("tp1", 0) or 0 if trade else 0
+        _pd_ent  = trade.get("entry", 0) or 0 if trade else 0
+        _pd_ok   = trade and trade.get("direction") == "SHORT" and 0 < _pd_tp1 < _pd_ent and trade.get("sl")
+        if _pd_ok:
             tp1_r = trade.get("tp1_r", 0)
             tp2_r = trade.get("tp2_r", 0)
             entry_mode = trade.get("entry_mode", "MOMENTUM_NOW")
@@ -5393,9 +5681,22 @@ def build_predump_message(candidates: list) -> str:
                 lines.append(f"  🟡 TP1   : {fmt_num(trade['tp1'])}  ({tp1_r}R) ← {trade.get('tp1_basis','')} | close 50%")
             if trade.get("tp2"):
                 lines.append(f"  🟢 TP2   : {fmt_num(trade['tp2'])}  ({tp2_r}R) ← {trade.get('tp2_basis','')} | runner")
-            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R'}")
+            lines.append(f"  R:R = {tp1_r:.1f}:1 {'✅' if tp1_r >= 2.0 else '⚠️ < 2R — pertimbangkan skip'}")
         else:
-            lines.append("  ⚠️ Trade plan tidak tersedia (data tidak cukup)")
+            lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
+
+        # v15: DeepSeek AI insight
+        if pd_c.get("ai_insight"):
+            _verdict = pd_c.get("ai_verdict", "CONFIRM")
+            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            for _line in pd_c["ai_insight"].split("\n"):
+                if _line.strip():
+                    lines.append(f"  {_line.strip()}")
+            if pd_c.get("ai_adjusted"):
+                lines.append("  🔧 <i>Level harga disesuaikan oleh AI</i>")
+
         lines.append("─────────────────────")
 
     lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
@@ -5476,6 +5777,16 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "trendline_sup": detect_trendline(closed_candles, "lows"),
         "trendline_res": detect_trendline(closed_candles, "highs"),
         "money_flow": detect_money_flow(closed_candles),
+        "ema9": calculate_ema(closed_candles, 9),
+        "ema21": calculate_ema(closed_candles, 21),
+        "ema50": calculate_ema(closed_candles, 50),
+        "candle_patterns": detect_candle_patterns(closed_candles),
+        "market_regime": detect_market_regime(closed_candles),
+        "bb_squeeze": calculate_bb_squeeze(closed_candles),
+        "volume_coil": detect_volume_coil(closed_candles),
+        "sudden_breakout": detect_sudden_breakout(closed_candles),
+        "adx": calculate_adx(closed_candles).get("adx", 0),
+        "macd": calculate_macd(closed_candles),
         "_anti_lookahead": True,
         "_closed_count": len(closed_candles),
         "_exchange": exchange,
@@ -5651,11 +5962,82 @@ def handle_chart_command(chat_id: str, photo_file_id: str):
         send_telegram(f"❌ Error saat analisa chart: {str(e)[:100]}", chat_id)
 
 
+def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
+    """
+    v15: Jalankan DeepSeek review untuk setiap kandidat sinyal.
+    Adjust entry/TP/SL kalau AI merekomendasikan.
+    Buang kandidat yang di-SKIP oleh AI.
+    """
+    if not DEEPSEEK_MODULE or not DEEPSEEK_API_KEY or not candidates:
+        return candidates
+
+    enriched = []
+    _news_cache: dict = {}   # symbol → news_ctx, hindari double fetch
+
+    for cand in candidates:
+        sym   = cand.get("symbol", "")
+        trade = cand.get("trade", {})
+        if not trade or not trade.get("entry"):
+            enriched.append(cand)
+            continue
+
+        # Fetch news context (cache per symbol)
+        news_ctx = _news_cache.get(sym)
+        if news_ctx is None and NEWS_MODULE:
+            try:
+                news_ctx = get_structured_news_for_ai(sym)
+                _news_cache[sym] = news_ctx
+            except Exception:
+                news_ctx = None
+                _news_cache[sym] = None
+
+        try:
+            review = deepseek_signal_review(
+                symbol       = sym,
+                direction    = direction,
+                trade        = trade,
+                master_score = cand.get("total_score", cand.get("score", 0)),
+                reasons      = cand.get("reasons", []),
+                oi_data      = cand.get("oi_data", {}),
+                tf_4h        = cand.get("tf_4h", {}),
+                tf_1h        = cand.get("tf_1h", {}),
+                tf_15m       = cand.get("tf_15m", {}),
+                news_context = news_ctx,
+                signal_type  = direction,
+            )
+
+            if review.get("ai_verdict") == "SKIP":
+                log.info(f"🤖 DeepSeek SKIP {sym} {direction}")
+                continue
+
+            cand = dict(cand)   # copy agar tidak mutate original
+
+            if review.get("was_adjusted"):
+                cand["trade"] = dict(trade)
+                cand["trade"]["entry"] = review["entry"]
+                cand["trade"]["tp1"]   = review["tp1"]
+                cand["trade"]["tp2"]   = review["tp2"]
+                cand["trade"]["sl"]    = review["sl"]
+
+            if review.get("insight"):
+                cand["ai_insight"]  = review["insight"]
+                cand["ai_verdict"]  = review.get("ai_verdict", "CONFIRM")
+                cand["ai_adjusted"] = review.get("was_adjusted", False)
+
+        except Exception as e:
+            log.warning(f"DeepSeek enrich error {sym}: {e}")
+
+        enriched.append(cand)
+
+    return enriched
+
+
 def handle_prepump_command(chat_id: str):
     """Handle /prepump — scan pre-pump candidates."""
     send_telegram("🎯 Scanning pre-pump candidates... ⏳ (ini butuh ~1-2 menit)", chat_id)
 
     candidates = scan_prepump_candidates()
+    candidates = _deepseek_enrich_candidates(candidates, "PREPUMP")
     msg = build_prepump_message(candidates)
     send_telegram(msg, chat_id)
 
@@ -5665,6 +6047,7 @@ def handle_predump_command(chat_id: str):
     send_telegram("💀 Scanning pre-dump candidates... ⏳ (ini butuh ~1-2 menit)", chat_id)
 
     candidates = scan_predump_candidates()
+    candidates = _deepseek_enrich_candidates(candidates, "PREDUMP")
     msg = build_predump_message(candidates)
     send_telegram(msg, chat_id)
 
@@ -5709,16 +6092,20 @@ def build_scalp_message(candidates: list) -> str:
             conf_word = "bullish engulfing/pin bar 15M" if direc == "LONG" else "bearish engulfing/pin bar 15M"
             lines.append(f"  ✅ Konfirmasi: {conf_word} + vol ≥1.5x")
 
-        if trade and trade.get("sl"):
-            lines.append(f"  🔴 SL     : {fmt_num(trade['sl'])}")
-        elif sc.get("scalp_sl"):
-            lines.append(f"  🔴 SL     : {fmt_num(sc['scalp_sl'])}")
+        _sc_sl  = (trade.get("sl") or 0) if trade else (sc.get("scalp_sl") or 0)
+        _sc_tp1 = (trade.get("tp1") or 0) if trade else (sc.get("scalp_tp") or 0)
+        _sc_ent = (trade.get("entry") or sc.get("price", 0)) if trade else sc.get("price", 0)
+        _sc_tp_ok = (direc == "LONG"  and _sc_tp1 > _sc_ent > 0) or \
+                    (direc == "SHORT" and 0 < _sc_tp1 < _sc_ent)
 
-        if trade and trade.get("tp1"):
-            tp1_r = trade.get("tp1_r", 0)
-            lines.append(f"  🟡 TP1    : {fmt_num(trade['tp1'])}  ({tp1_r}R) | close 50%")
-        elif sc.get("scalp_tp"):
-            lines.append(f"  🟡 TP     : {fmt_num(sc['scalp_tp'])}")
+        if _sc_sl:
+            lines.append(f"  🔴 SL     : {fmt_num(_sc_sl)}")
+
+        if _sc_tp_ok and _sc_tp1:
+            tp1_r = trade.get("tp1_r", 0) if trade else 0
+            lines.append(f"  🟡 TP1    : {fmt_num(_sc_tp1)}  ({tp1_r}R) | close 50%")
+        elif _sc_tp1:
+            lines.append(f"  ⚠️ TP tidak valid — tunggu retrace ke OB/FVG dulu")
 
         sw = sc.get("sweep", {})
         if sw.get("swept"):
@@ -5743,16 +6130,79 @@ def handle_scalp_command(chat_id: str):
 # ── v9: News handlers ────────────────────────
 
 def handle_news_command(coin: str, chat_id: str):
-    """Handle /news <COIN>"""
+    """Handle /news <COIN> — cek cache news agent dulu, fallback NewsAPI live."""
+    sym = coin.upper().strip().replace("USDT", "")
+    if not sym:
+        send_telegram("❓ Format: `/news BTC` atau `/news SOL`", chat_id)
+        return
+
+    # Cek news_agent cache dulu (lebih cepat, tidak spam API)
+    if NEWS_AGENT_MODULE:
+        cached = get_cached_news(sym, max_age_seconds=3900)
+        if cached:
+            ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+            lines = [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📰 <b>NEWS INTEL: {sym}</b>",
+                f"🕐 {ts} (dari cache hourly)",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"🌐 Session: {cached.get('trading_session', '?')}",
+                f"📊 Sentiment: <b>{cached.get('sentiment_label','NEUTRAL')}</b> "
+                f"(score: {cached.get('sentiment_score', 0):+d})",
+            ]
+            events = cached.get("high_impact_events", [])
+            if events:
+                lines.append(f"\n⚠️ <b>High-Impact Events:</b>")
+                for ev in events[:5]:
+                    lines.append(f"  • {ev}")
+            unlocks = cached.get("upcoming_unlocks", [])
+            if unlocks:
+                lines.append(f"\n🔓 <b>Token Unlock:</b>")
+                for ul in unlocks:
+                    lines.append(f"  • {ul}")
+            heads = cached.get("headlines", [])
+            if heads:
+                lines.append(f"\n📋 <b>Headlines:</b>")
+                for h in heads[:4]:
+                    lines.append(f"  • {h[:100]}")
+            coin_lesson = cached.get("coin_lesson", "")
+            macro_risk  = cached.get("macro_risk", "")
+            if coin_lesson:
+                lines.append(f"\n💡 <b>AI Lesson:</b> {coin_lesson}")
+            if macro_risk:
+                lines.append(f"🌐 <b>Macro:</b> {macro_risk}")
+
+            # X (Twitter) sentiment
+            x_sent     = cached.get("x_sentiment", "")
+            x_kol_cnt  = cached.get("x_kol_count", 0)
+            x_euphoria = cached.get("x_euphoria", False)
+            x_kol_ments= cached.get("x_kol_mentions", [])
+            x_source   = cached.get("x_source", "nitter")
+            if x_sent and x_sent != "NEUTRAL":
+                x_em = "🟢" if x_sent == "BULLISH" else "🔴" if x_sent == "BEARISH" else "🟡"
+                x_line = f"\n🐦 <b>X Sentiment:</b> {x_em} {x_sent}"
+                if x_kol_cnt:
+                    x_line += f" | KOL aktif: <b>{x_kol_cnt}</b>"
+                if x_euphoria:
+                    x_line += " | ⚠️ <b>EUPHORIA!</b>"
+                x_line += f" <i>({x_source})</i>"
+                lines.append(x_line)
+                if x_kol_ments:
+                    lines.append("  KOL:")
+                    for m in x_kol_ments[:2]:
+                        lines.append(f"  • {str(m)[:100]}")
+
+            lines.append("\n⚠️ <i>Data dari News Agent hourly fetch. DYOR.</i>")
+            send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
+            return
+
+    # Fallback: live fetch via NewsAPI
     if not NEWS_MODULE:
         send_telegram("❌ News module tidak tersedia. Pastikan news_sentiment.py ada.", chat_id)
         return
     if not NEWSAPI_KEY:
         send_telegram("❌ NEWSAPI_KEY belum diset di .env", chat_id)
-        return
-    sym = coin.upper().strip().replace("USDT","")
-    if not sym:
-        send_telegram("❓ Format: `/news BTC` atau `/news SOL`", chat_id)
         return
     send_telegram(f"📰 Mencari berita untuk *{sym}*... ⏳", chat_id)
     try:
@@ -5761,6 +6211,108 @@ def handle_news_command(coin: str, chat_id: str):
         send_telegram(msg, chat_id)
     except Exception as e:
         send_telegram(f"❌ Error fetch news: {e}", chat_id)
+
+
+def handle_newsagent_command(chat_id: str):
+    """Handle /newsagent — manual trigger news agent fetch + tampilkan summary."""
+    if not NEWS_AGENT_MODULE:
+        send_telegram("❌ news_agent.py tidak ditemukan.", chat_id)
+        return
+    send_telegram("📰 Menjalankan News Agent fetch... ⏳ (30-60 detik)", chat_id)
+    try:
+        import threading as _thr
+        def _run():
+            intel = run_news_fetch(send_telegram_fn=None)
+            ts    = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+            n_ev  = sum(len(c.get("events", [])) for c in intel.get("coins", {}).values())
+            n_ev += len(intel.get("macro", {}).get("events", []))
+            lessons = intel.get("derived_lessons", [])
+            macro_s = intel.get("macro", {}).get("sentiment", "NEUTRAL")
+            macro_l = intel.get("macro", {}).get("lesson", "")
+
+            lines = [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📰 <b>NEWS AGENT REPORT</b>",
+                f"🕐 {ts}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"🌐 Session: {intel.get('trading_session','?')}",
+                f"📊 Macro Sentiment: <b>{macro_s}</b>",
+                f"⚡ Events Terdeteksi: {n_ev}",
+                f"📚 Lessons Derived: {len(lessons)}",
+            ]
+            if macro_l:
+                lines.append(f"\n🌐 <b>Macro Insight:</b> {macro_l}")
+
+            # Tampilkan top events per koin
+            hot_coins = [
+                (sym, data) for sym, data in intel.get("coins", {}).items()
+                if data.get("events") or data.get("urgency") == "HIGH"
+            ][:5]
+            if hot_coins:
+                lines.append("\n⚠️ <b>Coin Events:</b>")
+                for sym, data in hot_coins:
+                    evs = " | ".join(data.get("events", [])[:2])
+                    lines.append(f"  • <b>{sym}</b>: {evs}")
+
+            # X Sentiment per koin (koin dengan KOL aktif atau euphoria)
+            x_active = [
+                (sym, data.get("x", {}))
+                for sym, data in intel.get("coins", {}).items()
+                if data.get("x", {}).get("kol_count", 0) >= 1
+                or data.get("x", {}).get("euphoria", False)
+            ][:6]
+            if x_active:
+                lines.append("\n🐦 <b>X Sentiment:</b>")
+                for sym, xd in x_active:
+                    x_sent  = xd.get("sentiment_label", "?")
+                    kol_cnt = xd.get("kol_count", 0)
+                    euph    = xd.get("euphoria", False)
+                    x_em    = "🟢" if x_sent == "BULLISH" else "🔴" if x_sent == "BEARISH" else "🟡"
+                    suffix  = " ⚠️EUPHORIA" if euph else ""
+                    lines.append(f"  • <b>{sym}</b>: {x_em} {x_sent} | KOL: {kol_cnt}{suffix}")
+
+            # X euphoria summary
+            x_euphorias = intel.get("x_euphoria_coins", [])
+            if x_euphorias:
+                lines.append(f"\n🚨 <b>Euphoria Coins:</b> {', '.join(x_euphorias)} — hindari LONG baru!")
+
+            if lessons:
+                lines.append("\n💡 <b>Top Lessons:</b>")
+                for ls in lessons[:4]:
+                    lines.append(f"  • {ls['text']}")
+
+            lines.append("\n<i>Cache diperbarui — berlaku 1 jam ke depan.</i>")
+            send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
+
+        _thr.Thread(target=_run, daemon=True).start()
+    except Exception as e:
+        send_telegram(f"❌ Error news agent: {e}", chat_id)
+
+
+def handle_newslessons_command(chat_id: str):
+    """Handle /newslessons — tampilkan active lessons dari news agent."""
+    if not NEWS_AGENT_MODULE:
+        send_telegram("❌ news_agent.py tidak ditemukan.", chat_id)
+        return
+    lessons = get_active_lessons_from_news()
+    if not lessons:
+        send_telegram("📚 Tidak ada lessons aktif dari news agent saat ini.", chat_id)
+        return
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📚 <b>NEWS-DERIVED LESSONS</b>",
+        f"🕐 {ts}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"<i>{len(lessons)} lessons aktif dari news agent (max 6 jam):</i>",
+        "",
+    ]
+    for i, lesson in enumerate(lessons[:10], 1):
+        lines.append(f"{i}. {lesson}")
+    lines.append("\n<i>Lessons ini otomatis diinjeksikan ke DeepSeek saat review sinyal.</i>")
+    send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
 
 
 def handle_macro_command(chat_id: str):
@@ -6013,6 +6565,36 @@ def handle_weeksummary_command(chat_id: str):
     send_telegram(msg, chat_id, parse_mode="HTML")
 
 
+def handle_refreshdashboard_command(chat_id: str):
+    """Handle /refreshdashboard — rebuild Dashboard sheet di Google Sheets."""
+    if not JOURNAL_MODULE:
+        send_telegram("❌ Trade journal module tidak tersedia.", chat_id)
+        return
+    try:
+        from trade_journal import _get_sheet, _setup_dashboard
+        send_telegram("🔄 Rebuilding dashboard spreadsheet...", chat_id)
+        sheet = _get_sheet()
+        if not sheet:
+            send_telegram(
+                "❌ Tidak bisa connect ke Google Sheets.\n"
+                "Pastikan <code>GOOGLE_SPREADSHEET_ID</code> dan credentials sudah diset.",
+                chat_id, parse_mode="HTML"
+            )
+            return
+        ok = _setup_dashboard(sheet)
+        if ok:
+            send_telegram(
+                "✅ <b>Dashboard berhasil diperbarui!</b>\n\n"
+                "📊 Buka spreadsheet kamu dan cek tab <b>Dashboard</b>.\n"
+                "Semua formula, warna, dan layout sudah di-refresh.",
+                chat_id, parse_mode="HTML"
+            )
+        else:
+            send_telegram("❌ Gagal rebuild dashboard. Cek log Railway untuk detail.", chat_id)
+    except Exception as e:
+        send_telegram(f"❌ Error: <code>{e}</code>", chat_id, parse_mode="HTML")
+
+
 def handle_setbalance_command(args: str, chat_id: str):
     """
     Handle /setbalance <USDT> — set balance trading.
@@ -6166,7 +6748,14 @@ def handle_ask_command(question: str, chat_id: str):
         send_telegram("❓ Format: `/ask <pertanyaan>` — contoh: `/ask apa itu order block?`", chat_id)
         return
 
-    # v14: Groq → Gemini → Claude chain
+    # v15: DeepSeek primary → Groq → Gemini → Claude chain
+    if DEEPSEEK_MODULE and DEEPSEEK_API_KEY:
+        send_telegram("🤖 Tanya ke DeepSeek AI... ⏳", chat_id)
+        answer = deepseek_free_ask(question)
+        if answer:
+            send_telegram(f"🤖 <b>DeepSeek AI:</b>\n\n{answer}", chat_id)
+            return
+
     if GROQ_API_KEY:
         send_telegram("🤖 Tanya ke Groq AI (Llama 70B)... ⏳", chat_id)
         answer = groq_free_ask(question)
@@ -6280,14 +6869,27 @@ def handle_help_command(chat_id: str):
         "💬 `/ask <pertanyaan>` — Tanya crypto ke Gemini\n"
         "📡 `/scan` — Trigger manual scan sekarang\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔬 *BACKTEST ENGINE* _(v12 baru!)_\n"
+        "📈 *MANUAL TRADE MANAGER* _(BARU!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 `/trade BTC LONG 95000 60` — Daftarkan posisi manual\n"
+        "   `/trade BTC LONG 95000` — tanpa size → auto dari compound balance\n"
+        "   → Bot hitung SL/TP1/TP2/BE/trailing otomatis (ATR-based)\n"
+        "   → Monitor tiap scan: alert BE, TP1 partial, trailing, SL\n"
+        "🏁 `/close BTC [harga]` — Manual full close + auto-log ke journal\n"
+        "📊 `/trades` — Lihat semua posisi aktif + P&L realtime\n"
+        "📈 `/compound` — Status compound stake (balance + next trade size)\n"
+        "💰 `/balance 500` — Set modal saat ini $500\n"
+        "📊 `/setstake 10` — Set stake 10% per trade dari balance\n\n"
+        "🔬 *BACKTEST ENGINE*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧪 `/btall 30` — Batch backtest TOP 20 coins × combined × 30 hari\n"
+        "   → Rank coins by WR%. Cache dipakai untuk validasi sinyal otomatis\n"
         "📊 `/backtest BTC scalp 30` — Backtest sinyal bot ke data historis\n"
         "   strategies: `scalp` | `swing` | `prepump` | `predump` | `combined`\n"
         "📋 `/btresult` — Hasil backtest terakhir\n"
         "🔬 `/btcompare BTC 14` — Compare semua strategy untuk 1 coin\n"
         "📚 `/btstats` — History aggregate semua backtest session\n"
-        "📡 `/signals` — Status semua signal yg ditrack (pending & resolved)\n"
+        "📡 `/signals` — Status semua signal + per-coin win rate\n"
         "🌐 `/marketstatus` — Fear&Greed + BTC Regime + Market Breadth + Dominance\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🐦 *X (TWITTER) SENTIMENT & DCA*\n"
@@ -6318,7 +6920,8 @@ def handle_help_command(chat_id: str):
         "   atau `/logtrade BTC LONG 65000 50 10 +25` (one-liner)\n"
         "📋 `/trades` — Lihat 5 trade terakhir\n"
         "📊 `/weeksummary` — Weekly summary + AI analysis\n"
-        "💰 `/setbalance 500` — Set saldo awal\n\n"
+        "💰 `/setbalance 500` — Set saldo awal\n"
+        "🔄 `/refreshdashboard` — Rebuild layout Dashboard di Sheets\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📚 *LEARNING ENGINE*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6351,6 +6954,109 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def run_btall_scheduled():
+    """
+    Scheduled auto-batch-backtest (silent, tanpa spam Telegram).
+    Generate/refresh btall_results.json supaya GATE 3 pakai cache cepat
+    bukan live backtest per-signal. Dijadwalkan harian (cache valid 7 hari).
+    """
+    if not BACKTEST_MODULE:
+        return
+    try:
+        from backtest_engine import run_batch_backtest
+
+        all_coins = get_top_coins()
+        if not all_coins:
+            log.warning("auto-btall: gagal fetch coin list, skip")
+            return
+
+        top20 = sorted(all_coins, key=lambda c: c.get("market_cap", 0), reverse=True)[:20]
+        symbols = []
+        for c in top20:
+            sym = c.get("symbol", "").upper()
+            if sym and sym not in ("USDT", "BUSD", "USDC", "DAI"):
+                symbols.append(sym + "USDT")
+
+        if not symbols:
+            log.warning("auto-btall: symbol list kosong, skip")
+            return
+
+        log.info(f"🧪 auto-btall: backtest {len(symbols)} coins (combined, 30d)...")
+        results = run_batch_backtest(symbols, strategy="combined", days=30)
+        n_valid = sum(1 for r in results if r.get("_grade") in ("STRONG", "MODERATE", "WEAK"))
+        log.info(f"✅ auto-btall selesai: {len(results)} coins, {n_valid} punya data valid → cache updated")
+    except Exception as e:
+        log.error(f"auto-btall error: {e}", exc_info=True)
+
+
+def handle_btall_command(args: str, chat_id: str):
+    """
+    /btall [days] — Batch backtest top 20 coins × combined strategy.
+    Hasilnya disimpan ke btall_results.json dan dipakai sebagai cache
+    untuk validasi sinyal selanjutnya (menggantikan live per-signal backtest).
+    """
+    if not BACKTEST_MODULE:
+        send_telegram("❌ Backtest module tidak tersedia.", chat_id)
+        return
+
+    try:
+        days = int(args.strip()) if args.strip().isdigit() else 30
+        days = max(7, min(days, 90))
+    except Exception:
+        days = 30
+
+    send_telegram(
+        f"🧪 <b>Batch Backtest dimulai!</b>\n"
+        f"📅 Period: {days} hari | Strategy: COMBINED\n"
+        f"⏳ Mengambil top coins... ~3-8 menit\n"
+        f"<i>Hasil akan dikirim setelah selesai.</i>",
+        chat_id, parse_mode="HTML"
+    )
+
+    def _run():
+        try:
+            from backtest_engine import run_batch_backtest, format_batch_result
+
+            # Ambil top 20 coins dari CoinGecko, sorted by market cap
+            all_coins = get_top_coins()
+            if not all_coins:
+                send_telegram("❌ Gagal fetch coin list dari CoinGecko.", chat_id)
+                return
+
+            top20 = sorted(all_coins, key=lambda c: c.get("market_cap", 0), reverse=True)[:20]
+            symbols = []
+            for c in top20:
+                sym = c.get("symbol", "").upper()
+                if sym and sym not in ("USDT", "BUSD", "USDC", "DAI"):
+                    symbols.append(sym + "USDT")
+
+            sym_names = ", ".join(s.replace("USDT", "") for s in symbols[:10])
+            send_telegram(
+                f"📋 <b>{len(symbols)} coins:</b> {sym_names}{'...' if len(symbols) > 10 else ''}\n"
+                f"⚙️ Running backtest... sabar ya 🙏",
+                chat_id, parse_mode="HTML"
+            )
+
+            results = run_batch_backtest(symbols, strategy="combined", days=days)
+            msg     = format_batch_result(results, "combined", days)
+            send_telegram(msg, chat_id, parse_mode="HTML")
+
+            # Update tip
+            strong = [r for r in results if r.get("_grade") == "STRONG"]
+            if strong:
+                syms = ", ".join(r.get("symbol","").replace("USDT","") for r in strong[:5])
+                send_telegram(
+                    f"💡 <b>Tip:</b> Sinyal selanjutnya untuk {syms} akan divalidasi "
+                    f"menggunakan hasil batch backtest ini (cache 7 hari).",
+                    chat_id, parse_mode="HTML"
+                )
+        except Exception as e:
+            log.error(f"btall error: {e}", exc_info=True)
+            send_telegram(f"❌ Batch backtest error: {e}", chat_id)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─────────────────────────────────────────────
@@ -6450,6 +7156,12 @@ def process_update(update: dict):
         threading.Thread(target=handle_scalp_command, args=(chat_id,), daemon=True).start()
 
     # ── v9: News ──────────────────────────────
+    elif text_lower.startswith("/newsagent"):
+        threading.Thread(target=handle_newsagent_command, args=(chat_id,), daemon=True).start()
+
+    elif text_lower.startswith("/newslessons"):
+        threading.Thread(target=handle_newslessons_command, args=(chat_id,), daemon=True).start()
+
     elif text_lower.startswith("/news"):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
@@ -6503,6 +7215,9 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/weeksummary"):
         threading.Thread(target=handle_weeksummary_command, args=(chat_id,), daemon=True).start()
+
+    elif text_lower.startswith("/refreshdashboard"):
+        threading.Thread(target=handle_refreshdashboard_command, args=(chat_id,), daemon=True).start()
 
     elif text_lower.startswith("/setbalance"):
         parts = text.split(maxsplit=1)
@@ -6568,6 +7283,11 @@ def process_update(update: dict):
                 chat_id
             )
 
+    elif text_lower.startswith("/btall"):
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        handle_btall_command(args, chat_id)
+
     elif text_lower.startswith("/btresult"):
         if BACKTEST_MODULE:
             handle_btresult_wrapper(chat_id)
@@ -6607,6 +7327,147 @@ def process_update(update: dict):
                 "Pastikan `backtest_engine.py` ada di folder yang sama.",
                 chat_id
             )
+
+    # ── Manual Trade Manager ──────────────────────────
+    elif text_lower.startswith("/trade ") or text_lower == "/trade":
+        parts = text.split(maxsplit=1)
+        args  = parts[1].strip() if len(parts) > 1 else ""
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif not args:
+            send_telegram(
+                "📌 <b>Format /trade:</b>\n"
+                "<code>/trade SYMBOL DIRECTION ENTRY [SIZE_USD]</code>\n\n"
+                "Contoh:\n"
+                "<code>/trade BTC LONG 95000 60</code>\n"
+                "<code>/trade ETH SHORT 3200 100</code>\n\n"
+                "Bot akan otomatis hitung SL, TP1, TP2, BE, dan trailing stop.",
+                chat_id
+            )
+        else:
+            def _open_trade():
+                parsed = parse_trade_command(args)
+                if "error" in parsed:
+                    send_telegram(f"❌ {parsed['error']}", chat_id)
+                    return
+                send_telegram(
+                    f"⏳ Menghitung level untuk {parsed['symbol']} (fetch ATR)...", chat_id
+                )
+                trade = record_trade(
+                    parsed["symbol"], parsed["direction"],
+                    parsed["entry"], parsed["size"]
+                )
+                if "error" in trade:
+                    send_telegram(f"❌ {trade['error']}", chat_id)
+                else:
+                    send_telegram(format_trade_opened(trade), chat_id)
+            threading.Thread(target=_open_trade, daemon=True).start()
+
+    elif text_lower.startswith("/close"):
+        parts = text.split(maxsplit=2)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/close SYMBOL [EXIT_PRICE]</code>\n"
+                "Contoh:\n"
+                "<code>/close BTC</code> → close di harga sekarang\n"
+                "<code>/close BTC 96000</code> → close di harga spesifik",
+                chat_id
+            )
+        else:
+            sym_arg   = parts[1].strip().upper()
+            price_arg = None
+            if len(parts) >= 3:
+                try:
+                    price_arg = float(parts[2].replace(",", ""))
+                except ValueError:
+                    send_telegram(f"❌ Harga tidak valid: '{parts[2]}'", chat_id)
+                    return
+            def _close_trade(s=sym_arg, p=price_arg):
+                if not p:
+                    send_telegram(f"⏳ Fetching harga {s}...", chat_id)
+                trade = close_trade(s, p, "MANUAL")
+                if trade is None:
+                    send_telegram(
+                        f"❌ Tidak ada posisi aktif untuk <b>{s}</b>.\n"
+                        f"Lihat posisi aktif dengan /trades",
+                        chat_id
+                    )
+                else:
+                    send_telegram(format_closed_trade(trade), chat_id)
+            threading.Thread(target=_close_trade, daemon=True).start()
+
+    elif text_lower == "/trades":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            def _list_trades():
+                active = get_active_trades()
+                send_telegram(format_trades_list(active), chat_id)
+            threading.Thread(target=_list_trades, daemon=True).start()
+
+    elif text_lower.startswith("/balance"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/balance &lt;jumlah&gt;</code>\n"
+                "Contoh: <code>/balance 500</code>\n\n"
+                "Gunakan /compound untuk melihat status compound stake.",
+                chat_id
+            )
+        else:
+            try:
+                bal = float(parts[1].replace(",", "").replace("$", ""))
+                if bal <= 0:
+                    raise ValueError
+                cfg = set_balance(bal)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                send_telegram(
+                    f"✅ Balance diset ke <b>${bal:,.2f}</b>\n"
+                    f"📊 Stake per trade ({cfg['stake_pct']*100:.1f}%): <b>${next_stake:,.2f}</b>\n\n"
+                    f"Lihat detail: /compound",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Jumlah tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower.startswith("/setstake"):
+        parts = text.split(maxsplit=1)
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        elif len(parts) < 2:
+            send_telegram(
+                "📌 Format: <code>/setstake &lt;persen&gt;</code>\n"
+                "Contoh: <code>/setstake 10</code> → 10% dari balance per trade\n"
+                "Range: 1% – 50%",
+                chat_id
+            )
+        else:
+            try:
+                pct = float(parts[1].replace("%", ""))
+                if pct <= 0:
+                    raise ValueError
+                cfg = set_stake_pct(pct)
+                from trade_manager import get_auto_stake
+                next_stake = get_auto_stake()
+                stake_str = f"${next_stake:,.2f}" if next_stake else "balance belum diset"
+                send_telegram(
+                    f"✅ Stake per trade diset ke <b>{cfg['stake_pct']*100:.1f}%</b>\n"
+                    f"💰 Next trade size: <b>{stake_str}</b>",
+                    chat_id
+                )
+            except ValueError:
+                send_telegram(f"❌ Persentase tidak valid: '{parts[1]}'", chat_id)
+
+    elif text_lower == "/compound":
+        if not TRADE_MANAGER_MODULE:
+            send_telegram("❌ Trade Manager module tidak tersedia.", chat_id)
+        else:
+            send_telegram(format_compound_status(), chat_id)
 
     elif text_lower.startswith("/liqstatus"):
         parts = text.split(maxsplit=1)
@@ -6952,12 +7813,17 @@ def _build_gated_signal_message(
             lines.append(f"   Sumber zone: {cz.get('source','?')}")
         lines.append(f"🎯 Entry  : <code>{_f(trade.get('entry', price))}</code> ← LIMIT")
         # v14: tunjukkan candle pattern spesifik dari 15M kalau ada
-        cp15 = tf_15m.get("candle_patterns", {})
-        if cp15.get("pattern") not in (None, "NONE"):
+        # FIX: hanya pakai candle 15M sebagai konfirmasi kalau arahnya SEARAH dgn trade.
+        # Kalau setup SHORT tapi 15M malah bullish engulfing, itu BUKAN konfirmasi —
+        # tampilkan candle yang DIHARAPKAN di retest, bukan candle kontra yang misleading.
+        is_long  = "LONG" in direction or "PUMP" in direction
+        want_dir = "BULLISH" if is_long else "BEARISH"
+        cp15     = tf_15m.get("candle_patterns", {})
+        if cp15.get("pattern") not in (None, "NONE") and cp15.get("direction") == want_dir:
             lines.append(f"✅ Konfirmasi: {cp15['detail']} + vol ≥1.5x")
         else:
-            conf_word = "bullish engulfing/pin bar 15M" if "LONG" in direction or "PUMP" in direction else "bearish engulfing/pin bar 15M"
-            lines.append(f"✅ Konfirmasi: {conf_word} + vol ≥1.5x")
+            conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
+            lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
 
     lines += [
         f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}",
@@ -7191,7 +8057,7 @@ def run_gated_scan():
     # ── 0. Signal tracker resolve ──────────────────
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_telegram)
+            resolved = on_scan_start(send_trade_report)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -7346,12 +8212,18 @@ def run_gated_scan():
         bt_reason = "Backtest skipped (module N/A)"
         if BACKTEST_MODULE:
             try:
-                from backtest_engine import quick_validate_signal
+                from confirmed_signal import _quick_backtest_validate
                 bt_dir = "LONG" if pump_dir else "SHORT"
-                bt_result = quick_validate_signal(analysis_sym, bt_dir)
-                bt_pass   = bt_result.get("valid", False) and bt_result.get("profit_factor", 0) >= GATE_BT_PF_MIN
+                bt_result = _quick_backtest_validate(analysis_sym, bt_dir)
                 bt_pf     = bt_result.get("profit_factor", 0)
-                bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
+                # Data belum cukup → lolos (lagi ngumpulin data, jangan blok).
+                # Data cukup → baru cek PF harus ≥ minimum.
+                if bt_result.get("insufficient_data"):
+                    bt_pass   = bt_result.get("valid", True)
+                    bt_reason = f"Backtest: {bt_result.get('reason', 'data belum cukup')}"
+                else:
+                    bt_pass   = bt_result.get("valid", False) and bt_pf >= GATE_BT_PF_MIN
+                    bt_reason = f"Backtest PF={bt_pf:.2f} ({'valid' if bt_pass else 'FAILED'})"
             except Exception:
                 bt_pass   = True  # fallback: tidak block kalau BT error
                 bt_reason = "Backtest not available (fallback pass)"
@@ -7381,13 +8253,67 @@ def run_gated_scan():
             for r in mf.get("reasons", [])[:1]:
                 mf_all_reasons.append(f"{tf_name}: {r}")
 
+        # Sanity check: TP harus di arah yang benar sebelum dikirim
+        _trade_tp  = float(trade.get("tp1") or 0)
+        _trade_sl  = float(trade.get("sl") or 0)
+        _trade_dir = "LONG" if pump_dir else "SHORT"
+        _tp_sane   = (_trade_dir == "LONG"  and _trade_tp > price) or \
+                     (_trade_dir == "SHORT" and _trade_tp < price)
+        if not _tp_sane or not _trade_tp or not _trade_sl:
+            log.warning(f"⚠️ TP sanity FAIL {analysis_sym}: dir={_trade_dir} price={price} tp={_trade_tp} — signal dibatalkan")
+            all_pass = False
+
         if all_pass:
-            # ── ALL GATES PASSED → SEND ALERT SETUP ──
+            # ── ALL GATES PASSED → DEEPSEEK REVIEW SEBELUM KIRIM ──
+            _signal_direction = "LONG" if pump_dir else "SHORT"
+
+            # v15: DeepSeek strategic review — adjust entry/TP/SL + news context
+            ai_review = None
+            if DEEPSEEK_MODULE and DEEPSEEK_API_KEY:
+                try:
+                    _news_ctx = None
+                    if NEWS_MODULE:
+                        try:
+                            _news_ctx = get_structured_news_for_ai(analysis_sym)
+                        except Exception:
+                            pass
+                    ai_review = deepseek_signal_review(
+                        symbol       = analysis_sym,
+                        direction    = _signal_direction,
+                        trade        = trade,
+                        master_score = raw_master,
+                        reasons      = gate_reasons,
+                        oi_data      = oi,
+                        tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
+                        news_context = _news_ctx,
+                        signal_type  = "GATED_SIGNAL",
+                    )
+                    # Kalau AI verdict SKIP → batalkan sinyal
+                    if ai_review and ai_review.get("ai_verdict") == "SKIP":
+                        log.info(f"🤖 DeepSeek SKIP {analysis_sym} — AI tidak konfirmasi sinyal")
+                        continue
+                    # Apply adjustments kalau ada
+                    if ai_review and ai_review.get("was_adjusted"):
+                        trade = dict(trade)   # copy agar tidak mutate original
+                        trade["entry"] = ai_review["entry"]
+                        trade["tp1"]   = ai_review["tp1"]
+                        trade["tp2"]   = ai_review["tp2"]
+                        trade["sl"]    = ai_review["sl"]
+                        log.info(
+                            f"🤖 DeepSeek adjusted {analysis_sym}: "
+                            f"entry={ai_review['entry']:.4f} tp1={ai_review['tp1']:.4f} sl={ai_review['sl']:.4f}"
+                        )
+                    # Apply score adjustment
+                    if ai_review and ai_review.get("score_adj", 0) != 0:
+                        raw_master = max(0, min(100, raw_master + ai_review["score_adj"]))
+                except Exception as _ds_e:
+                    log.warning(f"DeepSeek review error {analysis_sym}: {_ds_e}")
+
             confidence_label = ("HIGH" if raw_master >= 85 else
                                 "MEDIUM" if raw_master >= 75 else "LOW")
             msg = _build_gated_signal_message(
                 symbol=analysis_sym, price=price,
-                direction="LONG" if pump_dir else "SHORT",
+                direction=_signal_direction,
                 master_score=raw_master, confidence=confidence_label,
                 trade=trade, oi_data=oi, confluence=confluence,
                 mf_reasons=mf_all_reasons, gate_reasons=gate_reasons,
@@ -7395,32 +8321,40 @@ def run_gated_scan():
                 tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
             )
 
-            # v14: Groq AI insight — append sebelum dikirim
-            if GROQ_API_KEY:
+            # Append DeepSeek insight ke pesan
+            if ai_review and ai_review.get("insight"):
+                _verdict_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️", "SKIP": "🚫"}.get(
+                    ai_review.get("ai_verdict", "CONFIRM"), "🤖")
+                msg += (
+                    f"\n\n─── 🤖 DeepSeek AI ───\n"
+                    f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>\n"
+                    f"{_sanitize_ai_output(ai_review['insight'])}"
+                )
+                if ai_review.get("was_adjusted"):
+                    msg += "\n🔧 <i>Level harga disesuaikan oleh AI</i>"
+            elif GROQ_API_KEY and not DEEPSEEK_MODULE:
+                # Fallback ke Groq kalau DeepSeek tidak tersedia
                 try:
                     ai_txt = groq_signal_insight(
-                        symbol     = analysis_sym,
-                        direction  = "LONG" if pump_dir else "SHORT",
-                        master_score = raw_master,
-                        gate_reasons = gate_reasons,
-                        trade      = trade,
-                        tf_4h      = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
-                        oi_data    = oi,
+                        symbol=analysis_sym, direction=_signal_direction,
+                        master_score=raw_master, gate_reasons=gate_reasons,
+                        trade=trade, tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
+                        oi_data=oi,
                     )
                     if ai_txt:
                         msg += f"\n\n─── AI INSIGHT ───\n🤖 {_sanitize_ai_output(ai_txt)}"
                 except Exception as _ai_e:
-                    log.debug(f"Groq signal insight error: {_ai_e}")
+                    log.debug(f"Groq fallback error: {_ai_e}")
 
-            send_telegram(msg)
+            send_signal(msg)
             _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
-            log.info(f"🚀 SIGNAL SENT: {analysis_sym} {direction} score={raw_master}")
+            log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
                 try:
-                    _bt_dir    = "LONG" if pump_dir else "SHORT"
+                    _bt_dir    = _signal_direction
                     _tp_val    = float(trade.get("tp1", 0))
                     _sl_val    = float(trade.get("sl", 0))
                     _entry_val = float(trade.get("entry") or price)
@@ -7569,7 +8503,7 @@ def run_gated_scan():
                         gate_reasons = gate_reasons_entry,
                         alert_type   = "ENTRY_NOW",
                     )
-                    send_telegram(msg2)
+                    send_signal(msg2)
                     entry["notified"] = True
                     signals_sent += 1
                     log.info(f"🎯 RETEST ENTRY NOTIF: {entry['symbol']} price={cur_price}")
@@ -7610,7 +8544,7 @@ def _check_heartbeat(state: dict, signals_sent: int = 0):
             watchlist        = state.get(_WATCHLIST_KEY, {}),
             last_signal_ts   = last_signal[:16].replace("T", " ") if last_signal else "",
         )
-        send_telegram(msg)
+        send_signal(msg)
         state[_LAST_HB_KEY] = now.isoformat()
         log.info("💓 Heartbeat sent")
 
@@ -7621,11 +8555,20 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── v12: Cek outcome sinyal sebelumnya sebelum scan ──
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_telegram)
+            resolved = on_scan_start(send_trade_report)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
             log.warning(f"Signal tracker on_scan_start error: {e}")
+
+    # ── Manual Trade Manager: monitor posisi aktif ────
+    if TRADE_MANAGER_MODULE:
+        try:
+            alerts = check_active_trades(send_trade_report)
+            if alerts:
+                log.info(f"📈 Trade manager: {len(alerts)} posisi memicu alert (notify-only)")
+        except Exception as e:
+            log.warning(f"Trade manager check error: {e}")
 
     btc   = get_btc_context()
     coins = screen_coins(manual=manual)
@@ -7749,8 +8692,13 @@ def run_prepump_auto():
     hot = [c for c in candidates if c["total_score"] >= PREPUMP_ALERT_THRESHOLD]
 
     if hot:
+        # v15: DeepSeek review sebelum kirim
+        hot = _deepseek_enrich_candidates(hot, "PREPUMP")
+        if not hot:
+            log.info("Pre-pump: semua kandidat di-SKIP oleh DeepSeek AI")
+            return
         msg = build_prepump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal prepump ke signal tracker ──
         if TRACKER_MODULE:
@@ -7806,8 +8754,13 @@ def run_predump_auto():
     hot = [c for c in candidates if c["total_score"] >= PREDUMP_ALERT_THRESHOLD]
 
     if hot:
+        # v15: DeepSeek review sebelum kirim
+        hot = _deepseek_enrich_candidates(hot, "PREDUMP")
+        if not hot:
+            log.info("Pre-dump: semua kandidat di-SKIP oleh DeepSeek AI")
+            return
         msg = build_predump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal predump ke signal tracker ──
         if TRACKER_MODULE:
@@ -7864,7 +8817,7 @@ def run_scalp_auto():
 
     if hot:
         msg = build_scalp_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # Track sinyal scalp ke signal tracker
         if TRACKER_MODULE:
@@ -7989,7 +8942,7 @@ if __name__ == "__main__":
     # Whale Tracker (opsional)
     try:
         import whale_tracker
-        whale_tracker.init(telegram_fn=send_telegram)
+        whale_tracker.init(telegram_fn=send_market_update)
         log.info("🐳 Whale Tracker: LargeTradeMonitor + WalletMonitor RUNNING")
     except ImportError:
         log.warning("⚠️ whale_tracker.py tidak ditemukan — whale tracking disabled")
@@ -8011,10 +8964,39 @@ if __name__ == "__main__":
     if RISK_MODULE:
         scheduler.add_job(risk_reset_daily, "cron", hour=0, minute=0, id="risk_daily_reset")
 
+    # Auto-btall: refresh cache backtest harian (jam 01:00 UTC) + sekali saat start.
+    # Gate 3 pakai cache ini supaya tidak live-backtest tiap signal.
+    if BACKTEST_MODULE:
+        scheduler.add_job(run_btall_scheduled, "cron", hour=1, minute=0, id="auto_btall")
+        threading.Thread(target=run_btall_scheduled, daemon=True).start()
+
+    # Daily learning: analyze signal outcomes dan call DeepSeek for recommendations (jam 23:00 UTC)
+    if LEARNING_MODULE:
+        scheduler.add_job(
+            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_trade_report),
+            "cron", hour=23, minute=0, id="daily_learning"
+        )
+
+    # News Agent: hourly fetch — update news_intelligence.json setiap jam
+    # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
+    if NEWS_AGENT_MODULE and NEWSAPI_KEY:
+        scheduler.add_job(
+            lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            "interval", minutes=60, id="news_agent_hourly",
+            jitter=120,   # ± 2 menit random offset agar tidak collision
+        )
+        # Jalankan sekali saat startup (background agar tidak delay bot)
+        threading.Thread(
+            target=lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            daemon=True, name="news_agent_startup",
+        ).start()
+        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
+
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
-        f"Risk reset=00:00 UTC"
+        f"News Agent=60m | "
+        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | Daily-learning=23:00 UTC"
     )
 
     try:
