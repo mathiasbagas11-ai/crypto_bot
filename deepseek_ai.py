@@ -453,53 +453,49 @@ def deepseek_analyze_coin(
             + "\n".join(f"- {l}" for l in lessons[:3])
         )
 
-    user_msg = f"""Analisa komprehensif untuk {coin} (price: {price}).
+    user_msg = f"""Data trading untuk {coin} (harga sekarang: {price}).
 
-=== CONFLUENCE ===
-Direction: {conf_dir} | Level: {conf_level} | Score: {conf_score}/100
-Pre-Pump: {pp_score}/100 | Pre-Dump: {pd_score}/100 | Scalp: {sc_score}/100 | Swing: {sw_score}/100
+CONFLUENCE: {conf_dir} | {conf_level} | Score {conf_score}/100
+Pre-Pump {pp_score} | Pre-Dump {pd_score} | Scalp {sc_score} | Swing {sw_score}
 
-=== MARKET STRUCTURE ===
-4H: {s4.get("trend","?")} — Candle: {cp4.get("pattern","NONE")} | MFlow: {mf4.get("bias","?")} {mf4.get("strength","?")} CVD{mf4.get("cvd_pct",0):+.1f}%
-1H: {s1.get("trend","?")} — Candle: {cp1.get("pattern","NONE")} | MFlow: {mf1.get("bias","?")} CVD{mf1.get("cvd_pct",0):+.1f}%
-15M: Candle: {cp15.get("pattern","NONE")} | MFlow: {mf15.get("bias","?")}
+STRUCTURE:
+4H: {s4.get("trend","?")} CVD{mf4.get("cvd_pct",0):+.1f}% {mf4.get("strength","")}
+1H: {s1.get("trend","?")} CVD{mf1.get("cvd_pct",0):+.1f}%
+15M: {mf15.get("bias","?")} | Candle 1H:{cp1.get("pattern","NONE")} 15M:{cp15.get("pattern","NONE")}
+OB: 4H={len(ob4)} blok, 1H={len(ob1)} blok | FVG: 4H={len(fvg4)}, 1H={len(fvg1)}
+Liq: {liq}
+Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
 
-=== ORDER BLOCKS & FVG ===
-OB 4H: {len(ob4)} blok | OB 1H: {len(ob1)} blok
-FVG 4H: {len(fvg4)} gap | FVG 1H: {len(fvg1)} gap
-Liquidity: {liq}
+NEWS: {news_block}
 
-=== DERIVATIVES ===
-Funding: {funding}% | OI Change: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
+HISTORI: {mem_block if mem_block else "Belum ada histori."}
 
-=== NEWS & MACRO ===
-{news_block}
+Berikan analisa singkat, padat, LANGSUNG KE STRATEGI. Gunakan format ini PERSIS (satu baris per poin, tanpa paragraf panjang):
 
-=== HISTORI COIN ===
-{mem_block if mem_block else "Belum ada histori."}
+🎯 BIAS — [LONG/SHORT/WAIT] + satu kalimat alasan utama
+📍 ENTRY — harga konkret atau zona entry (contoh: 9.50–9.65)
+🎯 TP1 — harga target 1 + alasan level
+🎯 TP2 — harga target 2 (runner)
+🛑 SL — harga konkret + kenapa di sini (swing low/OB/FVG)
+⚡ EDGE — satu kalimat kenapa setup ini punya keunggulan sekarang
+⚠️ RISIKO — satu kalimat faktor terbesar yang bisa bikin setup gagal
+🚫 INVALID JIKA — level harga spesifik yang batalkan thesis
 
-Berikan analisa LENGKAP dalam Bahasa Indonesia dengan format berikut (gunakan emoji sebagai header, BUKAN markdown bold/italic):
-
-📊 MARKET STRUCTURE — Bullish/Bearish/Ranging di semua TF? Ada CHoCH atau BoS terbaru?
-🧱 ORDER BLOCKS & FVG — OB dan FVG yang paling relevan. Di harga berapa? Sudah diisi atau belum?
-💧 LIQUIDITY — Di mana pool likuiditas terkumpul? Equal highs/lows? Sweep sudah terjadi?
-⚡ MOMENTUM — RSI, Money Flow, Candle Pattern. Momentum mendukung atau kontra arah utama?
-📰 NEWS IMPACT — Bagaimana berita/events mempengaruhi setup? Risiko dari unlock/macro event?
-🎯 BIAS & SETUP — Bullish atau bearish? Level entry yang optimal? TP dan SL yang logis secara SMC?
-⚠️ RISIKO UTAMA — Satu faktor terbesar yang bisa invalidasi setup ini (sebut level harga konkret)."""
+PENTING: Sebut harga konkret di setiap poin. Tidak perlu paragraf panjang. Maksimal 2 baris per poin."""
 
     result = _deepseek_request(
         messages=[
             {"role": "system", "content": (
-                "Kamu adalah analis crypto profesional yang menguasai SMC (Smart Money Concepts), "
-                "Order Blocks, Fair Value Gaps, funding rate, dan on-chain data. "
-                "Analisa selalu kritis, berikan verdict actionable, sebut level harga konkret. "
-                "Bahasa Indonesia, gunakan emoji sebagai header, JANGAN bold/italic markdown."
+                "Kamu adalah trader crypto profesional dengan keahlian SMC. "
+                "Gaya komunikasi: singkat, langsung, actionable seperti mentor trading. "
+                "Selalu sebut level harga konkret. Bahasa Indonesia. "
+                "DILARANG menulis paragraf panjang — maksimal 2 baris per poin. "
+                "DILARANG bold/italic markdown."
             )},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=1200,
-        temperature=0.35,
+        max_tokens=600,
+        temperature=0.3,
     )
 
     return result or "⚠️ DeepSeek tidak bisa menganalisa saat ini. Coba lagi."
