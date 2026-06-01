@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-NEWS AGENT — Auto Hourly News Intelligence
-==========================================
-Fetch dan proses berita crypto setiap jam, simpan sebagai konteks untuk:
-1. DeepSeek signal review (news context otomatis tersedia tanpa re-fetch)
-2. Learning engine (derive lessons dari events yang terdeteksi)
-3. Sinyal otomatis (token unlock, regulatory, dll jadi confluence data)
+NEWS AGENT — Auto Hourly News + X Sentiment Intelligence
+=========================================================
+Fetch dan proses berita + X (Twitter) sentiment setiap jam.
 
-Flow:
-  Setiap jam → fetch news 25 koin + macro
-             → deteksi high-impact events
-             → derive learning lessons
-             → simpan ke news_intelligence.json
+Sources:
+  1. NewsAPI         — berita, token unlock, macro events (NEWSAPI_KEY)
+  2. X via Nitter    — KOL activity, narrative cycle, social sentiment (gratis)
+  3. X via API v2    — lebih reliable (opsional, TWITTER_BEARER_TOKEN)
+
+Output untuk:
+  - DeepSeek signal review (context otomatis tanpa re-fetch)
+  - Learning engine (derive lessons dari events + KOL activity)
+  - Sinyal confluence (unlock, euphoria, KOL pump = confluence data)
+
+Flow per jam:
+  → NewsAPI: fetch 10 koin + macro → deteksi events
+  → X Nitter/API: fetch 10 koin → KOL activity, sentiment, euphoria
+  → AI: derive lessons dari gabungan news + X
+  → Simpan ke news_intelligence.json
 
 File output:
-  news_intelligence.json — cache berita + derived lessons (TTL 1 jam)
+  news_intelligence.json — cache intel (TTL 1 jam)
 
 Requires .env:
-  NEWSAPI_KEY=...        (untuk fetch artikel)
-  DEEPSEEK_API_KEY=...   (untuk derive lessons via AI)
+  NEWSAPI_KEY=...            (untuk fetch artikel)
+  DEEPSEEK_API_KEY=...       (untuk derive lessons via AI)
+  TWITTER_BEARER_TOKEN=...   (opsional — lebih reliable X fetch)
 """
 
 import os
@@ -156,6 +164,119 @@ def _detect_trading_session() -> str:
 
 
 # ─────────────────────────────────────────────
+# X (TWITTER) SENTIMENT FETCH
+# ─────────────────────────────────────────────
+
+# Flag apakah x_sentiment modul tersedia
+_X_MODULE_AVAILABLE: bool | None = None
+
+def _x_available() -> bool:
+    global _X_MODULE_AVAILABLE
+    if _X_MODULE_AVAILABLE is None:
+        try:
+            import x_sentiment  # noqa
+            _X_MODULE_AVAILABLE = True
+        except ImportError:
+            _X_MODULE_AVAILABLE = False
+    return _X_MODULE_AVAILABLE
+
+
+def _fetch_x_for_coin(coin: str) -> dict:
+    """
+    Fetch X sentiment untuk satu koin via x_sentiment module.
+    Return structured dict yang siap disimpan ke intel.
+    """
+    if not _x_available():
+        return {}
+    try:
+        from x_sentiment import get_x_coin_analysis
+        result = get_x_coin_analysis(coin)
+        analysis = result.get("analysis", {})
+
+        sentiment_avg   = analysis.get("sentiment_avg", 0.0)
+        kol_count       = analysis.get("kol_count", 0)
+        kol_weighted    = analysis.get("kol_weighted", 0.0)
+        bull_tweets     = analysis.get("bull_tweets", 0)
+        bear_tweets     = analysis.get("bear_tweets", 0)
+        euphoria        = analysis.get("euphoria_detected", False)
+        top_kols        = analysis.get("kol_tweets", [])
+        total_count     = analysis.get("total_count", 0)
+
+        # Sentiment label dari score
+        if sentiment_avg >= 0.25:
+            x_sentiment_label = "BULLISH"
+        elif sentiment_avg <= -0.25:
+            x_sentiment_label = "BEARISH"
+        elif abs(sentiment_avg) < 0.05:
+            x_sentiment_label = "NEUTRAL"
+        else:
+            x_sentiment_label = "MIXED"
+
+        # Ringkasan KOL mentions (top 3)
+        kol_mentions = [
+            f"@{t.get('author','?')} ({t.get('category','?')}): {t.get('text','')[:80]}"
+            for t in top_kols[:3]
+        ]
+
+        return {
+            "sentiment_label": x_sentiment_label,
+            "sentiment_score": round(sentiment_avg * 100),   # scale ke -100..+100
+            "kol_count":       kol_count,
+            "kol_weighted":    kol_weighted,
+            "bull_tweets":     bull_tweets,
+            "bear_tweets":     bear_tweets,
+            "total_tweets":    total_count,
+            "euphoria":        euphoria,
+            "kol_mentions":    kol_mentions,
+            "source":          result.get("source", "nitter"),
+            "fetched_at":      datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        log.debug(f"X fetch error {coin}: {e}")
+        return {}
+
+
+def _derive_lessons_from_x(coin: str, x_data: dict) -> list[str]:
+    """
+    Derive lessons dari X sentiment data.
+    Contoh: "BTC euphoria di X terdeteksi — kemungkinan area top"
+    """
+    if not x_data:
+        return []
+    lessons = []
+    coin_label = coin if coin else "Market"
+    euphoria    = x_data.get("euphoria", False)
+    kol_count   = x_data.get("kol_count", 0)
+    kol_weighted= x_data.get("kol_weighted", 0.0)
+    x_sent      = x_data.get("sentiment_label", "NEUTRAL")
+    bull        = x_data.get("bull_tweets", 0)
+    bear        = x_data.get("bear_tweets", 0)
+
+    if euphoria:
+        lessons.append(
+            f"{coin_label}: Euphoria terdeteksi di X (banyak 'moon'/'pump' talk) "
+            f"— hati-hati, kemungkinan area TOP, hindari LONG baru"
+        )
+    elif kol_count >= 3 and kol_weighted >= 5 and x_sent == "BULLISH":
+        lessons.append(
+            f"{coin_label}: {kol_count} KOL aktif bullish di X "
+            f"— early narrative, LONG bias valid"
+        )
+    elif kol_count >= 2 and x_sent == "BEARISH":
+        lessons.append(
+            f"{coin_label}: KOL bearish di X — SHORT bias meningkat, waspada dump"
+        )
+
+    if bear > bull * 2 and bear >= 5:
+        lessons.append(
+            f"{coin_label}: Bear tweets {bear} >> Bull tweets {bull} di X "
+            f"— sentimen sangat negatif"
+        )
+
+    return lessons
+
+
+# ─────────────────────────────────────────────
 # AI LESSON DERIVATION
 # ─────────────────────────────────────────────
 
@@ -198,16 +319,37 @@ def _derive_lessons_from_events(
     return lessons
 
 
-def _ai_summarize_news(coin: str, headlines: list[str], events: list[dict]) -> dict:
+def _ai_summarize_news(
+    coin: str,
+    headlines: list[str],
+    events: list[dict],
+    x_data: dict = None,
+) -> dict:
     """
-    Gunakan DeepSeek untuk derive insight lebih dalam dari berita.
+    Gunakan DeepSeek untuk derive insight dari berita + X sentiment.
     Return: {"sentiment": str, "score": int, "lesson": str, "urgency": str}
     """
-    if not DEEPSEEK_API_KEY or not headlines:
+    if not DEEPSEEK_API_KEY or (not headlines and not x_data):
         return {"sentiment": "NEUTRAL", "score": 0, "lesson": "", "urgency": "LOW"}
 
-    events_str = ", ".join(f"{e['category']} ({e['direction']})" for e in events) or "tidak ada"
-    headlines_str = "\n".join(f"- {h}" for h in headlines[:5])
+    events_str    = ", ".join(f"{e['category']} ({e['direction']})" for e in events) or "tidak ada"
+    headlines_str = "\n".join(f"- {h}" for h in headlines[:5]) or "tidak ada"
+
+    # Susun X context
+    x_block = ""
+    if x_data:
+        euphoria  = x_data.get("euphoria", False)
+        kol_cnt   = x_data.get("kol_count", 0)
+        x_sent    = x_data.get("sentiment_label", "NEUTRAL")
+        bull      = x_data.get("bull_tweets", 0)
+        bear      = x_data.get("bear_tweets", 0)
+        kol_ments = x_data.get("kol_mentions", [])
+        x_block = (
+            f"X Sentiment: {x_sent} | KOL aktif: {kol_cnt} | "
+            f"Bull: {bull} Bear: {bear} | Euphoria: {'YA' if euphoria else 'tidak'}"
+        )
+        if kol_ments:
+            x_block += "\nKOL mentions:\n" + "\n".join(f"  - {m}" for m in kol_ments[:2])
 
     try:
         r = requests.post(
@@ -219,31 +361,34 @@ def _ai_summarize_news(coin: str, headlines: list[str], events: list[dict]) -> d
                     {
                         "role": "system",
                         "content": (
-                            "Kamu adalah analis news crypto. Analisa berita dan berikan output JSON. "
-                            "JANGAN pakai markdown. Hanya JSON valid."
+                            "Kamu adalah analis news + social sentiment crypto. "
+                            "Gabungkan berita dan X (Twitter) untuk insight trading. "
+                            "Output JSON valid saja, tanpa markdown."
                         ),
                     },
                     {
                         "role": "user",
                         "content": (
-                            f"Analisa berita untuk {coin}:\n{headlines_str}\n\n"
-                            f"Events terdeteksi: {events_str}\n\n"
-                            f"Balas JSON persis:\n"
+                            f"Analisa untuk {coin}:\n\n"
+                            f"BERITA:\n{headlines_str}\n\n"
+                            f"EVENTS: {events_str}\n\n"
+                            f"X/TWITTER:\n{x_block if x_block else 'tidak ada data'}\n\n"
+                            f"Balas JSON:\n"
                             f'{{"sentiment":"BULLISH|BEARISH|NEUTRAL|MIXED",'
-                            f'"score":-50 hingga 50,'
-                            f'"lesson":"satu kalimat insight trading actionable dalam Bahasa Indonesia",'
+                            f'"score":-50 sampai 50,'
+                            f'"lesson":"satu kalimat insight trading actionable Bahasa Indonesia",'
                             f'"urgency":"LOW|MEDIUM|HIGH"}}'
                         ),
                     },
                 ],
-                "temperature":   0.2,
-                "max_tokens":    150,
+                "temperature":     0.2,
+                "max_tokens":      150,
                 "response_format": {"type": "json_object"},
             },
             timeout=20,
         )
         if r.status_code == 200:
-            data = r.json()["choices"][0]["message"]["content"]
+            data   = r.json()["choices"][0]["message"]["content"]
             result = json.loads(data)
             return {
                 "sentiment": str(result.get("sentiment", "NEUTRAL")).upper(),
@@ -308,20 +453,28 @@ def run_news_fetch(send_telegram_fn=None) -> dict:
     except Exception as e:
         log.warning(f"Macro news fetch error: {e}")
 
-    # ── 2. Per-coin news (batch bergantian untuk tidak exhaust API) ─
-    # Batasi ke 10 koin per fetch untuk jaga rate limit NewsAPI
+    # ── 2. Per-coin: News + X sentiment secara bersamaan ──────────
+    # NewsAPI: top 10, X: top 10 (bisa overlap, rate limit masing-masing)
     coins_to_fetch = MONITORED_COINS[:10]
+    x_euphoria_coins = []   # koin dengan euphoria X
+
     for coin in coins_to_fetch:
         try:
+            # 2a. NewsAPI
             query     = COIN_SEARCH_MAP.get(coin, f"{coin} cryptocurrency")
             headlines = _fetch_headlines(query, days=1, n=4)
             events    = _scan_events(headlines, coin)
 
-            # AI hanya untuk koin dengan events atau headlines penting
+            # 2b. X sentiment (parallel lewat module)
+            x_data = _fetch_x_for_coin(coin)
+            time.sleep(0.4)   # rate limit buffer antara koin
+
+            # 2c. AI summarize gabungan news + X
             ai_result = {}
-            if events or (headlines and len(headlines) >= 2):
-                ai_result = _ai_summarize_news(coin, headlines, events)
-                time.sleep(0.5)   # rate limit buffer
+            has_content = events or (headlines and len(headlines) >= 2) or x_data
+            if has_content:
+                ai_result = _ai_summarize_news(coin, headlines, events, x_data)
+                time.sleep(0.5)
 
             intelligence["coins"][coin] = {
                 "headlines":  headlines[:3],
@@ -331,20 +484,37 @@ def run_news_fetch(send_telegram_fn=None) -> dict:
                 "lesson":     ai_result.get("lesson", ""),
                 "urgency":    ai_result.get("urgency", "LOW"),
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
+                # X-specific fields
+                "x": x_data,
             }
 
-            coin_lessons = _derive_lessons_from_events(events, coin, headlines)
+            # Derive lessons dari news events + X
+            coin_lessons  = _derive_lessons_from_events(events, coin, headlines)
+            x_lessons     = _derive_lessons_from_x(coin, x_data)
             all_lessons.extend(coin_lessons)
+            all_lessons.extend(x_lessons)
+
+            if x_data.get("euphoria"):
+                x_euphoria_coins.append(coin)
 
             if ai_result.get("urgency") == "HIGH":
                 high_urgency.append(f"{coin}: {ai_result.get('lesson','')}")
 
+            log_parts = []
             if events:
-                log.info(f"  {coin}: {len(events)} events ({', '.join(e['category'] for e in events)})")
+                log_parts.append(f"{len(events)} news events")
+            if x_data:
+                log_parts.append(
+                    f"X: {x_data.get('sentiment_label','?')} "
+                    f"KOL={x_data.get('kol_count',0)}"
+                    f"{' EUPHORIA' if x_data.get('euphoria') else ''}"
+                )
+            if log_parts:
+                log.info(f"  {coin}: " + " | ".join(log_parts))
 
         except Exception as e:
-            log.warning(f"News fetch error {coin}: {e}")
-        time.sleep(0.3)   # gentle rate limiting
+            log.warning(f"Coin fetch error {coin}: {e}")
+        time.sleep(0.2)
 
     # ── 3. Store derived lessons ──────────────
     intelligence["derived_lessons"] = [
@@ -353,8 +523,12 @@ def run_news_fetch(send_telegram_fn=None) -> dict:
             "derived_at": started_at.isoformat(),
             "expires_at": (started_at + timedelta(hours=6)).isoformat(),
         }
-        for lesson in all_lessons[:20]  # max 20 lessons
+        for lesson in all_lessons[:25]
     ]
+
+    # Simpan juga x_euphoria info di level intelligence
+    if x_euphoria_coins:
+        intelligence["x_euphoria_coins"] = x_euphoria_coins
 
     # ── 4. Build summary text ─────────────────
     session = intelligence["trading_session"]
@@ -364,8 +538,17 @@ def run_news_fetch(send_telegram_fn=None) -> dict:
         len(c.get("events", []))
         for c in intelligence["coins"].values()
     ) + len(intelligence["macro"].get("events", []))
+    n_x_active = sum(
+        1 for c in intelligence["coins"].values()
+        if c.get("x", {}).get("kol_count", 0) >= 1
+    )
 
-    summary_parts = [f"📰 News fetch selesai | Session: {session} | Macro: {macro_s} | {n_events} events terdeteksi"]
+    summary_parts = [
+        f"📰 Fetch selesai | Session: {session} | Macro: {macro_s}",
+        f"⚡ {n_events} news events | 🐦 {n_x_active} koin dengan KOL aktif",
+    ]
+    if x_euphoria_coins:
+        summary_parts.append(f"🚨 X Euphoria: {', '.join(x_euphoria_coins[:3])}")
     if high_urgency:
         summary_parts.append("⚠️ HIGH URGENCY: " + " | ".join(high_urgency[:3]))
     if macro_l:
@@ -445,21 +628,34 @@ def get_cached_news(coin: str = None, max_age_seconds: int = CACHE_TTL_SECONDS) 
         if coin is None:
             return intel
 
-        sym = coin.upper().replace("USDT", "")
-        coin_data = intel.get("coins", {}).get(sym, {})
+        sym        = coin.upper().replace("USDT", "")
+        coin_data  = intel.get("coins", {}).get(sym, {})
         macro_data = intel.get("macro", {})
+        x_data     = coin_data.get("x", {})
+
+        # X sentiment fields
+        x_sentiment_label = x_data.get("sentiment_label", "NEUTRAL") if x_data else "NEUTRAL"
+        x_kol_count       = x_data.get("kol_count",       0)          if x_data else 0
+        x_euphoria        = x_data.get("euphoria",         False)      if x_data else False
+        x_kol_mentions    = x_data.get("kol_mentions",     [])         if x_data else []
 
         return {
-            "symbol":            sym,
-            "sentiment_label":   coin_data.get("sentiment", macro_data.get("sentiment", "NEUTRAL")),
-            "sentiment_score":   coin_data.get("score",     macro_data.get("score", 0)),
-            "trading_session":   intel.get("trading_session", ""),
+            "symbol":             sym,
+            "sentiment_label":    coin_data.get("sentiment", macro_data.get("sentiment", "NEUTRAL")),
+            "sentiment_score":    coin_data.get("score",     macro_data.get("score", 0)),
+            "trading_session":    intel.get("trading_session", ""),
             "high_impact_events": coin_data.get("events", []) + macro_data.get("events", []),
-            "upcoming_unlocks":  [e for e in coin_data.get("events", []) if "UNLOCK" in e],
-            "headlines":         coin_data.get("headlines", []) + macro_data.get("headlines", [])[:2],
-            "macro_risk":        macro_data.get("lesson", ""),
-            "coin_lesson":       coin_data.get("lesson", ""),
-            "urgency":           coin_data.get("urgency", "LOW"),
+            "upcoming_unlocks":   [e for e in coin_data.get("events", []) if "UNLOCK" in e],
+            "headlines":          coin_data.get("headlines", []) + macro_data.get("headlines", [])[:2],
+            "macro_risk":         macro_data.get("lesson", ""),
+            "coin_lesson":        coin_data.get("lesson", ""),
+            "urgency":            coin_data.get("urgency", "LOW"),
+            # X sentiment
+            "x_sentiment":        x_sentiment_label,
+            "x_kol_count":        x_kol_count,
+            "x_euphoria":         x_euphoria,
+            "x_kol_mentions":     x_kol_mentions[:3],
+            "x_source":           x_data.get("source", "nitter") if x_data else "",
         }
     except Exception as e:
         log.debug(f"Cache read error: {e}")

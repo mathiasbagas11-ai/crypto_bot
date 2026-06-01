@@ -6134,6 +6134,27 @@ def handle_news_command(coin: str, chat_id: str):
                 lines.append(f"\n💡 <b>AI Lesson:</b> {coin_lesson}")
             if macro_risk:
                 lines.append(f"🌐 <b>Macro:</b> {macro_risk}")
+
+            # X (Twitter) sentiment
+            x_sent     = cached.get("x_sentiment", "")
+            x_kol_cnt  = cached.get("x_kol_count", 0)
+            x_euphoria = cached.get("x_euphoria", False)
+            x_kol_ments= cached.get("x_kol_mentions", [])
+            x_source   = cached.get("x_source", "nitter")
+            if x_sent and x_sent != "NEUTRAL":
+                x_em = "🟢" if x_sent == "BULLISH" else "🔴" if x_sent == "BEARISH" else "🟡"
+                x_line = f"\n🐦 <b>X Sentiment:</b> {x_em} {x_sent}"
+                if x_kol_cnt:
+                    x_line += f" | KOL aktif: <b>{x_kol_cnt}</b>"
+                if x_euphoria:
+                    x_line += " | ⚠️ <b>EUPHORIA!</b>"
+                x_line += f" <i>({x_source})</i>"
+                lines.append(x_line)
+                if x_kol_ments:
+                    lines.append("  KOL:")
+                    for m in x_kol_ments[:2]:
+                        lines.append(f"  • {str(m)[:100]}")
+
             lines.append("\n⚠️ <i>Data dari News Agent hourly fetch. DYOR.</i>")
             send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
             return
@@ -6195,6 +6216,28 @@ def handle_newsagent_command(chat_id: str):
                 for sym, data in hot_coins:
                     evs = " | ".join(data.get("events", [])[:2])
                     lines.append(f"  • <b>{sym}</b>: {evs}")
+
+            # X Sentiment per koin (koin dengan KOL aktif atau euphoria)
+            x_active = [
+                (sym, data.get("x", {}))
+                for sym, data in intel.get("coins", {}).items()
+                if data.get("x", {}).get("kol_count", 0) >= 1
+                or data.get("x", {}).get("euphoria", False)
+            ][:6]
+            if x_active:
+                lines.append("\n🐦 <b>X Sentiment:</b>")
+                for sym, xd in x_active:
+                    x_sent  = xd.get("sentiment_label", "?")
+                    kol_cnt = xd.get("kol_count", 0)
+                    euph    = xd.get("euphoria", False)
+                    x_em    = "🟢" if x_sent == "BULLISH" else "🔴" if x_sent == "BEARISH" else "🟡"
+                    suffix  = " ⚠️EUPHORIA" if euph else ""
+                    lines.append(f"  • <b>{sym}</b>: {x_em} {x_sent} | KOL: {kol_cnt}{suffix}")
+
+            # X euphoria summary
+            x_euphorias = intel.get("x_euphoria_coins", [])
+            if x_euphorias:
+                lines.append(f"\n🚨 <b>Euphoria Coins:</b> {', '.join(x_euphorias)} — hindari LONG baru!")
 
             if lessons:
                 lines.append("\n💡 <b>Top Lessons:</b>")

@@ -188,6 +188,22 @@ def deepseek_signal_review(
             parts.append("Headlines: " + " | ".join(news_headlines[:3]))
         if coin_lesson:
             parts.append(f"AI News Lesson: {coin_lesson}")
+
+        # X (Twitter) sentiment dari news_agent cache
+        x_sent     = news_context.get("x_sentiment", "")
+        x_kol_cnt  = news_context.get("x_kol_count", 0)
+        x_euphoria = news_context.get("x_euphoria", False)
+        x_kol_ments= news_context.get("x_kol_mentions", [])
+        if x_sent:
+            x_line = f"X/Twitter Sentiment: {x_sent}"
+            if x_kol_cnt:
+                x_line += f" | KOL aktif: {x_kol_cnt}"
+            if x_euphoria:
+                x_line += " | ⚠️ EUPHORIA TERDETEKSI"
+            parts.append(x_line)
+        if x_kol_ments:
+            parts.append("X KOL: " + " | ".join(str(m)[:80] for m in x_kol_ments[:2]))
+
         news_block = "\n".join(parts)
 
     # Tambahkan active lessons dari news_agent (jika tersedia)
