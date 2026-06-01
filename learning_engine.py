@@ -1038,13 +1038,28 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
         # Call DeepSeek API
         summary = _call_deepseek_analysis(analysis_text, stats_by_strategy)
 
-        # Format message
+        # Format stats tabel dengan rata kanan
+        stats_lines = []
+        for strat, data in sorted(stats_by_strategy.items(), key=lambda x: -x[1]["win_rate"]):
+            wr    = data["win_rate"]
+            pnl   = data["avg_pnl"]
+            n     = data["trades"]
+            wr_em = "🟢" if wr >= 55 else "🟡" if wr >= 40 else "🔴"
+            pnl_s = f"{pnl:+.2f}%"
+            stats_lines.append(f"  {wr_em} <b>{strat}</b>: {n} trade | WR {wr:.0f}% | PnL {pnl_s}")
+
+        ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
         msg = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📚 <b>DAILY LEARNING SUMMARY</b>\n"
+            f"🕐 {ts}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{analysis_text}\n"
-            f"<b>AI RECOMMENDATIONS:</b>\n"
-            f"{summary}"
+            "📊 <b>Signal Outcomes:</b>\n"
+            + "\n".join(stats_lines) + "\n\n"
+            "─────────────────────\n"
+            "🤖 <b>AI Analysis:</b>\n"
+            f"{summary}\n\n"
+            "⚠️ <i>Data otomatis dari signal_outcomes.json</i>"
         )
 
         if send_telegram_fn:
@@ -1060,45 +1075,79 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
         return f"❌ Daily analysis error: {e}"
 
 
+def _strip_markdown(text: str) -> str:
+    """Bersihkan markdown bold/italic agar aman dikirim sebagai plain text di Telegram."""
+    import re
+    # Hapus **bold** dan *italic*
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*',     r'\1', text)
+    # Hapus __underline__ dan _italic_
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'_(.+?)_',   r'\1', text)
+    # Hapus `code`
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # Bersihkan spasi berlebih
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def _call_deepseek_analysis(analysis_text: str, stats: dict) -> str:
-    """Call DeepSeek v4 API untuk analisa signal outcomes + recommendations."""
+    """Call DeepSeek API untuk analisa signal outcomes + recommendations."""
     try:
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             return "⚠️ DEEPSEEK_API_KEY belum diset di .env"
 
-        # Build prompt
-        prompt = f"""Analisa data signal outcomes trading bot crypto berikut:
+        prompt = f"""Analisa performa trading bot crypto berikut:
 
 {analysis_text}
 
-Berdasarkan data ini, tolong:
-1. Identifikasi strategy mana yang perform terbaik/terburuk
-2. Apa possible reasons dari discrepancy (jika ada)
-3. Apa actionable recommendations untuk improve signal quality? (maksimal 200 words)
-4. Apakah ada pattern atau insight yang perlu disesuaikan?
+Berikan analisa singkat dan actionable dalam Bahasa Indonesia. Format WAJIB:
 
-Keep it concise dan actionable."""
+📈 TERBAIK: [strategy] — [alasan singkat, 1 kalimat]
+📉 TERBURUK: [strategy] — [alasan singkat, 1 kalimat]
+🔍 POLA: [insight pattern yang terdeteksi, 1-2 kalimat]
+💡 REKOMENDASI:
+• [action item 1]
+• [action item 2]
+• [action item 3]
+⚠️ PERINGATAN: [kondisi yang perlu diwaspadai, jika ada]
 
-        # Call DeepSeek API
+ATURAN FORMAT:
+- Gunakan emoji sebagai pengganti bold/header
+- DILARANG pakai **bold**, *italic*, atau markdown apapun
+- Plain text saja + emoji
+- Maksimal 150 kata total"""
+
         response = requests.post(
-            "https://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "model": "deepseek-chat",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 500,
+                "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Kamu adalah analis performa bot trading crypto. "
+                            "Jawab selalu dalam Bahasa Indonesia menggunakan emoji sebagai penanda section. "
+                            "JANGAN PERNAH gunakan **bold**, *italic*, atau format markdown apapun. "
+                            "Hanya plain text dan emoji. Singkat dan actionable."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 400,
             },
-            timeout=30
+            timeout=30,
         )
 
         if response.status_code != 200:
             return f"⚠️ DeepSeek API error: {response.status_code}"
 
         data = response.json()
-        analysis = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return analysis or "⚠️ No response from DeepSeek"
+        raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return _strip_markdown(raw) if raw else "⚠️ Tidak ada respons dari DeepSeek"
 
     except Exception as e:
         log.warning(f"DeepSeek API error: {e}")

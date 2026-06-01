@@ -164,7 +164,7 @@ def deepseek_signal_review(
 
     reasons_str = "\n".join(f"- {r}" for r in reasons[:6])
 
-    # Susun news context
+    # Susun news context (gabungkan news_context + active lessons dari news_agent)
     news_block = ""
     if news_context:
         hi_events = news_context.get("high_impact_events", [])
@@ -172,19 +172,34 @@ def deepseek_signal_review(
         session   = news_context.get("trading_session", "")
         unlocks   = news_context.get("upcoming_unlocks", [])
         news_headlines = news_context.get("headlines", [])
+        coin_lesson    = news_context.get("coin_lesson", "")
+        urgency        = news_context.get("urgency", "LOW")
 
         parts = []
         if sentiment:
-            parts.append(f"News Sentiment: {sentiment}")
+            parts.append(f"News Sentiment: {sentiment} (urgency: {urgency})")
         if session:
             parts.append(f"Trading Session: {session}")
         if hi_events:
             parts.append("High-Impact Events: " + " | ".join(str(e) for e in hi_events[:3]))
         if unlocks:
-            parts.append("Upcoming Unlocks: " + " | ".join(str(u) for u in unlocks[:2]))
+            parts.append("Token Unlock Events: " + " | ".join(str(u) for u in unlocks[:2]))
         if news_headlines:
             parts.append("Headlines: " + " | ".join(news_headlines[:3]))
+        if coin_lesson:
+            parts.append(f"AI News Lesson: {coin_lesson}")
         news_block = "\n".join(parts)
+
+    # Tambahkan active lessons dari news_agent (jika tersedia)
+    active_news_lessons = []
+    try:
+        from news_agent import get_active_lessons_from_news
+        active_news_lessons = get_active_lessons_from_news()
+    except ImportError:
+        pass
+    if active_news_lessons:
+        lessons_str = "\n".join(f"- {l}" for l in active_news_lessons[:5])
+        news_block += f"\n\nActive News Lessons (dari hourly fetch):\n{lessons_str}"
 
     tp1_r = round((tp1 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
     tp2_r = round((tp2 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0

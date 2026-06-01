@@ -536,18 +536,32 @@ def _get_trading_session() -> str:
 # ── AI-Ready Structured News Context ─────────
 def get_structured_news_for_ai(symbol: str) -> dict:
     """
-    Fetch dan susun konteks news dalam format terstruktur untuk DeepSeek.
+    Susun konteks news untuk DeepSeek.
+    Prioritas: news_agent cache (fresh, hourly) → fallback NewsAPI live fetch.
 
     Return dict:
-      sentiment_label    : str  (BULLISH / BEARISH / NEUTRAL / MIXED)
-      sentiment_score    : int  (-100 to +100)
-      trading_session    : str  (nama sesi trading aktif)
-      high_impact_events : list[str]  (event penting yang terdeteksi)
-      upcoming_unlocks   : list[str]  (token unlock events)
-      headlines          : list[str]  (headline terkini)
-      macro_risk         : str  (ringkasan risiko makro)
+      sentiment_label    : str
+      sentiment_score    : int
+      trading_session    : str
+      high_impact_events : list[str]
+      upcoming_unlocks   : list[str]
+      headlines          : list[str]
+      macro_risk         : str
     """
     sym = symbol.upper().replace("USDT", "")
+
+    # ── Cek news_agent cache dulu ───────────
+    try:
+        from news_agent import get_cached_news
+        cached = get_cached_news(sym, max_age_seconds=3900)   # fresh kalau ≤ 65 menit
+        if cached:
+            return cached
+    except ImportError:
+        pass
+    except Exception as e:
+        log.debug(f"news_agent cache read error: {e}")
+
+    # ── Fallback: build minimal context ──────
     result = {
         "symbol":             sym,
         "sentiment_label":    "NEUTRAL",
@@ -559,7 +573,6 @@ def get_structured_news_for_ai(symbol: str) -> dict:
         "macro_risk":         "",
     }
 
-    # Trading session selalu tersedia tanpa API
     if not NEWSAPI_KEY:
         return result
 

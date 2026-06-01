@@ -100,6 +100,13 @@ except ImportError:
     log_tmp = logging.getLogger("v15")
     log_tmp.warning("deepseek_ai.py tidak ditemukan — DeepSeek AI dinonaktifkan")
 
+# ── News Agent (hourly auto-fetch) ─────────
+try:
+    from news_agent import run_news_fetch, get_cached_news, get_active_lessons_from_news
+    NEWS_AGENT_MODULE = True
+except ImportError:
+    NEWS_AGENT_MODULE = False
+
 # ── Market Context ─────────────────────────
 try:
     from market_context import get_market_context, format_market_context_block
@@ -6085,16 +6092,58 @@ def handle_scalp_command(chat_id: str):
 # ── v9: News handlers ────────────────────────
 
 def handle_news_command(coin: str, chat_id: str):
-    """Handle /news <COIN>"""
+    """Handle /news <COIN> — cek cache news agent dulu, fallback NewsAPI live."""
+    sym = coin.upper().strip().replace("USDT", "")
+    if not sym:
+        send_telegram("❓ Format: `/news BTC` atau `/news SOL`", chat_id)
+        return
+
+    # Cek news_agent cache dulu (lebih cepat, tidak spam API)
+    if NEWS_AGENT_MODULE:
+        cached = get_cached_news(sym, max_age_seconds=3900)
+        if cached:
+            ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+            lines = [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📰 <b>NEWS INTEL: {sym}</b>",
+                f"🕐 {ts} (dari cache hourly)",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"🌐 Session: {cached.get('trading_session', '?')}",
+                f"📊 Sentiment: <b>{cached.get('sentiment_label','NEUTRAL')}</b> "
+                f"(score: {cached.get('sentiment_score', 0):+d})",
+            ]
+            events = cached.get("high_impact_events", [])
+            if events:
+                lines.append(f"\n⚠️ <b>High-Impact Events:</b>")
+                for ev in events[:5]:
+                    lines.append(f"  • {ev}")
+            unlocks = cached.get("upcoming_unlocks", [])
+            if unlocks:
+                lines.append(f"\n🔓 <b>Token Unlock:</b>")
+                for ul in unlocks:
+                    lines.append(f"  • {ul}")
+            heads = cached.get("headlines", [])
+            if heads:
+                lines.append(f"\n📋 <b>Headlines:</b>")
+                for h in heads[:4]:
+                    lines.append(f"  • {h[:100]}")
+            coin_lesson = cached.get("coin_lesson", "")
+            macro_risk  = cached.get("macro_risk", "")
+            if coin_lesson:
+                lines.append(f"\n💡 <b>AI Lesson:</b> {coin_lesson}")
+            if macro_risk:
+                lines.append(f"🌐 <b>Macro:</b> {macro_risk}")
+            lines.append("\n⚠️ <i>Data dari News Agent hourly fetch. DYOR.</i>")
+            send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
+            return
+
+    # Fallback: live fetch via NewsAPI
     if not NEWS_MODULE:
         send_telegram("❌ News module tidak tersedia. Pastikan news_sentiment.py ada.", chat_id)
         return
     if not NEWSAPI_KEY:
         send_telegram("❌ NEWSAPI_KEY belum diset di .env", chat_id)
-        return
-    sym = coin.upper().strip().replace("USDT","")
-    if not sym:
-        send_telegram("❓ Format: `/news BTC` atau `/news SOL`", chat_id)
         return
     send_telegram(f"📰 Mencari berita untuk *{sym}*... ⏳", chat_id)
     try:
@@ -6103,6 +6152,86 @@ def handle_news_command(coin: str, chat_id: str):
         send_telegram(msg, chat_id)
     except Exception as e:
         send_telegram(f"❌ Error fetch news: {e}", chat_id)
+
+
+def handle_newsagent_command(chat_id: str):
+    """Handle /newsagent — manual trigger news agent fetch + tampilkan summary."""
+    if not NEWS_AGENT_MODULE:
+        send_telegram("❌ news_agent.py tidak ditemukan.", chat_id)
+        return
+    send_telegram("📰 Menjalankan News Agent fetch... ⏳ (30-60 detik)", chat_id)
+    try:
+        import threading as _thr
+        def _run():
+            intel = run_news_fetch(send_telegram_fn=None)
+            ts    = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+            n_ev  = sum(len(c.get("events", [])) for c in intel.get("coins", {}).values())
+            n_ev += len(intel.get("macro", {}).get("events", []))
+            lessons = intel.get("derived_lessons", [])
+            macro_s = intel.get("macro", {}).get("sentiment", "NEUTRAL")
+            macro_l = intel.get("macro", {}).get("lesson", "")
+
+            lines = [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📰 <b>NEWS AGENT REPORT</b>",
+                f"🕐 {ts}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"🌐 Session: {intel.get('trading_session','?')}",
+                f"📊 Macro Sentiment: <b>{macro_s}</b>",
+                f"⚡ Events Terdeteksi: {n_ev}",
+                f"📚 Lessons Derived: {len(lessons)}",
+            ]
+            if macro_l:
+                lines.append(f"\n🌐 <b>Macro Insight:</b> {macro_l}")
+
+            # Tampilkan top events per koin
+            hot_coins = [
+                (sym, data) for sym, data in intel.get("coins", {}).items()
+                if data.get("events") or data.get("urgency") == "HIGH"
+            ][:5]
+            if hot_coins:
+                lines.append("\n⚠️ <b>Coin Events:</b>")
+                for sym, data in hot_coins:
+                    evs = " | ".join(data.get("events", [])[:2])
+                    lines.append(f"  • <b>{sym}</b>: {evs}")
+
+            if lessons:
+                lines.append("\n💡 <b>Top Lessons:</b>")
+                for ls in lessons[:4]:
+                    lines.append(f"  • {ls['text']}")
+
+            lines.append("\n<i>Cache diperbarui — berlaku 1 jam ke depan.</i>")
+            send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
+
+        _thr.Thread(target=_run, daemon=True).start()
+    except Exception as e:
+        send_telegram(f"❌ Error news agent: {e}", chat_id)
+
+
+def handle_newslessons_command(chat_id: str):
+    """Handle /newslessons — tampilkan active lessons dari news agent."""
+    if not NEWS_AGENT_MODULE:
+        send_telegram("❌ news_agent.py tidak ditemukan.", chat_id)
+        return
+    lessons = get_active_lessons_from_news()
+    if not lessons:
+        send_telegram("📚 Tidak ada lessons aktif dari news agent saat ini.", chat_id)
+        return
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📚 <b>NEWS-DERIVED LESSONS</b>",
+        f"🕐 {ts}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"<i>{len(lessons)} lessons aktif dari news agent (max 6 jam):</i>",
+        "",
+    ]
+    for i, lesson in enumerate(lessons[:10], 1):
+        lines.append(f"{i}. {lesson}")
+    lines.append("\n<i>Lessons ini otomatis diinjeksikan ke DeepSeek saat review sinyal.</i>")
+    send_telegram("\n".join(lines), chat_id, parse_mode="HTML")
 
 
 def handle_macro_command(chat_id: str):
@@ -6946,6 +7075,12 @@ def process_update(update: dict):
         threading.Thread(target=handle_scalp_command, args=(chat_id,), daemon=True).start()
 
     # ── v9: News ──────────────────────────────
+    elif text_lower.startswith("/newsagent"):
+        threading.Thread(target=handle_newsagent_command, args=(chat_id,), daemon=True).start()
+
+    elif text_lower.startswith("/newslessons"):
+        threading.Thread(target=handle_newslessons_command, args=(chat_id,), daemon=True).start()
+
     elif text_lower.startswith("/news"):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
@@ -8761,9 +8896,25 @@ if __name__ == "__main__":
             "cron", hour=23, minute=0, id="daily_learning"
         )
 
+    # News Agent: hourly fetch — update news_intelligence.json setiap jam
+    # Kirim Telegram alert otomatis kalau ada high-urgency event
+    if NEWS_AGENT_MODULE and NEWSAPI_KEY:
+        scheduler.add_job(
+            lambda: run_news_fetch(send_telegram_fn=send_telegram),
+            "interval", minutes=60, id="news_agent_hourly",
+            jitter=120,   # ± 2 menit random offset agar tidak collision
+        )
+        # Jalankan sekali saat startup (background agar tidak delay bot)
+        threading.Thread(
+            target=lambda: run_news_fetch(send_telegram_fn=send_telegram),
+            daemon=True, name="news_agent_startup",
+        ).start()
+        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
+
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
+        f"News Agent=60m | "
         f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | Daily-learning=23:00 UTC"
     )
 
