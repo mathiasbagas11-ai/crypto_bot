@@ -40,6 +40,10 @@ import base64
 import time
 import logging
 import threading
+# Thread-local context: stores message_thread_id for the current handler thread
+# so send_telegram() automatically replies to the same Telegram topic without
+# needing to change every handler signature.
+_msg_ctx = threading.local()
 import requests
 import numpy as np
 from datetime import datetime, timezone, timedelta
@@ -4932,13 +4936,16 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
     max_len = 4000
     chunks  = [html_message[i:i+max_len] for i in range(0, len(html_message), max_len)]
 
+    # Resolve effective thread_id: explicit arg → thread-local ctx → None
+    effective_tid = thread_id or getattr(_msg_ctx, "thread_id", None)
+
     # Build base payload — tambahkan message_thread_id kalau ada
     def _make_payload(text: str, plain: bool = False) -> dict:
         p = {"chat_id": target, "text": text}
         if not plain:
             p["parse_mode"] = "HTML"
-        if thread_id:
-            p["message_thread_id"] = int(thread_id)
+        if effective_tid:
+            p["message_thread_id"] = int(effective_tid)
         return p
 
     first_message_id = None
@@ -7092,9 +7099,12 @@ def process_update(update: dict):
     if not message:
         return
 
-    chat_id = str(message.get("chat", {}).get("id", ""))
-    text    = message.get("text", "").strip()
-    photos  = message.get("photo", [])
+    chat_id   = str(message.get("chat", {}).get("id", ""))
+    text      = message.get("text", "").strip()
+    photos    = message.get("photo", [])
+    # Extract topic thread_id (Telegram Topics / forum supergroup)
+    raw_tid   = message.get("message_thread_id")
+    topic_tid = str(raw_tid) if raw_tid else None
 
     if not chat_id:
         return
@@ -7104,7 +7114,19 @@ def process_update(update: dict):
         return  # silent drop — unauthorized user tidak dapat response apapun
     # ─────────────────────────────────────────
 
-    log.info(f"📩 [{chat_id}] text='{text[:60]}' photos={len(photos)}")
+    log.info(f"📩 [{chat_id}] tid={topic_tid} text='{text[:60]}' photos={len(photos)}")
+
+    # Inject topic_tid into this thread so inline send_telegram calls in
+    # process_update itself also reply to the correct topic.
+    _msg_ctx.thread_id = topic_tid
+
+    # Helper: spawn a handler thread that carries the topic thread_id in its
+    # thread-local context so all send_telegram() calls reply to the same topic.
+    def _thread(fn, *args, tid=topic_tid):
+        def _run():
+            _msg_ctx.thread_id = tid
+            fn(*args)
+        return threading.Thread(target=_run, daemon=True)
 
     # ── Handle foto chart ────────────────────────
     if photos:
@@ -7147,39 +7169,39 @@ def process_update(update: dict):
         send_telegram("📸 Siap! Sekarang kirimkan gambar chart kamu dan akan langsung dianalisa AI 🤖", chat_id)
 
     elif text_lower.startswith("/prepump"):
-        threading.Thread(target=handle_prepump_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_prepump_command, chat_id).start()
 
     elif text_lower.startswith("/predump"):
-        threading.Thread(target=handle_predump_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_predump_command, chat_id).start()
 
     elif text_lower.startswith("/scalp"):
-        threading.Thread(target=handle_scalp_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_scalp_command, chat_id).start()
 
     # ── v9: News ──────────────────────────────
     elif text_lower.startswith("/newsagent"):
-        threading.Thread(target=handle_newsagent_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_newsagent_command, chat_id).start()
 
     elif text_lower.startswith("/newslessons"):
-        threading.Thread(target=handle_newslessons_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_newslessons_command, chat_id).start()
 
     elif text_lower.startswith("/news"):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
-        threading.Thread(target=handle_news_command, args=(coin, chat_id), daemon=True).start()
+        _thread(handle_news_command, coin, chat_id).start()
 
     elif text_lower.startswith("/macro"):
-        threading.Thread(target=handle_macro_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_macro_command, chat_id).start()
 
     # ── X Sentiment / DCA ─────────────────────
     elif text_lower.startswith("/dca"):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
-        threading.Thread(target=handle_dca_command, args=(coin, chat_id), daemon=True).start()
+        _thread(handle_dca_command, coin, chat_id).start()
 
     elif text_lower.startswith("/xsenti"):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
-        threading.Thread(target=handle_xsentiment_command, args=(coin, chat_id), daemon=True).start()
+        _thread(handle_xsentiment_command, coin, chat_id).start()
 
     # ── v9: Risk ──────────────────────────────
     elif text_lower.startswith("/risk"):
@@ -7204,28 +7226,20 @@ def process_update(update: dict):
     # ── v11: Trade Journal ────────────────────
     elif text_lower.startswith("/logtrade"):
         parts = text.split(maxsplit=1)
-        threading.Thread(
-            target=handle_logtrade_command,
-            args=(parts[1] if len(parts)>1 else "", chat_id),
-            daemon=True
-        ).start()
+        _thread(handle_logtrade_command, parts[1] if len(parts)>1 else "", chat_id).start()
 
     elif text_lower.startswith("/trades"):
-        threading.Thread(target=handle_trades_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_trades_command, chat_id).start()
 
     elif text_lower.startswith("/weeksummary"):
-        threading.Thread(target=handle_weeksummary_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_weeksummary_command, chat_id).start()
 
     elif text_lower.startswith("/refreshdashboard"):
-        threading.Thread(target=handle_refreshdashboard_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_refreshdashboard_command, chat_id).start()
 
     elif text_lower.startswith("/setbalance"):
         parts = text.split(maxsplit=1)
-        threading.Thread(
-            target=handle_setbalance_command,
-            args=(parts[1] if len(parts)>1 else "", chat_id),
-            daemon=True
-        ).start()
+        _thread(handle_setbalance_command, parts[1] if len(parts)>1 else "", chat_id).start()
 
     # ── v11: Learning Engine ──────────────────
     elif text_lower.startswith("/logoutcome"):
@@ -7252,10 +7266,7 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/evolve"):
         if LEARNING_MODULE:
-            threading.Thread(
-                target=lambda: send_telegram(handle_evolve_command(), chat_id, parse_mode="HTML"),
-                daemon=True
-            ).start()
+            _thread(lambda: send_telegram(handle_evolve_command(), chat_id, parse_mode="HTML")).start()
         else:
             send_telegram("⚠️ Learning module tidak aktif.", chat_id)
 
@@ -7271,11 +7282,7 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         args  = parts[1].strip() if len(parts) > 1 else ""
         if BACKTEST_MODULE:
-            threading.Thread(
-                target=_bt_backtest,
-                args=(args, chat_id, send_telegram),
-                daemon=True
-            ).start()
+            _thread(_bt_backtest, args, chat_id, send_telegram).start()
         else:
             send_telegram(
                 "❌ Backtest module tidak tersedia.\n"
@@ -7298,11 +7305,7 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         args  = parts[1].strip() if len(parts) > 1 else ""
         if BACKTEST_MODULE:
-            threading.Thread(
-                target=_bt_compare,
-                args=(args, chat_id, send_telegram),
-                daemon=True
-            ).start()
+            _thread(_bt_compare, args, chat_id, send_telegram).start()
         else:
             send_telegram("❌ Backtest module tidak tersedia.", chat_id)
 
@@ -7316,11 +7319,7 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         args  = parts[1].strip() if len(parts) > 1 else ""
         if BACKTEST_MODULE:
-            threading.Thread(
-                target=_bt_signal,
-                args=(args, chat_id, send_telegram),
-                daemon=True
-            ).start()
+            _thread(_bt_signal, args, chat_id, send_telegram).start()
         else:
             send_telegram(
                 "❌ Backtest module tidak tersedia.\n"
@@ -7361,7 +7360,7 @@ def process_update(update: dict):
                     send_telegram(f"❌ {trade['error']}", chat_id)
                 else:
                     send_telegram(format_trade_opened(trade), chat_id)
-            threading.Thread(target=_open_trade, daemon=True).start()
+            _thread(_open_trade).start()
 
     elif text_lower.startswith("/close"):
         parts = text.split(maxsplit=2)
@@ -7396,7 +7395,7 @@ def process_update(update: dict):
                     )
                 else:
                     send_telegram(format_closed_trade(trade), chat_id)
-            threading.Thread(target=_close_trade, daemon=True).start()
+            _thread(_close_trade).start()
 
     elif text_lower == "/trades":
         if not TRADE_MANAGER_MODULE:
@@ -7405,7 +7404,7 @@ def process_update(update: dict):
             def _list_trades():
                 active = get_active_trades()
                 send_telegram(format_trades_list(active), chat_id)
-            threading.Thread(target=_list_trades, daemon=True).start()
+            _thread(_list_trades).start()
 
     elif text_lower.startswith("/balance"):
         parts = text.split(maxsplit=1)
@@ -7529,14 +7528,10 @@ def process_update(update: dict):
     # ── v13: Symbol Memory ───────────────────────
     elif text_lower.startswith("/symbolmemory"):
         parts = text.split(maxsplit=1)
-        threading.Thread(
-            target=handle_symbolmemory_command,
-            args=(parts[1] if len(parts)>1 else "", chat_id),
-            daemon=True
-        ).start()
+        _thread(handle_symbolmemory_command, parts[1] if len(parts)>1 else "", chat_id).start()
 
     elif text_lower.startswith("/symbolstats"):
-        threading.Thread(target=handle_symbolstats_command, args=(chat_id,), daemon=True).start()
+        _thread(handle_symbolstats_command, chat_id).start()
 
     elif text_lower.startswith("/blacklist"):
         parts = text.split(maxsplit=1)
@@ -7549,11 +7544,11 @@ def process_update(update: dict):
     elif text_lower.startswith("/ask"):
         parts    = text.split(maxsplit=1)
         question = parts[1].strip() if len(parts) > 1 else ""
-        threading.Thread(target=handle_ask_command, args=(question, chat_id), daemon=True).start()
+        _thread(handle_ask_command, question, chat_id).start()
 
     elif text_lower.startswith("/scan"):
         send_telegram("📡 Manual scan dimulai... ⏳", chat_id)
-        threading.Thread(target=run_scan, kwargs={"manual": True, "chat_id": chat_id}, daemon=True).start()
+        _thread(lambda: run_scan(manual=True, chat_id=chat_id)).start()
 
     elif text_lower.startswith("/status"):
         handle_status_command(chat_id)
@@ -7566,10 +7561,7 @@ def process_update(update: dict):
         if SIGNAL_CHAT_MODULE:
             parts = text.split(maxsplit=1)
             sym   = parts[1].strip() if len(parts) > 1 else None
-            threading.Thread(
-                target=signal_chat.handle_why,
-                args=(sym, chat_id, _signal_chat_ai, send_telegram),
-                daemon=True).start()
+            _thread(signal_chat.handle_why, sym, chat_id, _signal_chat_ai, send_telegram).start()
         else:
             send_telegram("⚠️ signal_chat.py tidak tersedia.", chat_id)
 
@@ -7585,11 +7577,7 @@ def process_update(update: dict):
 
     # v11: Journal wizard intercept (harus di atas free-form)
     elif JOURNAL_MODULE and is_in_wizard(chat_id):
-        threading.Thread(
-            target=handle_journal_wizard_message,
-            args=(text, chat_id),
-            daemon=True
-        ).start()
+        _thread(handle_journal_wizard_message, text, chat_id).start()
 
     # v15: Jawaban ya/skip untuk usulan aturan gaya trading (prioritas)
     elif (SIGNAL_CHAT_MODULE
@@ -7607,26 +7595,21 @@ def process_update(update: dict):
     elif (SIGNAL_CHAT_MODULE
           and message.get("reply_to_message", {}).get("from", {}).get("is_bot")):
         replied = message["reply_to_message"]
-        threading.Thread(
-            target=signal_chat.handle_discussion_reply,
-            args=(replied.get("message_id"), text, chat_id, _signal_chat_ai,
-                  send_telegram, replied.get("text", "")),
-            daemon=True).start()
+        _thread(signal_chat.handle_discussion_reply,
+                replied.get("message_id"), text, chat_id, _signal_chat_ai,
+                send_telegram, replied.get("text", "")).start()
 
     # Direct coin name → analyze
     elif len(text.split()) == 1 and text.upper().replace("USDT", "") in TICKER_TO_BINANCE:
-        threading.Thread(target=handle_analyze_command, args=(text.strip(), chat_id), daemon=True).start()
+        _thread(handle_analyze_command, text.strip(), chat_id).start()
 
     # v15: Lanjutan diskusi aktif (tanpa reply, dalam window) → diskusi
     elif SIGNAL_CHAT_MODULE and signal_chat.is_discussion_active(chat_id):
-        threading.Thread(
-            target=signal_chat.handle_followup,
-            args=(text, chat_id, _signal_chat_ai, send_telegram),
-            daemon=True).start()
+        _thread(signal_chat.handle_followup, text, chat_id, _signal_chat_ai, send_telegram).start()
 
-    # Free-form question → Gemini
+    # Free-form question → ask
     elif len(text) > 3:
-        threading.Thread(target=handle_ask_command, args=(text, chat_id), daemon=True).start()
+        _thread(handle_ask_command, text, chat_id).start()
 
 
 def polling_loop():
