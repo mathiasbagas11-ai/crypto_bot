@@ -7133,20 +7133,10 @@ def process_update(update: dict):
         photo   = photos[-1]
         file_id = photo.get("file_id")
         if file_id:
-            # v11: Cek apakah user lagi di wizard journal (butuh foto sebagai bukti)
             if JOURNAL_MODULE and is_wizard_expecting_image(chat_id):
-                threading.Thread(
-                    target=handle_journal_wizard_image,
-                    args=(file_id, chat_id),
-                    daemon=True
-                ).start()
+                _thread(handle_journal_wizard_image, file_id, chat_id).start()
             else:
-                # Normal: analisa chart AI
-                threading.Thread(
-                    target=handle_chart_command,
-                    args=(chat_id, file_id),
-                    daemon=True
-                ).start()
+                _thread(handle_chart_command, chat_id, file_id).start()
         _awaiting_chart.pop(chat_id, None)
         return
 
@@ -7160,7 +7150,7 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
         if coin:
-            threading.Thread(target=handle_analyze_command, args=(coin, chat_id), daemon=True).start()
+            _thread(handle_analyze_command, coin, chat_id).start()
         else:
             send_telegram("❓ Format: `/analyze BTC` atau `/analyze SOLUSDT`", chat_id)
 
