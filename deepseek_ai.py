@@ -220,47 +220,24 @@ def deepseek_signal_review(
     tp1_r = round((tp1 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
     tp2_r = round((tp2 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
 
-    user_msg = f"""Kamu adalah AI strategist untuk bot trading crypto. Review sinyal ini SEBELUM dikirim ke trader.
+    user_msg = f"""Review sinyal {signal_type} — {coin} {direction} (score {master_score}/100)
 
-=== SINYAL {signal_type} ===
-Coin: {coin} | Direction: {direction} ({bias})
-Master Score: {master_score}/100
 Entry: {entry} | TP1: {tp1} ({tp1_r}R) | TP2: {tp2} ({tp2_r}R) | SL: {sl}
-Entry Mode: {trade.get("entry_mode", "?")}
+Mode: {trade.get("entry_mode","?")}
 
-=== ALASAN SINYAL ===
-{reasons_str}
+Alasan: {reasons_str}
 
-=== MARKET STRUCTURE ===
-4H Trend: {s4.get("trend","?")} | 1H Trend: {s1.get("trend","?")} | 15M Trend: {s15.get("trend","?")}
-Money Flow 4H: {mf4.get("bias","?")} {mf4.get("strength","?")} CVD{mf4.get("cvd_pct",0):+.1f}%
-Money Flow 1H: {mf1.get("bias","?")} CVD{mf1.get("cvd_pct",0):+.1f}%
-Candle 1H: {cp1.get("pattern","NONE")} | Candle 15M: {cp15.get("pattern","NONE")}
-Order Blocks 4H: {len(ob4)} OB | 1H: {len(ob1)} OB | FVG 4H: {len(fvg4)} FVG
+Structure: 4H {s4.get("trend","?")} CVD{mf4.get("cvd_pct",0):+.1f}% | 1H {s1.get("trend","?")} CVD{mf1.get("cvd_pct",0):+.1f}% | 15M {s15.get("trend","?")}
+Candle: 1H {cp1.get("pattern","NONE")} | 15M {cp15.get("pattern","NONE")}
+OB: 4H={len(ob4)} 1H={len(ob1)} | FVG 4H={len(fvg4)}
+Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
+News: {news_block if news_block else "tidak ada"}
 
-=== DERIVATIVES ===
-Funding: {funding}% | OI Change: {oi_chg}% | L/S Ratio: {ls_ratio} ({ls_bias})
+TUGAS:
+1. Sesuaikan entry/TP/SL kalau ada alasan teknikal SMC yang jelas (OB/FVG/swing). Kalau sudah optimal, pertahankan.
+2. Verdict: CONFIRM / CAUTION / SKIP (skip kalau ada risiko besar: unlock, macro, struktur kontra)
 
-=== NEWS & MARKET CONTEXT ===
-{news_block if news_block else "Tidak ada data news tersedia"}
-
-=== TUGASMU ===
-Berdasarkan semua data di atas, lakukan review strategis:
-
-1. Apakah level harga (entry/TP1/TP2/SL) perlu disesuaikan berdasarkan struktur SMC yang ada?
-   - Cek apakah entry sudah optimal (di OB? di FVG? atau terlalu jauh?)
-   - Cek apakah SL sudah di bawah swing low / di atas swing high yang logis
-   - Cek apakah TP1/TP2 ada di level resistansi/support signifikan
-   - HANYA sesuaikan kalau ada alasan teknikal yang jelas. Kalau sudah optimal, pertahankan.
-
-2. Apakah ada faktor dari news/events yang mempengaruhi conviction?
-   - Token unlock = bearish pressure, pertimbangkan SL lebih ketat atau skip LONG
-   - FED hawkish = bearish macro, pertimbangkan CAUTION pada LONG
-   - FOMC coming = volatilitas tinggi = pertimbangkan SL lebih lebar
-
-3. Berikan verdict: CONFIRM (kirim sinyal), CAUTION (kirim tapi peringatan), SKIP (jangan kirim)
-
-Balas dalam format JSON PERSIS seperti ini (tanpa markdown, langsung JSON):
+Balas JSON (angka numerik, tanpa markdown):
 {{
   "entry": {entry},
   "tp1": {tp1},
@@ -268,27 +245,26 @@ Balas dalam format JSON PERSIS seperti ini (tanpa markdown, langsung JSON):
   "sl": {sl},
   "score_adj": 0,
   "ai_verdict": "CONFIRM",
-  "insight_edge": "Satu kalimat kenapa setup ini punya edge nyata sekarang.",
-  "insight_conflict": "Satu kalimat faktor kontra atau 'Tidak ada konflik berarti'.",
-  "insight_invalidation": "Di level harga SPESIFIK berapa thesis ini batal (pakai angka).",
-  "adjustment_reason": "Kenapa angka disesuaikan atau 'Angka dipertahankan karena sudah optimal'"
+  "insight_edge": "Satu kalimat — edge utama setup ini (sebut data konkret).",
+  "insight_entry": "Satu kalimat — strategi entry: market/tunggu retest/level spesifik.",
+  "insight_risk": "Satu kalimat — risiko terbesar yang harus diwaspadai.",
+  "insight_invalid": "Level harga SPESIFIK di mana thesis ini batal (pakai angka).",
+  "adjustment_reason": "Satu kalimat kenapa disesuaikan atau 'Level sudah optimal'."
 }}
 
-PENTING: score_adj range -10 sampai +10. entry/tp1/tp2/sl harus angka numerik saja, bukan string."""
+score_adj: -10 sampai +10."""
 
     raw = _deepseek_request(
         messages=[
             {"role": "system", "content": (
-                "Kamu adalah AI trading strategist senior yang bertugas sebagai gatekeeper "
-                "sinyal crypto sebelum dikirim ke trader. "
-                "Kamu memahami Smart Money Concepts (SMC), Order Blocks, FVG, funding rate, dan OI. "
-                "Kamu kritis tapi tidak terlalu konservatif — kalau setup valid, konfirmasi. "
-                "Kalau ada risiko tersembunyi, sebutkan. "
-                "Selalu balas dalam JSON valid tanpa markdown."
+                "Kamu adalah trader crypto senior dan gatekeeper sinyal. "
+                "Gaya: singkat, langsung, pakai angka konkret. "
+                "Kalau setup valid konfirmasi, kalau ada risiko tersembunyi sebutkan. "
+                "JSON valid saja, tanpa markdown."
             )},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=600,
+        max_tokens=400,
         temperature=0.25,
         response_format="json_object",
     )
@@ -335,18 +311,20 @@ PENTING: score_adj range -10 sampai +10. entry/tp1/tp2/sl harus angka numerik sa
         abs(adj_sl    - sl)    > 0.0001
     )
 
-    # Build insight teks
-    edge    = str(data.get("insight_edge",          "")).strip()
-    conflict= str(data.get("insight_conflict",       "")).strip()
-    invalid = str(data.get("insight_invalidation",   "")).strip()
-    adj_rsn = str(data.get("adjustment_reason",      "")).strip()
+    # Build insight teks — format singkat actionable
+    edge     = str(data.get("insight_edge",    "")).strip()
+    entry_tip= str(data.get("insight_entry",   "")).strip()
+    risk     = str(data.get("insight_risk",    "")).strip()
+    invalid  = str(data.get("insight_invalid", "")).strip()
+    adj_rsn  = str(data.get("adjustment_reason","")).strip()
 
     insight_parts = []
-    if edge:    insight_parts.append(f"✅ EDGE: {edge}")
-    if conflict:insight_parts.append(f"⚠️ KONFLIK: {conflict}")
-    if invalid: insight_parts.append(f"🛑 INVALIDASI: {invalid}")
+    if edge:      insight_parts.append(f"⚡ EDGE — {edge}")
+    if entry_tip: insight_parts.append(f"📍 ENTRY — {entry_tip}")
+    if risk:      insight_parts.append(f"⚠️ RISIKO — {risk}")
+    if invalid:   insight_parts.append(f"🚫 INVALID JIKA — {invalid}")
     if was_adjusted and adj_rsn:
-        insight_parts.append(f"🔧 ADJUST: {adj_rsn}")
+        insight_parts.append(f"🔧 ADJUST — {adj_rsn}")
 
     insight = "\n".join(insight_parts)
 
