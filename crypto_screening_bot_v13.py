@@ -303,6 +303,12 @@ NEWSAPI_KEY           = os.getenv("NEWSAPI_KEY", "")
 # v15: DeepSeek — primary AI strategist sebelum sinyal dikirim ke Telegram
 DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
 
+# v15: Room routing — pisahkan pesan ke room Telegram yang berbeda
+# Fallback ke TELEGRAM_CHAT_ID kalau room khusus belum diset
+SIGNAL_CHAT_ID        = os.getenv("SIGNAL_CHAT_ID", "")        or None
+MARKET_UPDATE_CHAT_ID = os.getenv("MARKET_UPDATE_CHAT_ID", "") or None
+TRADE_REPORT_CHAT_ID  = os.getenv("TRADE_REPORT_CHAT_ID", "")  or None
+
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
 SCAN_INTERVAL_MINUTES   = 10
@@ -4978,6 +4984,24 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None):
     return first_message_id
 
 
+# ─────────────────────────────────────────────
+# ROOM-ROUTED SENDERS
+# ─────────────────────────────────────────────
+
+def send_signal(message: str, parse_mode: str = None):
+    """Kirim sinyal ke Signal Room (SIGNAL_CHAT_ID). Fallback ke default chat."""
+    return send_telegram(message, chat_id=SIGNAL_CHAT_ID, parse_mode=parse_mode)
+
+
+def send_market_update(message: str, parse_mode: str = None):
+    """Kirim news/market update ke Market Update Room (MARKET_UPDATE_CHAT_ID)."""
+    return send_telegram(message, chat_id=MARKET_UPDATE_CHAT_ID, parse_mode=parse_mode)
+
+
+def send_trade_report(message: str, parse_mode: str = None):
+    """Kirim trade outcome/report ke Trade Reports Room (TRADE_REPORT_CHAT_ID)."""
+    return send_telegram(message, chat_id=TRADE_REPORT_CHAT_ID, parse_mode=parse_mode)
+
 
 # ─────────────────────────────────────────────
 # MESSAGE BUILDER — RESTORED RICH FORMAT
@@ -8019,7 +8043,7 @@ def run_gated_scan():
     # ── 0. Signal tracker resolve ──────────────────
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_telegram)
+            resolved = on_scan_start(send_trade_report)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -8308,7 +8332,7 @@ def run_gated_scan():
                 except Exception as _ai_e:
                     log.debug(f"Groq fallback error: {_ai_e}")
 
-            send_telegram(msg)
+            send_signal(msg)
             _gate_mark_sent(analysis_sym, state)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
@@ -8465,7 +8489,7 @@ def run_gated_scan():
                         gate_reasons = gate_reasons_entry,
                         alert_type   = "ENTRY_NOW",
                     )
-                    send_telegram(msg2)
+                    send_signal(msg2)
                     entry["notified"] = True
                     signals_sent += 1
                     log.info(f"🎯 RETEST ENTRY NOTIF: {entry['symbol']} price={cur_price}")
@@ -8506,7 +8530,7 @@ def _check_heartbeat(state: dict, signals_sent: int = 0):
             watchlist        = state.get(_WATCHLIST_KEY, {}),
             last_signal_ts   = last_signal[:16].replace("T", " ") if last_signal else "",
         )
-        send_telegram(msg)
+        send_signal(msg)
         state[_LAST_HB_KEY] = now.isoformat()
         log.info("💓 Heartbeat sent")
 
@@ -8517,7 +8541,7 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── v12: Cek outcome sinyal sebelumnya sebelum scan ──
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_telegram)
+            resolved = on_scan_start(send_trade_report)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -8526,7 +8550,7 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── Manual Trade Manager: monitor posisi aktif ────
     if TRADE_MANAGER_MODULE:
         try:
-            alerts = check_active_trades(send_telegram)
+            alerts = check_active_trades(send_trade_report)
             if alerts:
                 log.info(f"📈 Trade manager: {len(alerts)} posisi memicu alert (notify-only)")
         except Exception as e:
@@ -8660,7 +8684,7 @@ def run_prepump_auto():
             log.info("Pre-pump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_prepump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal prepump ke signal tracker ──
         if TRACKER_MODULE:
@@ -8722,7 +8746,7 @@ def run_predump_auto():
             log.info("Pre-dump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_predump_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal predump ke signal tracker ──
         if TRACKER_MODULE:
@@ -8779,7 +8803,7 @@ def run_scalp_auto():
 
     if hot:
         msg = build_scalp_message(hot)
-        send_telegram(msg)
+        send_signal(msg)
 
         # Track sinyal scalp ke signal tracker
         if TRACKER_MODULE:
@@ -8904,7 +8928,7 @@ if __name__ == "__main__":
     # Whale Tracker (opsional)
     try:
         import whale_tracker
-        whale_tracker.init(telegram_fn=send_telegram)
+        whale_tracker.init(telegram_fn=send_market_update)
         log.info("🐳 Whale Tracker: LargeTradeMonitor + WalletMonitor RUNNING")
     except ImportError:
         log.warning("⚠️ whale_tracker.py tidak ditemukan — whale tracking disabled")
@@ -8935,21 +8959,21 @@ if __name__ == "__main__":
     # Daily learning: analyze signal outcomes dan call DeepSeek for recommendations (jam 23:00 UTC)
     if LEARNING_MODULE:
         scheduler.add_job(
-            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_telegram),
+            lambda: analyze_signal_outcomes_daily(send_telegram_fn=send_trade_report),
             "cron", hour=23, minute=0, id="daily_learning"
         )
 
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
-    # Kirim Telegram alert otomatis kalau ada high-urgency event
+    # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
         scheduler.add_job(
-            lambda: run_news_fetch(send_telegram_fn=send_telegram),
+            lambda: run_news_fetch(send_telegram_fn=send_market_update),
             "interval", minutes=60, id="news_agent_hourly",
             jitter=120,   # ± 2 menit random offset agar tidak collision
         )
         # Jalankan sekali saat startup (background agar tidak delay bot)
         threading.Thread(
-            target=lambda: run_news_fetch(send_telegram_fn=send_telegram),
+            target=lambda: run_news_fetch(send_telegram_fn=send_market_update),
             daemon=True, name="news_agent_startup",
         ).start()
         log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
