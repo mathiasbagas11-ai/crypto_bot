@@ -7686,8 +7686,37 @@ def _save_gate_state(state: dict):
         log.warning("gate_state save error")
 
 
+def _load_active_setups() -> dict:
+    """
+    Baca pending_signals.json → return {symbol: direction} untuk sinyal yang masih PENDING.
+    Dipakai untuk cek apakah setup coin sudah aktif sebelum kirim sinyal baru.
+    """
+    import os as _os
+    try:
+        if not _os.path.exists("pending_signals.json"):
+            return {}
+        with open("pending_signals.json") as _f:
+            _pending = _json.load(_f)
+        return {
+            s["symbol"]: s["direction"]
+            for s in _pending
+            if isinstance(s, dict) and s.get("status") == "PENDING"
+        }
+    except Exception:
+        return {}
+
+
 def _gate_cooldown_ok(symbol: str, state: dict) -> bool:
-    """Cek apakah symbol masih dalam cooldown setelah signal dikirim."""
+    """
+    Phase 1 cooldown check — sebelum fetch data.
+    - Kalau symbol punya PENDING signal → izinkan pass (Phase 2 yg putuskan berdasar direction)
+    - Kalau tidak ada pending → pakai time-based cooldown seperti biasa
+    """
+    # Kalau ada active pending setup, bypass cooldown — Phase 2 akan cek direction
+    active = _load_active_setups()
+    if symbol in active:
+        return True
+
     sent = state.get(_SENT_SIGNALS_KEY, {})
     entry = sent.get(symbol)
     if not entry:
@@ -8115,6 +8144,10 @@ def run_gated_scan():
     if _gate_min != GATE_MASTER_SCORE_MIN:
         log.info(f"🧬 Dynamic threshold aktif: GATE_MASTER_SCORE_MIN → {_gate_min}")
 
+    # Load active setups SEKALI per scan (efisien, tidak baca file tiap coin)
+    _active_setups = _load_active_setups()
+    log.info(f"📋 Active pending setups: {len(_active_setups)} coin(s): {list(_active_setups.keys())}")
+
     # ── 2. Evaluate each coin through all gates ───
     for coin in coins:
         sym         = coin["symbol"]
@@ -8198,6 +8231,36 @@ def run_gated_scan():
 
         if direction == "NEUTRAL":
             continue
+
+        # ── Phase 2: Active setup check ───────────────
+        # Cegah sinyal duplikat selama setup coin masih PENDING.
+        # Izinkan kalau arah berubah (bias baru = setup baru yang valid).
+        _signal_dir_now = "LONG" if direction == "PUMP" else "SHORT"
+        if analysis_sym in _active_setups:
+            _active_dir = _active_setups[analysis_sym]
+            if _active_dir == _signal_dir_now:
+                log.info(f"⏭️ {analysis_sym}: setup {_signal_dir_now} masih PENDING — skip duplicate")
+                continue
+            # Arah berubah → kirim peringatan ke Market Update lalu izinkan setup baru
+            _cur_price = tf_1h.get("price", 0)
+            _flip_emoji_old = "🟢" if _active_dir == "LONG" else "🔴"
+            _flip_emoji_new = "🔴" if _active_dir == "LONG" else "🟢"
+            _close_action  = "CLOSE LONG / SHORT" if _active_dir == "LONG" else "CLOSE SHORT / BUY BACK"
+            _bias_flip_msg = (
+                f"🔄 <b>BIAS BERUBAH — {analysis_sym.replace('USDT','')}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{_flip_emoji_old} {_active_dir}  →  {_flip_emoji_new} {_signal_dir_now}\n"
+                f"💰 Harga sekarang: <code>${_cur_price:.4f}</code>\n\n"
+                f"⚠️ Setup <b>{_active_dir}</b> sebelumnya kemungkinan sudah tidak valid.\n"
+                f"💡 Pertimbangkan <b>{_close_action}</b> jika posisi masih terbuka.\n\n"
+                f"🔍 Setup baru <b>{_signal_dir_now}</b> sedang dievaluasi..."
+            )
+            try:
+                send_market_update(_bias_flip_msg)
+                log.info(f"📢 Bias flip alert sent: {analysis_sym} {_active_dir}→{_signal_dir_now}")
+            except Exception as _e:
+                log.warning(f"Bias flip alert error: {_e}")
+            log.info(f"🔄 {analysis_sym}: bias berubah {_active_dir}→{_signal_dir_now} — izinkan setup baru")
 
         # Detectors
         prepump = detect_prepump(analysis_sym, tf_1h, tf_4h, oi, tf_15m)
