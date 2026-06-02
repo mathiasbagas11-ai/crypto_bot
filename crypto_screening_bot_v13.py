@@ -1809,12 +1809,6 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif cvd_pct < -1:
         score_pts -= 1
         reasons.append(f"🟡 CVD: slight outflow {cvd_pct:+.1f}%")
-    # CVD dead-zone: nilai antara -1% s/d 0% bukan benar-benar netral —
-    # ada net sell kecil yang bisa dioverride VWAP. Kasih drag -1 supaya
-    # VWAP saja tidak cukup untuk flip bias ke INFLOW.
-    elif -1.0 < cvd_pct < 0:
-        score_pts -= 1
-        reasons.append(f"⚠️ CVD dead-zone: {cvd_pct:+.1f}% (net sell tipis, drag applied)")
 
     # CVD slope (recent momentum)
     if cvd_slope > 0 and last5_buy / max(last5_sell, 0.001) > 1.3:
@@ -8072,7 +8066,7 @@ def run_gated_scan():
     # ── 0. Signal tracker resolve ──────────────────
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_trade_report)
+            resolved = on_scan_start(send_market_update)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -8539,6 +8533,23 @@ def run_gated_scan():
                         alert_type   = "ENTRY_NOW",
                     )
                     send_signal(msg2)
+
+                    # Kirim notif ringkas ke topic Market Update
+                    _dir_emoji = "🟢" if entry["direction"] == "LONG" else "🔴"
+                    _mu_msg = (
+                        f"🎯 <b>MASUK AREA ENTRY — {entry['symbol'].replace('USDT','')}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{_dir_emoji} {entry['direction']} | Score: {entry['score']}\n"
+                        f"💰 Harga   : <b>${cur_price:.4f}</b>\n"
+                        f"🎯 Entry   : ${entry['entry']:.4f}\n"
+                        f"🟡 TP1     : ${entry['tp1']:.4f}\n"
+                        f"🔴 SL      : ${entry['sl']:.4f}\n"
+                    )
+                    if rejection_note:
+                        _mu_msg += f"{rejection_note}\n"
+                    _mu_msg += "\n⚠️ <i>Not financial advice. DYOR.</i>"
+                    send_market_update(_mu_msg)
+
                     entry["notified"] = True
                     signals_sent += 1
                     log.info(f"🎯 RETEST ENTRY NOTIF: {entry['symbol']} price={cur_price}")
@@ -8590,7 +8601,7 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── v12: Cek outcome sinyal sebelumnya sebelum scan ──
     if TRACKER_MODULE:
         try:
-            resolved = on_scan_start(send_trade_report)
+            resolved = on_scan_start(send_market_update)
             if resolved:
                 log.info(f"📊 Signal tracker: {len(resolved)} signals resolved")
         except Exception as e:
@@ -8599,7 +8610,7 @@ def run_scan(manual: bool = False, chat_id: str = None):
     # ── Manual Trade Manager: monitor posisi aktif ────
     if TRADE_MANAGER_MODULE:
         try:
-            alerts = check_active_trades(send_trade_report)
+            alerts = check_active_trades(send_market_update)
             if alerts:
                 log.info(f"📈 Trade manager: {len(alerts)} posisi memicu alert (notify-only)")
         except Exception as e:
