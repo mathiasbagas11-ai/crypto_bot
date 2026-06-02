@@ -4509,14 +4509,79 @@ def screen_coins(manual: bool = False) -> list:
 # TRADE PLAN
 # ─────────────────────────────────────────────
 
+def _compute_tp_profile(tf_4h: dict, tf_1h: dict, direction: str) -> dict:
+    """Skema TP/SL adaptif ke kondisi market.
+
+    Default condong KONSERVATIF; target jauh (AGGRESSIVE) hanya saat trend
+    searah & kuat (ADX tinggi). Tujuannya mengurangi over-optimisme TP di market
+    ranging/choppy/volatile yang bikin TP2 jarang kena dan trade malah balik arah.
+
+    Returns: {label, tp1_mult, tp2_mult, sl_atr}
+      - tp1_mult/tp2_mult: kelipatan R untuk TP1/TP2
+      - sl_atr: kelipatan ATR untuk SL fallback (MARKET entry)
+    """
+    r4 = (tf_4h or {}).get("market_regime", {}) or {}
+    r1 = (tf_1h or {}).get("market_regime", {}) or {}
+    reg4 = r4.get("regime", "UNKNOWN")
+    reg1 = r1.get("regime", "UNKNOWN")
+    adx4 = r4.get("adx", 0) or 0
+    is_long = direction in ("LONG", "PUMP")
+
+    trend_aligned = (
+        (is_long     and reg4 in ("BULLISH_TREND", "BREAKOUT_UP")) or
+        (not is_long and reg4 in ("BEARISH_TREND", "BREAKOUT_DOWN"))
+    )
+    choppy = (reg4 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or
+              reg1 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or adx4 < 18)
+
+    if trend_aligned and adx4 >= 28:
+        return {"label": "AGGRESSIVE",   "tp1_mult": 2.0, "tp2_mult": 3.5, "sl_atr": 2.0}
+    if choppy:
+        return {"label": "CONSERVATIVE", "tp1_mult": 1.2, "tp2_mult": 2.0, "sl_atr": 1.5}
+    return {"label": "BALANCED",         "tp1_mult": 1.5, "tp2_mult": 2.5, "sl_atr": 1.8}
+
+
+def _entry_action_reco(direction: str, confluence: dict = None,
+                       realtime: dict = None, entry_mode: str = None) -> str:
+    """Rekomendasi aksi singkat: '{DIR} NOW' vs 'WAIT'.
+
+    Kalau entry_mode sudah diketahui (trade plan final) → pakai itu (definitif).
+    Kalau belum (mis. saat alert bias flip) → heuristik dari momentum + confluence.
+    """
+    dir_word = "LONG" if direction in ("LONG", "PUMP") else "SHORT"
+    is_long  = dir_word == "LONG"
+
+    if entry_mode == "MOMENTUM_NOW":
+        return f"🚀 {dir_word} NOW — entry market, momentum aktif"
+    if entry_mode == "RETEST_WAIT":
+        return f"⏳ WAIT — tunggu harga retest ke zona entry"
+
+    conf  = confluence or {}
+    rt    = realtime or {}
+    level = conf.get("level", "POOR")
+    if conf.get("entry_extended"):
+        return "⏳ WAIT — harga sudah extended, tunggu pullback/retest"
+    mlabel = rt.get("momentum_label", "CONSOLIDATING")
+    mom_aligned = (
+        (is_long     and mlabel in ("STRONG_BULL_MOMENTUM", "BULL_MOMENTUM", "BREAKOUT_UP")) or
+        (not is_long and mlabel in ("STRONG_BEAR_MOMENTUM", "BEAR_MOMENTUM", "BREAKOUT_DOWN"))
+    )
+    if mom_aligned and level in ("EXCELLENT", "GOOD"):
+        return f"🚀 {dir_word} NOW — momentum & confluence mendukung entry sekarang"
+    return f"⏳ WAIT — tunggu konfirmasi/retest ke zona entry"
+
+
 def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                       tf_4h: dict = None, tf_1h: dict = None,
-                      liq_1h: dict = None) -> dict:
+                      liq_1h: dict = None,
+                      tp1_mult: float = 2.0, tp2_mult: float = 3.5) -> dict:
     """
     Hitung TP1 dan TP2 berbasis struktur.
     - Risk (R) = abs(entry - sl)
-    - TP1: minimal 2R, diprioritaskan ke level struktural terdekat yang >= 2R
-    - TP2: minimal 3.5R, ke target struktural selanjutnya atau EQH/EQL
+    - TP1: minimal tp1_mult×R, diprioritaskan ke level struktural terdekat
+    - TP2: minimal tp2_mult×R, ke target struktural selanjutnya atau EQH/EQL
+    - tp1_mult/tp2_mult diset adaptif ke kondisi market oleh caller (lihat
+      _compute_tp_profile) supaya target tidak terlalu optimis di market choppy.
     - Strategy: partial close 50% di TP1, sisanya jalan ke TP2
     """
     tf_4h  = tf_4h  or {}
@@ -4534,8 +4599,8 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
     }
 
     if direction in ("LONG", "PUMP"):
-        min_tp1 = round(entry + risk * 2.0, 8)
-        min_tp2 = round(entry + risk * 3.5, 8)
+        min_tp1 = round(entry + risk * tp1_mult, 8)
+        min_tp2 = round(entry + risk * tp2_mult, 8)
 
         levels = []
         for _, lvl in struct1.get("swing_highs", []):
@@ -4555,13 +4620,13 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                 result["tp2"], result["tp2_basis"] = lvl, basis
 
         if result["tp1"] is None:
-            result["tp1"], result["tp1_basis"] = min_tp1, "2R floor"
+            result["tp1"], result["tp1_basis"] = min_tp1, f"{tp1_mult:g}R floor"
         if result["tp2"] is None:
-            result["tp2"], result["tp2_basis"] = min_tp2, "3.5R floor"
+            result["tp2"], result["tp2_basis"] = min_tp2, f"{tp2_mult:g}R floor"
 
     elif direction in ("SHORT", "DUMP"):
-        min_tp1 = round(entry - risk * 2.0, 8)
-        min_tp2 = round(entry - risk * 3.5, 8)
+        min_tp1 = round(entry - risk * tp1_mult, 8)
+        min_tp2 = round(entry - risk * tp2_mult, 8)
 
         levels = []
         for _, lvl in struct1.get("swing_lows", []):
@@ -4586,10 +4651,10 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                     break
 
         if result["tp1"] is None:
-            result["tp1"], result["tp1_basis"] = min_tp1, "2R floor"
+            result["tp1"], result["tp1_basis"] = min_tp1, f"{tp1_mult:g}R floor"
         # TP2 HARUS selalu lebih rendah dari TP1 — guard wajib
         if result["tp2"] is None or result["tp2"] >= result["tp1"]:
-            result["tp2"], result["tp2_basis"] = min_tp2, "3.5R floor"
+            result["tp2"], result["tp2_basis"] = min_tp2, f"{tp2_mult:g}R floor"
 
     if risk > 0:
         if result["tp1"]: result["tp1_r"] = round(abs(result["tp1"] - entry) / risk, 2)
@@ -4863,6 +4928,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "PUMP", entry_candidates, tf_1h, tf_15m, oi_data)
+        _tp_prof  = _compute_tp_profile(tf_4h, tf_1h, "LONG")
 
         if entry_candidates:
             entry_candidates.sort(key=lambda x: (-x[3], abs(x[1] - price)))
@@ -4878,10 +4944,11 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             entry_type  = "MARKET"
             zone_bottom = round(price * 0.99, 8)
             zone_top    = price
-            sl = round(price - atr * 2.0, 8) if atr > 0 else round(price * 0.96, 8)
+            sl = round(price - atr * _tp_prof["sl_atr"], 8) if atr > 0 else round(price * 0.96, 8)
             sl = max(sl, round(price * 0.94, 8))
 
-        tps = calculate_tp1_tp2(entry, sl, "LONG", tf_4h, tf_1h, liq_1h)
+        tps = calculate_tp1_tp2(entry, sl, "LONG", tf_4h, tf_1h, liq_1h,
+                                tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -4903,6 +4970,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "is_limit": entry_type != "MARKET", "atr_based": atr > 0,
             "tp": tps["tp1"], "sl_basis": f"below {entry_type} -ATR buf",
             "entry_mode": entry_mode,
+            "tp_profile": _tp_prof["label"],
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -4952,6 +5020,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "DUMP", entry_candidates, tf_1h, tf_15m, oi_data)
+        _tp_prof  = _compute_tp_profile(tf_4h, tf_1h, "SHORT")
 
         if entry_candidates:
             entry_candidates.sort(key=lambda x: (-x[3], abs(x[1] - price)))
@@ -4967,10 +5036,11 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             entry_type  = "MARKET"
             zone_bottom = price
             zone_top    = round(price * 1.01, 8)
-            sl = round(price + atr * 2.0, 8) if atr > 0 else round(price * 1.04, 8)
+            sl = round(price + atr * _tp_prof["sl_atr"], 8) if atr > 0 else round(price * 1.04, 8)
             sl = min(sl, round(price * 1.06, 8))
 
-        tps = calculate_tp1_tp2(entry, sl, "SHORT", tf_4h, tf_1h, liq_1h)
+        tps = calculate_tp1_tp2(entry, sl, "SHORT", tf_4h, tf_1h, liq_1h,
+                                tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -4992,6 +5062,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "is_limit": entry_type != "MARKET", "atr_based": atr > 0,
             "tp": tps["tp1"], "sl_basis": f"above {entry_type} +ATR buf",
             "entry_mode": entry_mode,
+            "tp_profile": _tp_prof["label"],
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -5019,6 +5090,15 @@ def fmt_num(n: float) -> str:
 
 # alias untuk backward compat dengan main.py patches
 format_number = fmt_num
+
+
+def _fmt_price(v) -> str:
+    """Format harga presisi penuh (bukan singkatan K/M) untuk entry/TP/SL."""
+    try:
+        v = float(v or 0)
+    except (TypeError, ValueError):
+        return "$0"
+    return f"${v:,.4f}" if v >= 1 else f"${v:.8f}"
 
 # ─────────────────────────────────────────────
 # TELEGRAM UTILS
@@ -8383,6 +8463,9 @@ def run_gated_scan():
             _flip_emoji_old = "🟢" if _active_dir == "LONG" else "🔴"
             _flip_emoji_new = "🔴" if _active_dir == "LONG" else "🟢"
             _close_action  = "CLOSE LONG / SHORT" if _active_dir == "LONG" else "CLOSE SHORT / BUY BACK"
+            # Rekomendasi aksi untuk arah baru (NOW vs WAIT) — heuristik momentum
+            # + confluence karena trade plan baru belum dibangun di titik ini.
+            _flip_action = _entry_action_reco(_signal_dir_now, confluence, realtime_momentum)
             _bias_flip_msg = (
                 f"🔄 <b>BIAS BERUBAH — {analysis_sym.replace('USDT','')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -8390,7 +8473,7 @@ def run_gated_scan():
                 f"💰 Harga sekarang: <code>${_cur_price:.4f}</code>\n\n"
                 f"⚠️ Setup <b>{_active_dir}</b> sebelumnya kemungkinan sudah tidak valid.\n"
                 f"💡 Pertimbangkan <b>{_close_action}</b> jika posisi masih terbuka.\n\n"
-                f"🔍 Setup baru <b>{_signal_dir_now}</b> sedang dievaluasi..."
+                f"📌 Aksi {_signal_dir_now}: {_flip_action}"
             )
             try:
                 send_market_update(_bias_flip_msg)
@@ -8606,6 +8689,31 @@ def run_gated_scan():
             _gate_mark_sent(analysis_sym, state, direction=_signal_direction)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
+
+            # Notif ringkas entry/TP/SL ke topic Market Update (#1)
+            try:
+                _mu_emoji  = "🟢" if _signal_direction == "LONG" else "🔴"
+                _mu_action = _entry_action_reco(_signal_direction, confluence,
+                                                realtime_momentum,
+                                                entry_mode=trade.get("entry_mode"))
+                _mu_prof   = trade.get("tp_profile", "")
+                _mu_entry  = trade.get("entry") or price
+                _mu_msg = (
+                    f"📡 <b>SINYAL BARU — {analysis_sym.replace('USDT','')}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{_mu_emoji} {_signal_direction} | Score {raw_master}/100"
+                    + (f" | TP plan: {_mu_prof}\n" if _mu_prof else "\n")
+                    + f"💰 Harga : <b>{_fmt_price(price)}</b>\n"
+                    f"🎯 Entry : {_fmt_price(_mu_entry)}\n"
+                    f"🟡 TP1   : {_fmt_price(trade.get('tp1'))}\n"
+                    f"🟢 TP2   : {_fmt_price(trade.get('tp2'))}\n"
+                    f"🔴 SL    : {_fmt_price(trade.get('sl'))}\n\n"
+                    f"📌 {_mu_action}\n"
+                    f"⚠️ <i>Not financial advice. DYOR.</i>"
+                )
+                send_market_update(_mu_msg)
+            except Exception as _mu_e:
+                log.debug(f"Market update notif error {analysis_sym}: {_mu_e}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
