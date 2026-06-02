@@ -349,7 +349,7 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
 
 
 def _send_outcome_notification(sig: dict, send_telegram_fn):
-    """Kirim notif ke Telegram saat signal resolve."""
+    """Kirim notif ke topic Market Update saat signal resolve (TP/SL/Expired)."""
     outcome   = sig["status"]
     symbol    = sig["symbol"].replace("USDT", "")
     direction = sig["direction"]
@@ -359,37 +359,32 @@ def _send_outcome_notification(sig: dict, send_telegram_fn):
     score     = sig.get("score", 0)
 
     if outcome == "TP_HIT":
-        emoji = "✅"
-        verdict = "TP HIT"
-        pnl_str = f"🟢 +{pnl:.2f}%"
+        header  = f"✅ <b>TP HIT — {symbol}</b>"
+        pnl_str = f"🟢 <b>+{pnl:.2f}%</b>"
     elif outcome == "SL_HIT":
-        emoji = "❌"
-        verdict = "SL HIT"
-        pnl_str = f"🔴 {pnl:.2f}%"
+        header  = f"❌ <b>SL HIT — {symbol}</b>"
+        pnl_str = f"🔴 <b>{pnl:.2f}%</b>"
     elif outcome == "EXPIRED_WIN":
-        emoji = "⏱️"
-        verdict = "EXPIRED (profit)"
-        pnl_str = f"🟡 +{pnl:.2f}%"
+        header  = f"⏱️ <b>EXPIRED (profit) — {symbol}</b>"
+        pnl_str = f"🟡 <b>+{pnl:.2f}%</b>"
     elif outcome == "EXPIRED_LOSS":
-        emoji = "⏱️"
-        verdict = "EXPIRED (loss)"
-        pnl_str = f"🟠 {pnl:.2f}%"
+        header  = f"⏱️ <b>EXPIRED (loss) — {symbol}</b>"
+        pnl_str = f"🟠 <b>{pnl:.2f}%</b>"
     else:
         return  # EXPIRED neutral → tidak notif
 
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
     msg = (
-        f"{emoji} *SIGNAL OUTCOME — {symbol}*\n"
+        f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{dir_emoji} {direction} | {sig_type} | Score: {score}\n"
-        f"Entry  : ${sig['entry_price']:.4f}\n"
-        f"Exit   : ${sig.get('exit_price', 0):.4f}\n"
-        f"Result : *{verdict}*\n"
-        f"PnL    : *{pnl_str}*\n"
+        f"Entry  : <code>${sig['entry_price']:.4f}</code>\n"
+        f"Exit   : <code>${sig.get('exit_price', 0):.4f}</code>\n"
+        f"PnL    : {pnl_str}\n"
         f"Hold   : {hold_h:.1f}h\n"
     )
     if outcome == "SL_HIT":
-        msg += "\n_🔄 Mengevaluasi strategi... mini-backtest akan berjalan jika diperlukan._"
+        msg += "\n<i>🔄 Mini-backtest akan berjalan jika diperlukan.</i>"
 
     try:
         send_telegram_fn(msg)
