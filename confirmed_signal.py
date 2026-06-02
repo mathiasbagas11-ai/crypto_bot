@@ -938,8 +938,10 @@ def save_signal_bt_cache(symbol: str, stats: dict):
             "avg_score":    stats.get("avg_score", 0),
             "cached_at":    datetime.now(timezone.utc).isoformat(),
         }
-        with open(SIGNAL_BT_CACHE_FILE, "w") as f:
+        tmp = SIGNAL_BT_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(cache, f, indent=2)
+        os.replace(tmp, SIGNAL_BT_CACHE_FILE)   # atomic
     except Exception as e:
         log.debug(f"Signal BT cache save error: {e}")
 
@@ -955,8 +957,10 @@ def _save_confirmed_signal(signal: dict):
         history.append(to_save)
         if len(history) > 200:
             history = history[-200:]
-        with open(CONFIRMED_SIGNAL_FILE, "w") as f:
+        tmp = CONFIRMED_SIGNAL_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(history, f, indent=2)
+        os.replace(tmp, CONFIRMED_SIGNAL_FILE)   # atomic
     except Exception as e:
         log.warning(f"Save confirmed signal error: {e}")
 

@@ -1632,17 +1632,26 @@ def detect_volume_anomaly(candles: list) -> dict:
 
 
 def calculate_rsi(candles: list, period: int = 14) -> float:
-    """Hitung RSI dari candles."""
+    """Hitung RSI dengan Wilder smoothing.
+
+    Konsisten dengan detect_rsi_divergence() dan platform charting
+    (TradingView/Binance). Sebelumnya pakai SMA atas `period` delta terakhir
+    sehingga nilainya berbeda dari versi Wilder di file yang sama.
+    """
     if len(candles) < period + 1:
         return 50.0
 
     closes = [c["close"] for c in candles]
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains  = [max(d, 0) for d in deltas[-period:]]
-    losses = [abs(min(d, 0)) for d in deltas[-period:]]
+    gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+    if len(gains) < period:
+        return 50.0
 
-    avg_gain = np.mean(gains) if gains else 0
-    avg_loss = np.mean(losses) if losses else 0
+    avg_gain = float(np.mean(gains[:period]))    # seed = SMA pertama
+    avg_loss = float(np.mean(losses[:period]))
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
         return 100.0
@@ -1652,7 +1661,10 @@ def calculate_rsi(candles: list, period: int = 14) -> float:
 
 
 def calculate_atr(candles: list, period: int = 14) -> float:
-    """Hitung ATR (Average True Range)."""
+    """Hitung ATR dengan Wilder smoothing (RMA) — konsisten dengan charting.
+
+    Sebelumnya pakai SMA atas `period` TR terakhir.
+    """
     if len(candles) < period + 1:
         return 0.0
 
@@ -1663,7 +1675,13 @@ def calculate_atr(candles: list, period: int = 14) -> float:
         pc = candles[i-1]["close"]
         trs.append(max(h-l, abs(h-pc), abs(l-pc)))
 
-    return np.mean(trs[-period:]) if trs else 0.0
+    if len(trs) < period:
+        return float(np.mean(trs)) if trs else 0.0
+
+    atr = float(np.mean(trs[:period]))           # seed = SMA pertama
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
 
 
 def calculate_ema(candles: list, period: int) -> float:

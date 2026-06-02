@@ -45,8 +45,10 @@ def _load() -> dict:
 
 def _save(data: dict):
     try:
-        with open(SYMBOL_MEMORY_FILE, "w") as f:
+        tmp = SYMBOL_MEMORY_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, SYMBOL_MEMORY_FILE)   # atomic
     except Exception as e:
         log.warning(f"symbol_memory save error: {e}")
 

@@ -68,8 +68,10 @@ def _load_lessons() -> dict:
 
 
 def _save_lessons(data: dict):
-    with open(LESSONS_FILE, "w") as f:
+    tmp = LESSONS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, LESSONS_FILE)   # atomic
 
 
 def _load_decision_log() -> list:
@@ -83,8 +85,10 @@ def _load_decision_log() -> list:
 
 
 def _save_decision_log(entries: list):
-    with open(DECISION_LOG_FILE, "w") as f:
+    tmp = DECISION_LOG_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(entries, f, indent=2)
+    os.replace(tmp, DECISION_LOG_FILE)   # atomic
 
 
 # ─────────────────────────────────────────────

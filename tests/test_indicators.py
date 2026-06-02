@@ -47,6 +47,27 @@ def test_rsi_all_losses_is_0():
     assert av._rsi(closes(range(20, 4, -1)), period=14) == 0.0
 
 
+def _wilder_rsi(vals, period=14):
+    """Referensi Wilder RSI untuk verifikasi (bukan SMA)."""
+    gains  = [max(vals[i] - vals[i-1], 0) for i in range(1, len(vals))]
+    losses = [max(vals[i-1] - vals[i], 0) for i in range(1, len(vals))]
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+    if al == 0:
+        return 100.0
+    return round(100 - 100 / (1 + ag / al), 2)
+
+
+def test_rsi_uses_wilder_smoothing_not_sma():
+    # Sequence non-monoton & lebih panjang dari period: Wilder ≠ SMA-of-last-N.
+    seq = [10, 11, 10.5, 12, 11.5, 13, 12, 14, 13.5, 15, 14, 16, 15.5, 17,
+           16, 18, 17.5, 16, 19, 18, 20, 19.5, 21, 20, 22]
+    assert av._rsi(closes(seq), period=14) == _wilder_rsi(seq, 14)
+
+
 # ── _trend_from_candles ──────────────────────────────────────────
 
 def test_trend_unknown_when_short():

@@ -690,8 +690,10 @@ def _set_cooldown(strategy: str):
             with open(COOLDOWN_FILE) as f:
                 data = json.load(f)
         data[strategy] = datetime.now(timezone.utc).isoformat()
-        with open(COOLDOWN_FILE, "w") as f:
+        tmp = COOLDOWN_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f)
+        os.replace(tmp, COOLDOWN_FILE)   # atomic
     except Exception as e:
         log.warning(f"Cooldown set error: {e}")
 
