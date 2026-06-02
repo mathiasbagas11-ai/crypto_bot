@@ -356,6 +356,42 @@ def get_symbol_context(symbol: str) -> dict:
     return data.get(sym_key, {})
 
 
+def get_symbol_memory(symbol: str) -> dict:
+    """Ringkasan memori per-symbol untuk inject ke prompt AI (DeepSeek).
+
+    Mengembalikan shape yang dipakai deepseek_analyze_coin:
+      {win_rate, total_trades, best_signal_type, lessons: [str], ...}
+    Kosong {} kalau belum ada histori.
+    """
+    ctx = get_symbol_context(symbol)
+    if not ctx or not ctx.get("trades"):
+        return {}
+
+    stats   = ctx.get("stats", {})
+    by_type = stats.get("by_type", {})
+
+    # Signal type dengan win-rate terbaik (minimal 2 trade)
+    best, best_wr = "?", -1.0
+    for st, d in by_type.items():
+        if d.get("total", 0) >= 2:
+            wr = d["wins"] / d["total"] * 100
+            if wr > best_wr:
+                best_wr, best = wr, st
+
+    lessons_txt = [l.get("text", "") for l in ctx.get("lessons", [])
+                   if l.get("confidence") in ("HIGH", "MEDIUM")][:4]
+
+    return {
+        "win_rate":         stats.get("win_rate_pct", 0),
+        "total_trades":     stats.get("total_trades", 0),
+        "best_signal_type": best,
+        "sl_rate":          stats.get("sl_rate_pct", 0),
+        "avg_pnl":          stats.get("avg_pnl_pct", 0),
+        "lessons":          lessons_txt,
+        "blacklisted":      ctx.get("blacklisted", False),
+    }
+
+
 def build_symbol_context_block(symbol: str) -> str:
     """
     Format context block untuk inject ke Gemini prompt.

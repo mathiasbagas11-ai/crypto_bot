@@ -95,3 +95,30 @@ def test_short_take_profit(patched):
     resolved = st.check_pending_signals()
     assert resolved[0]["status"] == "TP_HIT"
     assert resolved[0]["pnl_pct"] == 10.0  # (100-90)/100*100
+
+
+# ── resolution feeds the learning loop ───────────────────────────
+
+def test_resolution_feeds_symbol_memory_and_learning(monkeypatch):
+    # Regression: dulu signal_tracker hanya feed learning_engine; symbol_memory
+    # write path tidak pernah dipanggil (dead). Sekarang keduanya harus terisi.
+    import symbol_memory
+    import learning_engine
+    sm_calls, le_calls = [], []
+    monkeypatch.setattr(symbol_memory, "record_symbol_outcome",
+                        lambda **kw: sm_calls.append(kw))
+    monkeypatch.setattr(learning_engine, "record_signal_outcome",
+                        lambda **kw: le_calls.append(kw))
+    monkeypatch.setattr(st, "_check_autobacktest_trigger", lambda *a, **k: None)
+
+    resolved = [{
+        "status": "TP_HIT", "symbol": "BTCUSDT", "signal_type": "SCALP",
+        "direction": "LONG", "entry_price": 100.0, "exit_price": 110.0,
+        "score": 70, "confluence_level": "GOOD", "pnl_pct": 10.0, "hold_hours": 2.0,
+    }]
+    st._process_resolved_signals(resolved, send_telegram_fn=None)
+
+    assert len(sm_calls) == 1 and sm_calls[0]["symbol"] == "BTCUSDT"
+    assert sm_calls[0]["outcome"] == "TP_HIT"
+    assert sm_calls[0]["hold_minutes"] == 120
+    assert len(le_calls) == 1 and le_calls[0]["symbol"] == "BTCUSDT"

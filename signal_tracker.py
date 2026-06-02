@@ -315,6 +315,12 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
     except ImportError:
         LEARNING_AVAILABLE = False
 
+    try:
+        from symbol_memory import record_symbol_outcome
+        SYMBOL_MEMORY_AVAILABLE = True
+    except ImportError:
+        SYMBOL_MEMORY_AVAILABLE = False
+
     for sig in resolved:
         outcome    = sig["status"]
         symbol     = sig["symbol"]
@@ -355,6 +361,27 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
                 log.info(f"📚 Learning engine updated: {symbol} {le_outcome}")
             except Exception as e:
                 log.warning(f"Learning engine update error: {e}")
+
+        # 1b. Inject ke symbol memory (per-coin win/loss + auto-blacklist).
+        # outcome di-pass apa adanya: _compute_stats mendeteksi TP/SL via
+        # substring + pnl_pct, jadi "TP_HIT"/"SL_HIT"/"EXPIRED_*" valid.
+        if SYMBOL_MEMORY_AVAILABLE:
+            try:
+                record_symbol_outcome(
+                    symbol           = symbol,
+                    signal_type      = sig_type,
+                    direction        = direction,
+                    outcome          = outcome,
+                    pnl_pct          = pnl,
+                    score            = score,
+                    hold_minutes     = int(hold_h * 60),
+                    entry_mode       = sig.get("entry_mode", ""),
+                    confluence_level = conf_level,
+                    notes            = "Auto-tracked by signal_tracker",
+                )
+                log.info(f"📊 Symbol memory updated: {symbol} {outcome}")
+            except Exception as e:
+                log.warning(f"Symbol memory update error: {e}")
 
         # 2. Kirim notif ke Telegram
         if send_telegram_fn:

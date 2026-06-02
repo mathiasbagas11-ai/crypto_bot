@@ -363,6 +363,28 @@ SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 55      # minimal score buat scalp signal
 SCALP_ALERT_THRESHOLD   = 62      # score >= 62 → auto alert
 
+
+# ── EFFECTIVE THRESHOLDS (overlay dynamic_thresholds.json dari learning engine) ──
+# evolve_thresholds() menulis override ke dynamic_thresholds.json; helper ini
+# memakai nilai itu kalau ada, kalau tidak fallback ke konstanta di atas.
+def _eff_scalp_min_score() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("SCALP_MIN_SCORE", SCALP_MIN_SCORE))
+    except Exception:
+        return SCALP_MIN_SCORE
+
+def _eff_predump_threshold() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("PREDUMP_ALERT_THRESHOLD", PREDUMP_ALERT_THRESHOLD))
+    except Exception:
+        return PREDUMP_ALERT_THRESHOLD
+
+def _eff_prepump_threshold() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("PREPUMP_ALERT_THRESHOLD", PREPUMP_ALERT_THRESHOLD))
+    except Exception:
+        return PREPUMP_ALERT_THRESHOLD
+
 # ── SIGNAL GATE ──────────────────────────────────────────────────────────────
 GATE_MASTER_SCORE_MIN   = 65      # min score buat sinyal lolos — lebih tinggi = lebih selektif
 GATE_MONEYFLOW_TF_MIN   = 2       # minimal 2 TF harus align money flow (4H+1H atau 1H+15M)
@@ -2802,7 +2824,7 @@ def scan_scalp_candidates(symbols: list = None) -> list:
                     continue
 
             scalp = detect_scalp_setup(sym, tf_15m, tf_1h, tf_4h, oi)
-            if scalp["score"] >= SCALP_MIN_SCORE:
+            if scalp["score"] >= _eff_scalp_min_score():
                 # v13: tambah trade plan dengan entry_mode ke scalp
                 price_s = tf_15m.get("price", 0)
                 atr_1h  = tf_1h.get("atr", 0)
@@ -5436,10 +5458,17 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                 _sym_mem = get_symbol_memory(symbol)
             except Exception:
                 pass
+            _learn_ctx = None
+            if LEARNING_MODULE:
+                try:
+                    _learn_ctx = build_ai_context_block("SCREENER") or None
+                except Exception:
+                    pass
             insight = deepseek_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
                 prepump, predump, scalp, swing,
                 news_context=_news_ctx, symbol_memory=_sym_mem,
+                learning_context=_learn_ctx,
             )
             if insight:
                 ai_label = "🤖 <b>AI Insight (DeepSeek):</b>"
@@ -6029,6 +6058,14 @@ def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
     enriched = []
     _news_cache: dict = {}   # symbol → news_ctx, hindari double fetch
 
+    # Lessons global dari sinyal lalu — sama untuk semua kandidat, hitung sekali.
+    _learn_ctx = None
+    if LEARNING_MODULE:
+        try:
+            _learn_ctx = build_ai_context_block("SCREENER") or None
+        except Exception:
+            _learn_ctx = None
+
     for cand in candidates:
         sym   = cand.get("symbol", "")
         trade = cand.get("trade", {})
@@ -6059,6 +6096,7 @@ def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
                 tf_15m       = cand.get("tf_15m", {}),
                 news_context = news_ctx,
                 signal_type  = direction,
+                learning_context = _learn_ctx,
             )
 
             if review.get("ai_verdict") == "SKIP":
@@ -8836,7 +8874,8 @@ def run_prepump_auto():
     log.info("🎯 Auto pre-pump scan triggered")
     candidates = scan_prepump_candidates()
 
-    hot = [c for c in candidates if c["total_score"] >= PREPUMP_ALERT_THRESHOLD]
+    _pp_thr = _eff_prepump_threshold()
+    hot = [c for c in candidates if c["total_score"] >= _pp_thr]
 
     if hot:
         # v15: DeepSeek review sebelum kirim
@@ -8884,10 +8923,10 @@ def run_prepump_auto():
                         direction="LONG", reasons=c.get("reasons",[])[:3])
                 except Exception as e:
                     log.debug(f"prepump log_decision error: {e}")
-        log.info(f"🔥 Pre-pump HOT alert: {len(hot)} kandidat (score >= {PREPUMP_ALERT_THRESHOLD})")
+        log.info(f"🔥 Pre-pump HOT alert: {len(hot)} kandidat (score >= {_pp_thr})")
     else:
         best = candidates[0]["total_score"] if candidates else 0
-        log.info(f"Pre-pump scan: no HOT signal (best score={best}, threshold={PREPUMP_ALERT_THRESHOLD})")
+        log.info(f"Pre-pump scan: no HOT signal (best score={best}, threshold={_pp_thr})")
 
 
 def run_predump_auto():
@@ -8898,7 +8937,8 @@ def run_predump_auto():
     log.info("💀 Auto pre-dump scan triggered")
     candidates = scan_predump_candidates()
 
-    hot = [c for c in candidates if c["total_score"] >= PREDUMP_ALERT_THRESHOLD]
+    _pd_thr = _eff_predump_threshold()
+    hot = [c for c in candidates if c["total_score"] >= _pd_thr]
 
     if hot:
         # v15: DeepSeek review sebelum kirim
@@ -8946,10 +8986,10 @@ def run_predump_auto():
                         direction="SHORT", reasons=c.get("reasons",[])[:3])
                 except Exception as e:
                     log.debug(f"predump log_decision error: {e}")
-        log.info(f"🔴 Pre-dump HOT alert: {len(hot)} kandidat (score >= {PREDUMP_ALERT_THRESHOLD})")
+        log.info(f"🔴 Pre-dump HOT alert: {len(hot)} kandidat (score >= {_pd_thr})")
     else:
         best = candidates[0]["total_score"] if candidates else 0
-        log.info(f"Pre-dump scan: no HOT signal (best score={best}, threshold={PREDUMP_ALERT_THRESHOLD})")
+        log.info(f"Pre-dump scan: no HOT signal (best score={best}, threshold={_pd_thr})")
 
 
 def run_scalp_auto():

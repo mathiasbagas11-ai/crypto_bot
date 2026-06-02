@@ -598,28 +598,41 @@ def _write_dynamic_thresholds(changes: dict):
                 existing = json.load(f)
         existing.update({k: v for k, v in changes.items() if not k.startswith("_")})
         existing["_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(DYNAMIC_THRESHOLDS_FILE, "w") as f:
+        tmp = DYNAMIC_THRESHOLDS_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(existing, f, indent=2)
+        os.replace(tmp, DYNAMIC_THRESHOLDS_FILE)   # atomic
+        # Invalidate cache supaya screener langsung pakai nilai baru.
+        _dyn_cache["ts"] = 0.0
         log.info(f"🧬 dynamic_thresholds.json diupdate: {list(changes.keys())}")
     except Exception as e:
         log.warning(f"Gagal tulis dynamic_thresholds: {e}")
 
 
+_dyn_cache = {"data": None, "ts": 0.0}
+_DYN_TTL   = 30.0   # detik — file hanya berubah saat /evolve, jadi cache aman
+
+
 def get_dynamic_thresholds() -> dict:
     """
-    Baca threshold overrides dari dynamic_thresholds.json.
-    Mapping nama ke constant screener:
-      PREPUMP_ALERT_THRESHOLD → GATE_MASTER_SCORE_MIN (global floor)
-      SCALP_MIN_SCORE         → SCALP_MIN_SCORE_OVERRIDE
-    Returns empty dict jika file tidak ada atau error.
+    Baca threshold overrides dari dynamic_thresholds.json (cached, TTL 30s).
+    Keys yang dipakai screener: PREPUMP_ALERT_THRESHOLD, PREDUMP_ALERT_THRESHOLD,
+    SCALP_MIN_SCORE. Returns empty dict jika file tidak ada atau error.
     """
+    import time as _t
+    now = _t.time()
+    if _dyn_cache["data"] is not None and (now - _dyn_cache["ts"]) < _DYN_TTL:
+        return _dyn_cache["data"]
+    data = {}
     try:
-        if not os.path.exists(DYNAMIC_THRESHOLDS_FILE):
-            return {}
-        with open(DYNAMIC_THRESHOLDS_FILE) as f:
-            return json.load(f)
+        if os.path.exists(DYNAMIC_THRESHOLDS_FILE):
+            with open(DYNAMIC_THRESHOLDS_FILE) as f:
+                data = json.load(f)
     except Exception:
-        return {}
+        data = {}
+    _dyn_cache["data"] = data
+    _dyn_cache["ts"]   = now
+    return data
 
 
 # ─────────────────────────────────────────────

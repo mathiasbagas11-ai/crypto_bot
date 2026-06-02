@@ -830,6 +830,13 @@ def generate_confirmed_signal(
                         _news_ctx = get_structured_news_for_ai(symbol)
                     except Exception:
                         pass
+                # Lessons dari sinyal lalu (closed-loop self-learning)
+                _learn_ctx = None
+                try:
+                    from learning_engine import build_ai_context_block
+                    _learn_ctx = build_ai_context_block("SCREENER") or None
+                except Exception:
+                    _learn_ctx = None
                 ai_review = deepseek_signal_review(
                     symbol       = symbol,
                     direction    = direction,
@@ -840,6 +847,7 @@ def generate_confirmed_signal(
                     tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
                     news_context = _news_ctx,
                     signal_type  = "CONFIRMED",
+                    learning_context = _learn_ctx,
                 )
                 if ai_review:
                     # SKIP verdict → batalkan sinyal

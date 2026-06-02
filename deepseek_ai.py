@@ -110,6 +110,7 @@ def deepseek_signal_review(
     tf_15m: dict,
     news_context: dict = None,
     signal_type: str = "CONFIRMED",
+    learning_context: str = None,
 ) -> dict:
     """
     Review sinyal oleh DeepSeek SEBELUM dikirim ke Telegram.
@@ -232,6 +233,7 @@ Candle: 1H {cp1.get("pattern","NONE")} | 15M {cp15.get("pattern","NONE")}
 OB: 4H={len(ob4)} 1H={len(ob1)} | FVG 4H={len(fvg4)}
 Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
 News: {news_block if news_block else "tidak ada"}
+{("Pelajaran dari sinyal lalu:" + chr(10) + learning_context) if learning_context else ""}
 
 TUGAS:
 1. Sesuaikan entry/TP/SL kalau ada alasan teknikal SMC yang jelas (OB/FVG/swing). Kalau sudah optimal, pertahankan.
@@ -364,6 +366,7 @@ def deepseek_analyze_coin(
     swing: dict     = None,
     news_context: dict = None,
     symbol_memory: dict = None,
+    learning_context: str = None,
 ) -> str:
     """
     Full analisa coin untuk command /analyze <COIN>.
@@ -447,6 +450,8 @@ Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
 NEWS: {news_block}
 
 HISTORI: {mem_block if mem_block else "Belum ada histori."}
+
+{("PELAJARAN DARI SINYAL LALU (pertimbangkan ini):" + chr(10) + learning_context) if learning_context else ""}
 
 Berikan analisa singkat, padat, LANGSUNG KE STRATEGI. Gunakan format ini PERSIS (satu baris per poin, tanpa paragraf panjang):
 
