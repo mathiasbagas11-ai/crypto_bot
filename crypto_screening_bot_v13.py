@@ -1898,6 +1898,13 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
         result["vwap_bias"] = "AT"
 
     # ── Final scoring ────────────────────────────
+    # CVD dead-zone: jika CVD sedikit negatif (-1% s/d 0%) tapi faktor lain
+    # (VWAP/momentum) mendorong score ke positif, cap ke 0 supaya tidak flip
+    # ke INFLOW. Hanya berlaku saat score > 0 — tidak menambah penalti baru.
+    if -1.0 < cvd_pct < 0 and score_pts > 0:
+        score_pts = 0
+        reasons.append(f"⚠️ CVD dead-zone: {cvd_pct:+.1f}% — capped ke NEUTRAL")
+
     # score_pts: max ~+5 (strong inflow) to min ~-5 (strong outflow)
     ltf_score = min(100, max(0, 50 + (score_pts * 10)))
     result["ltf_score"] = ltf_score
@@ -7704,7 +7711,8 @@ def _get_persistence_bonus(symbol: str, direction: str, state: dict) -> tuple[in
 
 def _check_money_flow_gate(tf_4h: dict, tf_1h: dict, tf_15m: dict, direction: str) -> tuple[bool, str]:
     """
-    Gate: money flow >= GATE_MONEYFLOW_TF_MIN TF harus align dengan direction.
+    Gate: minimal 1 TF harus align dengan direction, dan maksimal 1 TF boleh kontra.
+    TF yang NEUTRAL tidak dihitung sebagai aligned maupun kontra.
     PUMP → butuh INFLOW, DUMP → butuh OUTFLOW.
     Returns (passed, reason_str)
     """
@@ -7715,7 +7723,8 @@ def _check_money_flow_gate(tf_4h: dict, tf_1h: dict, tf_15m: dict, direction: st
                  if tf.get("money_flow", {}).get("bias") == expected]
     conflict  = [name for name, tf in tfs.items()
                  if tf.get("money_flow", {}).get("bias") == opposite]
-    passed    = len(aligned) >= GATE_MONEYFLOW_TF_MIN
+    # Butuh ≥1 TF aligned DAN ≤1 TF kontra (TF NEUTRAL tidak dihitung)
+    passed    = len(aligned) >= 1 and len(conflict) <= 1
     reason    = f"MoneyFlow {expected}: {len(aligned)}/3 TF aligned ({', '.join(aligned) if aligned else 'none'})"
     if conflict:
         reason += f" ⚠️ kontra di {', '.join(conflict)}"
