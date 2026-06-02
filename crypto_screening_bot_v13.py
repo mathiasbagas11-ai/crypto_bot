@@ -1807,6 +1807,12 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif cvd_pct < -1:
         score_pts -= 1
         reasons.append(f"🟡 CVD: slight outflow {cvd_pct:+.1f}%")
+    # CVD dead-zone: nilai antara -1% s/d 0% bukan benar-benar netral —
+    # ada net sell kecil yang bisa dioverride VWAP. Kasih drag -1 supaya
+    # VWAP saja tidak cukup untuk flip bias ke INFLOW.
+    elif -1.0 < cvd_pct < 0:
+        score_pts -= 1
+        reasons.append(f"⚠️ CVD dead-zone: {cvd_pct:+.1f}% (net sell tipis, drag applied)")
 
     # CVD slope (recent momentum)
     if cvd_slope > 0 and last5_buy / max(last5_sell, 0.001) > 1.3:
@@ -1901,7 +1907,7 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif ltf_score >= 57:
         result["bias"]     = "INFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score >= 50:
+    elif ltf_score >= 55:
         result["bias"]     = "INFLOW"
         result["strength"] = "WEAK"
     elif ltf_score <= 30:
@@ -1910,10 +1916,11 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif ltf_score <= 43:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score <= 50:
+    elif ltf_score <= 45:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "WEAK"
     else:
+        # Dead zone 46–54: score terlalu tipis untuk arah apapun
         result["bias"]     = "NEUTRAL"
         result["strength"] = "WEAK"
 
