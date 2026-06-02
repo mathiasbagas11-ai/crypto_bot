@@ -313,7 +313,7 @@ def get_premium_score(direction: str, premium_data: dict = None) -> dict:
     def _fmt_p(p): return f"{p:+.4f}%"
 
     if direction == "LONG":
-        if "STRONG_LONG" in signal:
+        if "STRONG_LONG" in signal and "OVEREXTENDED" not in signal:
             score = 90 + min(10, strength - 80)
             mom_str = f" + momentum RISING 📈" if momentum == "RISING" else ""
             notes.append(
@@ -364,7 +364,7 @@ def get_premium_score(direction: str, premium_data: dict = None) -> dict:
             notes.append(f"   📉 Premium momentum FALLING — institutional buying slowing")
 
     else:  # SHORT
-        if "STRONG_SHORT" in signal:
+        if "STRONG_SHORT" in signal and "OVEREXTENDED" not in signal:
             score = 90 + min(10, strength - 80)
             mom_str = f" + momentum FALLING 📉" if momentum == "FALLING" else ""
             notes.append(

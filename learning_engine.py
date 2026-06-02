@@ -31,7 +31,11 @@ LESSONS_FILE     = "lessons.json"
 DECISION_LOG_FILE = "decision_log.json"
 
 # Threshold evolution
-MIN_EVOLVE_POSITIONS = 5    # minimal signal history sebelum evolve
+# Sampel minimal dinaikkan supaya tidak overfit: beberapa kekalahan sial tidak
+# boleh permanen menaikkan gate entry yang dibaca screener live.
+MIN_EVOLVE_POSITIONS = 30   # minimal total closed signals sebelum evolve
+MIN_LOSERS_PER_TYPE  = 8    # minimal loser per signal_type sebelum adjust threshold-nya
+EVOLVE_INTERVAL      = 10    # jalankan auto-evolve tiap +N closed signals baru
 MAX_CHANGE_PER_STEP  = 0.20 # max 20% perubahan per step
 MAX_MANUAL_LESSON_LEN = 400
 
@@ -212,10 +216,15 @@ def record_signal_outcome(
 
     _save_lessons(data)
 
-    # Auto-evolve tiap 5 closed signals
+    # Auto-evolve tiap +EVOLVE_INTERVAL closed signals BARU sejak evolve terakhir.
+    # (Dulu pakai `perf_count % MIN_EVOLVE_POSITIONS == 0` yang gampang ke-skip
+    # kalau ada path yang menambah >1 entry sekaligus.)
     perf_count = len(data["performance"])
-    if perf_count >= MIN_EVOLVE_POSITIONS and perf_count % MIN_EVOLVE_POSITIONS == 0:
+    last_evolve = data.get("_last_evolve_count", 0)
+    if perf_count >= MIN_EVOLVE_POSITIONS and (perf_count - last_evolve) >= EVOLVE_INTERVAL:
         result = evolve_thresholds(data["performance"])
+        data["_last_evolve_count"] = perf_count
+        _save_lessons(data)
         if result and result.get("changes"):
             log.info(f"🧬 Auto-evolved thresholds: {result['changes']}")
 
@@ -511,8 +520,8 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     winners = [p for p in perf_data if p.get("pnl_pct", 0) > 0]
     losers  = [p for p in perf_data if p.get("pnl_pct", 0) < -3]
 
-    if len(winners) < 2 and len(losers) < 2:
-        return {"error": "Belum cukup data winner/loser untuk evolve"}
+    if len(losers) < MIN_LOSERS_PER_TYPE:
+        return {"error": f"Belum cukup loser untuk evolve (perlu {MIN_LOSERS_PER_TYPE}, baru {len(losers)})"}
 
     changes   = {}
     rationale = {}
@@ -521,7 +530,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     # Kalau banyak prepump signal dengan score rendah yang SL hit → naikkan threshold
     prepump_losers  = [p for p in losers  if p.get("signal_type") == "PREPUMP"]
     prepump_winners = [p for p in winners if p.get("signal_type") == "PREPUMP"]
-    if prepump_losers and len(prepump_losers) >= 2:
+    if len(prepump_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in prepump_losers) / len(prepump_losers)
         if avg_loser_score < 75:
             new_thresh = min(85, round(avg_loser_score + 5))
@@ -532,7 +541,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
 
     # ── 2. PREDUMP_ALERT_THRESHOLD ─────────────────────────────
     predump_losers = [p for p in losers if p.get("signal_type") == "PREDUMP"]
-    if predump_losers and len(predump_losers) >= 2:
+    if len(predump_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in predump_losers) / len(predump_losers)
         if avg_loser_score < 75:
             new_thresh = min(85, round(avg_loser_score + 5))
@@ -544,7 +553,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     # ── 3. SCALP_MIN_SCORE ──────────────────────────────────────
     scalp_losers  = [p for p in losers  if p.get("signal_type") == "SCALP"]
     scalp_winners = [p for p in winners if p.get("signal_type") == "SCALP"]
-    if scalp_losers and len(scalp_losers) >= 2:
+    if len(scalp_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in scalp_losers) / len(scalp_losers)
         avg_win_score   = sum(p.get("score", 0) for p in scalp_winners) / max(1, len(scalp_winners))
         if avg_loser_score < avg_win_score - 10:

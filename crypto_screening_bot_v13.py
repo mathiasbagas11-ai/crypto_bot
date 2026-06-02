@@ -335,16 +335,20 @@ OB_LOOKBACK           = 10
 ZSCORE_ANOMALY_THRESH = 2.0
 
 # Pre-pump thresholds
-FUNDING_SQUEEZE_THRESH  = -0.01   # funding < -1% → squeeze potential
-FUNDING_EXTREME_THRESH  = -0.03   # funding < -3% → extreme squeeze
+# CATATAN: funding_rate sudah dalam satuan PERSEN (raw fundingRate * 100 di
+# get_open_interest). Funding normal Binance ~±0.01%/8h, jadi threshold harus
+# pakai magnitude persen yang realistis — bukan -0.01/-0.03 yang ter-trigger di
+# kondisi pasar normal dan over-score sinyal.
+FUNDING_SQUEEZE_THRESH  = -0.05   # funding < -0.05% → squeeze potential
+FUNDING_EXTREME_THRESH  = -0.10   # funding < -0.10% → extreme squeeze
 OI_SURGE_THRESH         = 5.0     # OI naik >5% dalam 1h
 ATR_COIL_RATIO          = 0.015   # price range < 1.5% ATR → coiling
 MOMENTUM_RSI_THRESH     = 55      # RSI > 55 → momentum building
 VOLUME_SURGE_MULT       = 2.0     # volume spike 2x normal
 
-# Pre-dump thresholds (opposite of pre-pump)
-FUNDING_DUMP_THRESH     = 0.01    # funding > +1% → long squeeze potential
-FUNDING_DUMP_EXTREME    = 0.03    # funding > +3% → extreme long squeeze
+# Pre-dump thresholds (opposite of pre-pump) — juga dalam satuan PERSEN
+FUNDING_DUMP_THRESH     = 0.05    # funding > +0.05% → long squeeze potential
+FUNDING_DUMP_EXTREME    = 0.10    # funding > +0.10% → extreme long squeeze
 RSI_OVERBOUGHT_THRESH   = 65      # RSI > 65 → overbought / exhaustion zone
 LS_LONG_HEAVY_THRESH    = 1.5     # L/S > 1.5 → longs too crowded → dump fuel
 
@@ -1904,26 +1908,29 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     result["ltf_score"] = ltf_score
     result["reasons"]   = reasons
 
-    if ltf_score >= 70:
+    # Bias/strength di-drive dari score_pts (integer) langsung. ltf_score selalu
+    # kelipatan 10 sehingga band berbasis ltf_score (57/55/43/45) tidak pernah
+    # tercapai → tier WEAK jadi dead code. score_pts memberi granularitas bersih.
+    if score_pts >= 3:
         result["bias"]     = "INFLOW"
         result["strength"] = "STRONG"
-    elif ltf_score >= 57:
+    elif score_pts == 2:
         result["bias"]     = "INFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score >= 55:
+    elif score_pts == 1:
         result["bias"]     = "INFLOW"
         result["strength"] = "WEAK"
-    elif ltf_score <= 30:
+    elif score_pts <= -3:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "STRONG"
-    elif ltf_score <= 43:
+    elif score_pts == -2:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score <= 45:
+    elif score_pts == -1:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "WEAK"
     else:
-        # Dead zone 46–54: score terlalu tipis untuk arah apapun
+        # score_pts == 0: terlalu tipis untuk arah apapun
         result["bias"]     = "NEUTRAL"
         result["strength"] = "WEAK"
 
@@ -2486,8 +2493,9 @@ def detect_scalp_setup(symbol: str, tf_15m: dict, tf_1h: dict, tf_4h: dict, oi_d
         result["reasons"].append(f"📊 RSI 15M: {rsi_15m:.0f} — overbought (extreme)")
 
     # ── ENTRY ZONE & TRADE PLAN ───────────────────
-    ob_for_zone = ob_15m if direction == "LONG" else ob_15m
-    entry_zone  = calculate_entry_zone(ob_for_zone, fvg_15m, result["sweep"], price, direction)
+    # calculate_entry_zone memilih sisi (bullish/bearish OB) secara internal
+    # sesuai direction, jadi cukup pass OB 15M (primary TF scalp).
+    entry_zone  = calculate_entry_zone(ob_15m, fvg_15m, result["sweep"], price, direction)
     result["entry_zone"] = entry_zone
 
     if price > 0:
@@ -2984,12 +2992,13 @@ def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -
 def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
                    tf_15m: dict = None) -> dict:
     """
-    Deteksi pre-pump setup berdasarkan 4 indikator utama:
+    Deteksi pre-pump setup berdasarkan 3 indikator inti + 1 bonus:
     1. Funding Squeeze       (max 30 poin)
     2. Momentum Runner       (max 35 poin)
-    3. OI + PA + ATR         (max 35 poin)
-    4. Early Warning + v14:  (max 30 poin)  BB Squeeze / Volume Coil / Sudden Breakout
-    Total max = 100 poin
+    3. OI + PA + ATR         (max 35 poin)   → inti = 100 poin
+    4. Early Warning + v14    (bonus aditif, max 30 poin) BB Squeeze / Volume Coil /
+       Sudden Breakout — untuk men-trigger sinyal lebih dini.
+    Total = inti + bonus, lalu di-clamp ke max 100 poin.
     """
     tf_15m = tf_15m or {}
     result = {
@@ -3082,11 +3091,17 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
         mom_score += 10
         result["reasons"].append("💥 BoS confirmed 1H BULLISH — momentum breakout")
 
-    # Volume surge
+    # Volume surge — full bonus hanya kalau candle bullish (akumulasi),
+    # bukan high-volume down candle (mirror logika detect_predump).
     if vol_1h.get("is_anomaly") or (vol_1h.get("multiplier", 1) >= VOLUME_SURGE_MULT):
-        mom_score += 10
         mult = vol_1h.get("multiplier", 1)
-        result["reasons"].append(f"🐳 Volume surge 1H: {mult:.1f}x normal — smart money in")
+        candles_1h = tf_1h.get("candles", [])
+        if candles_1h and candles_1h[-1]["close"] > candles_1h[-1]["open"]:  # bullish candle
+            mom_score += 10
+            result["reasons"].append(f"🐳 Volume surge 1H: {mult:.1f}x normal — smart money in")
+        else:
+            mom_score += 5
+            result["reasons"].append(f"  Volume spike 1H: {mult:.1f}x (arah perlu dikonfirmasi)")
     elif vol_4h.get("is_anomaly"):
         mom_score += 5
         mult = vol_4h.get("multiplier", 1)
@@ -3191,7 +3206,7 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
 
     result["oi_pa_score"] = min(oi_pa_score, 35)
 
-    # ── 4. EARLY WARNING: kondisi SEBELUM pump (max 20 poin) ────────────
+    # ── 4. EARLY WARNING: kondisi SEBELUM pump (bonus aditif, max 30 poin) ──
     # Deteksi akumulasi tersembunyi yang muncul SEBELUM pump terlihat jelas.
     # Ini yang bikin sinyal bisa dikirim lebih awal.
     early_score = 0

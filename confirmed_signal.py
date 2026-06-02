@@ -359,9 +359,20 @@ def compute_master_score(
         pass
 
     # ── 6c. Coinbase Premium (Institutional Bias) ───────────────────────
+    # NOTE: `direction` final baru dihitung di blok #7 di bawah. Pakai provisional
+    # direction dari weighted_long/short saat ini supaya kontribusi CB tetap ikut
+    # menentukan arah final. (Sebelumnya blok ini memakai `direction` yang belum
+    # di-assign → UnboundLocalError yang ketelan except → institutional bias tidak
+    # pernah berkontribusi sama sekali.)
     try:
         from coinbase_premium import get_premium_master_contribution
-        cb = get_premium_master_contribution(direction if direction != "NONE" else "LONG")
+        if weighted_long > weighted_short:
+            prov_dir = "LONG"
+        elif weighted_short > weighted_long:
+            prov_dir = "SHORT"
+        else:
+            prov_dir = "NONE"
+        cb = get_premium_master_contribution(prov_dir if prov_dir != "NONE" else "LONG")
         if cb.get("weighted_long_add", 0) > 0:
             weighted_long += cb["weighted_long_add"]
             if cb.get("reason"):
@@ -374,11 +385,11 @@ def compute_master_score(
         p_val = cb.get("premium_pct")
         if p_val is not None:
             if abs(p_val) > 0.15:
-                if p_val > 0 and direction == "SHORT":
+                if p_val > 0 and prov_dir == "SHORT":
                     conflict_r.append(
                         f"🏦 CB Premium {p_val:+.4f}% STRONGLY POSITIVE — SHORT melawan institutional"
                     )
-                elif p_val < 0 and direction == "LONG":
+                elif p_val < 0 and prov_dir == "LONG":
                     conflict_r.append(
                         f"🏦 CB Premium {p_val:+.4f}% STRONGLY NEGATIVE — LONG melawan institutional"
                     )

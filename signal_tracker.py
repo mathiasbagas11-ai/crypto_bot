@@ -61,14 +61,17 @@ def _load_pending() -> list:
         if os.path.exists(PENDING_FILE):
             with open(PENDING_FILE) as f:
                 return json.load(f)
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Load pending corrupt/error ({PENDING_FILE}): {e}")
     return []
 
 
 def _save_pending(data: list):
     try:
-        with open(PENDING_FILE, "w") as f:
+        tmp = PENDING_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, PENDING_FILE)   # atomic
     except Exception as e:
         log.warning(f"Save pending error: {e}")
 
@@ -78,14 +81,17 @@ def _load_outcomes() -> list:
         if os.path.exists(OUTCOME_FILE):
             with open(OUTCOME_FILE) as f:
                 return json.load(f)
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"Load outcomes corrupt/error ({OUTCOME_FILE}): {e}")
     return []
 
 
 def _save_outcomes(data: list):
     try:
-        with open(OUTCOME_FILE, "w") as f:
+        tmp = OUTCOME_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data[-500:], f, indent=2)  # keep last 500
+        os.replace(tmp, OUTCOME_FILE)   # atomic
     except Exception as e:
         log.warning(f"Save outcomes error: {e}")
 
@@ -195,7 +201,17 @@ def check_pending_signals(send_telegram_fn=None) -> list:
         if sig["status"] != "PENDING":
             continue
 
-        created_at = datetime.fromisoformat(sig["created_at"])
+        # Guard: timestamp naive/legacy/korup tidak boleh meledakkan seluruh
+        # loop (dulu TypeError "naive vs aware" / ValueError → semua pending
+        # berhenti diproses). Normalisasi ke UTC; kalau gagal, biarkan pending.
+        try:
+            created_at = datetime.fromisoformat(sig["created_at"])
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except (ValueError, KeyError, TypeError) as e:
+            log.warning(f"signal_tracker: created_at invalid {sig.get('symbol','?')}: {e} — skip")
+            still_pending.append(sig)
+            continue
         age_hours  = (now - created_at).total_seconds() / 3600
         timeout_h  = sig.get("timeout_hours", 24)
 

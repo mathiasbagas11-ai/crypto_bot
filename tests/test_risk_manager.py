@@ -56,13 +56,16 @@ def test_position_size_capped_at_30pct(state):
     assert r["qty"] == pytest.approx(3.0)
 
 
-def test_position_size_leverage_scales_position(state):
-    # entry 100, SL 90, 3x leverage: raw = (20/0.10)*3 = $600,
-    # cap = 1000*0.30*3 = $900, so not capped; qty = 600/100 = 6.0.
+def test_position_size_leverage_affects_margin_not_notional(state):
+    # Notional berbasis-risk TIDAK bergantung leverage: entry 100, SL 90
+    # (10% dist), risk $20 -> notional = 20/0.10 = $200, qty = 200/100 = 2.0.
+    # Leverage 3x hanya menurunkan margin yang dibutuhkan = 200/3 ≈ $66.67.
+    # cap = 1000*0.30*3 = $900 -> tidak ke-cap.
     r = rm.calc_position_size(100.0, 90.0, leverage=3)
     assert r["leverage"] == 3
-    assert r["position_size_usdt"] == pytest.approx(600.0)
-    assert r["qty"] == pytest.approx(6.0)
+    assert r["position_size_usdt"] == pytest.approx(200.0)
+    assert r["qty"] == pytest.approx(2.0)
+    assert r["margin_required_usdt"] == pytest.approx(round(200.0 / 3, 2))
     assert r["capped"] is False
 
 
@@ -143,6 +146,19 @@ def test_record_trade_loss_below_limit_no_halt(state):
 def test_record_trade_loss_triggers_halt(state):
     rm.record_trade_result(-60.0)  # 6% of 1000 -> over 5% limit
     assert state["trading_halted"] is True
+
+
+def test_record_trade_result_no_capital_no_crash(monkeypatch):
+    # Regression: capital 0 (balance belum di-set) dulu memicu ZeroDivisionError
+    # di hitung daily_loss_pct → update trade hilang. Harus aman sekarang.
+    st = dict(rm.DEFAULT_STATE)
+    st.update({"capital_usdt": 0.0, "last_reset_date": date.today().isoformat()})
+    monkeypatch.setattr(rm, "_load", lambda: st)
+    monkeypatch.setattr(rm, "_save", lambda s: None)
+    rm.record_trade_result(-50.0)   # tidak boleh raise
+    assert st["daily_trades"] == 1
+    assert st["daily_pnl_usdt"] == pytest.approx(-50.0)
+    assert st["trading_halted"] is False
 
 
 def test_record_trade_accumulates_then_halts(state):

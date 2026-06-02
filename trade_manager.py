@@ -67,13 +67,19 @@ def _load() -> list:
         return []
 
 
-def _save(trades: list):
+def _save(trades: list) -> bool:
+    """Tulis atomik (tmp + os.replace) supaya crash di tengah tulis tidak
+    meninggalkan file korup. Return True kalau sukses."""
     with _lock:
         try:
-            with open(TRADES_FILE, "w") as f:
+            tmp = TRADES_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(trades, f, indent=2)
+            os.replace(tmp, TRADES_FILE)
+            return True
         except Exception as e:
             log.error(f"Save trades error: {e}")
+            return False
 
 
 # ─────────────────────────────────────────────
@@ -420,8 +426,12 @@ def close_trade(symbol: str, exit_price: Optional[float] = None,
         exit_price = _fetch_price(sym) or trade["entry_price"]
 
     _do_close(trade, exit_price, reason)
-    _save(trades)
-    _log_to_journal(trade)
+    if _save(trades):
+        # Hanya kredit compound balance setelah status CLOSED ter-persist.
+        _update_compound_balance(trade["pnl_usdt"])
+        _log_to_journal(trade)
+    else:
+        log.error(f"close_trade: gagal simpan state untuk {sym} — balance TIDAK dikredit")
     return trade
 
 
@@ -457,7 +467,8 @@ def _do_close(trade: dict, exit_price: float, reason: str):
 
     trade["pnl_usdt"] = round(pnl_usdt, 4)
     trade["pnl_pct"]  = round(pnl_pct, 2)
-    _update_compound_balance(trade["pnl_usdt"])
+    # NOTE: compound balance di-kredit di caller SETELAH _save sukses, supaya
+    # tidak double-credit kalau save gagal dan trade masih ACTIVE saat retry.
 
 
 def _log_to_journal(trade: dict):
@@ -591,6 +602,10 @@ def check_active_trades(send_telegram_fn=None) -> list:
                 trade["tp1_hit"]       = True
                 trade["tp1_hit_price"] = price
                 trade["tp1_hit_time"]  = datetime.now(timezone.utc).isoformat()
+                # Tandai partial 50% sudah diambil di harga TP1 supaya _do_close
+                # memakai blended PnL (separuh di TP1, separuh di exit akhir).
+                trade["partial_done"]  = True
+                trade["partial_price"] = price
                 trade["sl"]            = entry      # geser SL ke breakeven
                 trade["sl_at_be"]      = True
                 trade["alert_tp1"]     = True

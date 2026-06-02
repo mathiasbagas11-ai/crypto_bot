@@ -451,7 +451,12 @@ def process_feedback(text: str, api_key: str = None) -> dict:
     # 4. Apply threshold adjustments kalau outcome BAD/MIXED
     threshold_changes = _apply_threshold_adjustments(parsed)
 
-    # 5. If matched a pending signal, record its outcome
+    # 5. Catat kalau feedback menyinggung sinyal yang masih PENDING.
+    # PENTING: JANGAN sintesis PnL/outcome (dulu pakai ±2.0 hardcoded +
+    # SL_HIT/TP1_HIT). Sinyal belum resolve → memasukkan angka karangan ke
+    # record_signal_outcome akan mencemari win-rate, derivasi lesson, dan
+    # evolusi threshold. Feedback kualitatif sudah ditangkap sebagai lesson
+    # (step 3) + penyesuaian threshold (step 4). Di sini cukup catat referensinya.
     outcome_recorded = None
     if parsed.get("coins") and parsed["outcome"] in ("BAD", "GOOD"):
         for coin in parsed["coins"][:1]:
@@ -459,26 +464,7 @@ def process_feedback(text: str, api_key: str = None) -> dict:
             matching = [s for s in pending_signals
                         if s.get("symbol") == sym and s.get("status") == "PENDING"]
             if matching:
-                sig = matching[-1]
-                le_outcome = "SL_HIT" if parsed["outcome"] == "BAD" else "TP1_HIT"
-                try:
-                    from learning_engine import record_signal_outcome
-                    record_signal_outcome(
-                        symbol           = sym,
-                        signal_type      = sig.get("signal_type", "SCREENER"),
-                        direction        = sig.get("direction", "LONG"),
-                        entry_price      = sig.get("entry_price", 0),
-                        score            = sig.get("score", 0),
-                        confluence_level = sig.get("confluence_level", ""),
-                        outcome          = le_outcome,
-                        exit_price       = sig.get("entry_price", 0),
-                        hold_minutes     = 0,
-                        pnl_pct          = -2.0 if parsed["outcome"] == "BAD" else 2.0,
-                        notes            = f"user_feedback: {text[:100]}",
-                    )
-                    outcome_recorded = f"{sym} {le_outcome}"
-                except Exception as e:
-                    log.debug(f"Record outcome error: {e}")
+                outcome_recorded = f"{sym} (feedback {parsed['outcome']} — qualitative only)"
 
     # 6. Persist feedback log
     _save_feedback_log(text, parsed, threshold_changes, lesson_id)

@@ -89,6 +89,17 @@ def get_whitelist() -> set:
 # Key di-derive dari ENCRYPTION_KEY env var.
 # ─────────────────────────────────────────────
 
+_KEY_FILE       = ".encryption_key"
+# Salt aplikasi (tetap, supaya derivasi passphrase deterministik lintas restart).
+_KDF_SALT       = b"crypto_bot_v13::encryption_kdf::v1"
+_KDF_ITERATIONS = 200_000
+
+
+def _key_fingerprint(key: str) -> str:
+    """Fingerprint pendek (bukan key asli) untuk logging yang aman."""
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
 def _get_fernet():
     """
     Lazy-load Fernet dan buat key dari ENCRYPTION_KEY env var.
@@ -103,12 +114,23 @@ def _get_fernet():
     raw_key = os.getenv("ENCRYPTION_KEY", "").strip()
 
     if not raw_key:
-        # Auto-generate dan print ke log sekali — user harus save ke .env
+        # Auto-generate sekali. JANGAN log key-nya (kebocoran kredensial ke
+        # log/stdout/journald). Tulis ke file 0600 dan log path + fingerprint saja.
         new_key = Fernet.generate_key().decode()
+        try:
+            with open(_KEY_FILE, "w") as f:
+                f.write(new_key)
+            os.chmod(_KEY_FILE, 0o600)
+            saved_to = os.path.abspath(_KEY_FILE)
+        except Exception as e:
+            saved_to = None
+            log.warning(f"⚠️ Gagal menulis key ke file: {e}")
         log.warning("=" * 60)
         log.warning("⚠️  ENCRYPTION_KEY tidak ditemukan di .env!")
-        log.warning(f"✅ Auto-generated key: {new_key}")
-        log.warning("👉 Tambahkan ke .env: ENCRYPTION_KEY=" + new_key)
+        log.warning(f"✅ Auto-generated key (fingerprint: {_key_fingerprint(new_key)})")
+        if saved_to:
+            log.warning(f"👉 Key tersimpan di: {saved_to} (chmod 600)")
+            log.warning("   Pindahkan ke .env sebagai ENCRYPTION_KEY=... lalu hapus file ini.")
         log.warning("⚠️  Tanpa key yang sama, state files tidak bisa dibaca ulang!")
         log.warning("=" * 60)
         # Simpan ke env runtime supaya session ini bisa jalan
@@ -117,13 +139,29 @@ def _get_fernet():
 
     # Derive 32-byte key dari string apapun (support custom passphrase)
     if len(raw_key) != 44 or not raw_key.endswith("="):
-        # Bukan Fernet key asli — derive dari passphrase
-        key_bytes = hashlib.sha256(raw_key.encode()).digest()
-        derived = base64.urlsafe_b64encode(key_bytes)
+        # Bukan Fernet key asli — derive dari passphrase via PBKDF2 (bukan SHA-256
+        # polos). Salt tetap (deterministik) supaya passphrase yang sama selalu
+        # menghasilkan key yang sama; iterasi tinggi menaikkan biaya brute-force.
+        legacy = base64.urlsafe_b64encode(hashlib.sha256(raw_key.encode()).digest())
+        try:
+            from cryptography.fernet import MultiFernet
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=_KDF_SALT,
+                iterations=_KDF_ITERATIONS,
+            )
+            new_derived = base64.urlsafe_b64encode(kdf.derive(raw_key.encode()))
+            # MultiFernet: enkripsi pakai key baru (PBKDF2), tapi tetap bisa
+            # mendekripsi file lama yang dibuat dengan key legacy (SHA-256).
+            return MultiFernet([Fernet(new_derived), Fernet(legacy)])
+        except Exception:
+            # Fallback kalau primitives/MultiFernet tidak tersedia
+            return Fernet(legacy)
     else:
-        derived = raw_key.encode()
-
-    return Fernet(derived)
+        return Fernet(raw_key.encode())
 
 
 def secure_save(filepath: str, data: dict) -> bool:
@@ -135,10 +173,12 @@ def secure_save(filepath: str, data: dict) -> bool:
     fernet = _get_fernet()
 
     if fernet is None:
-        # Fallback: plain JSON
+        # Fallback: plain JSON (atomic: tmp + replace)
         try:
-            with open(filepath, "w") as f:
+            tmp = filepath + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp, filepath)
             return True
         except Exception as e:
             log.error(f"secure_save fallback error {filepath}: {e}")
@@ -148,8 +188,12 @@ def secure_save(filepath: str, data: dict) -> bool:
         json_bytes  = json.dumps(data, indent=2).encode("utf-8")
         encrypted   = fernet.encrypt(json_bytes)
         enc_path    = filepath + ".enc"
-        with open(enc_path, "wb") as f:
+        tmp_path    = enc_path + ".tmp"
+        # Atomic: tulis ke tmp lalu replace, supaya crash di tengah tulis tidak
+        # meninggalkan file .enc korup (yang akan gagal didekripsi → state hilang).
+        with open(tmp_path, "wb") as f:
             f.write(encrypted)
+        os.replace(tmp_path, enc_path)
         # Hapus plain version kalau ada
         if os.path.exists(filepath):
             os.remove(filepath)

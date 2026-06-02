@@ -52,17 +52,33 @@ def test_get_fernet_real_fernet_key(monkeypatch):
     assert Fernet(key.encode()).decrypt(token) == b"hello"
 
 
-def test_get_fernet_passphrase_is_sha256_derived(monkeypatch):
+def test_get_fernet_passphrase_uses_pbkdf2_and_is_deterministic(monkeypatch):
     monkeypatch.setenv("ENCRYPTION_KEY", "my-secret-passphrase")
     f = sec._get_fernet()
     assert f is not None
-    # The derivation is deterministic SHA256 -> urlsafe b64; verify a token
-    # encrypted by the module decrypts with an independently derived key.
-    import hashlib
-    derived = base64.urlsafe_b64encode(
-        hashlib.sha256(b"my-secret-passphrase").digest())
+    # Enkripsi sekarang pakai PBKDF2 (bukan SHA-256 polos). Verifikasi token
+    # yang dibuat modul bisa didekripsi dengan key PBKDF2 yang diturunkan mandiri.
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                     salt=sec._KDF_SALT, iterations=sec._KDF_ITERATIONS)
+    pbkdf2_key = base64.urlsafe_b64encode(kdf.derive(b"my-secret-passphrase"))
     token = f.encrypt(b"payload")
-    assert Fernet(derived).decrypt(token) == b"payload"
+    assert Fernet(pbkdf2_key).decrypt(token) == b"payload"
+    # Derivasi harus deterministik lintas instance (passphrase sama → key sama).
+    assert sec._get_fernet().decrypt(token) == b"payload"
+
+
+def test_get_fernet_decrypts_legacy_sha256_tokens(monkeypatch):
+    """Backward-compat: file lama yang dienkripsi dengan key SHA-256 (legacy)
+    harus tetap bisa didekripsi (MultiFernet) supaya state tidak hilang."""
+    monkeypatch.setenv("ENCRYPTION_KEY", "my-secret-passphrase")
+    import hashlib
+    legacy_key = base64.urlsafe_b64encode(
+        hashlib.sha256(b"my-secret-passphrase").digest())
+    legacy_token = Fernet(legacy_key).encrypt(b"old-state")
+    f = sec._get_fernet()
+    assert f.decrypt(legacy_token) == b"old-state"
 
 
 # ── secure_save / secure_load round-trip ─────────────────────────
