@@ -4534,11 +4534,45 @@ def _compute_tp_profile(tf_4h: dict, tf_1h: dict, direction: str) -> dict:
     choppy = (reg4 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or
               reg1 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or adx4 < 18)
 
+    # `ladder` = kelipatan R untuk TP bertahap (TP1..TPn). ladder[0]/[1] = tp1/tp2.
+    # Jumlah rung ikut agresivitas: choppy = sedikit (3), trending = sampai 5.
     if trend_aligned and adx4 >= 28:
-        return {"label": "AGGRESSIVE",   "tp1_mult": 2.0, "tp2_mult": 3.5, "sl_atr": 2.0}
+        return {"label": "AGGRESSIVE",   "tp1_mult": 2.0, "tp2_mult": 3.5, "sl_atr": 2.0,
+                "ladder": [2.0, 3.5, 5.0, 7.0, 10.0]}
     if choppy:
-        return {"label": "CONSERVATIVE", "tp1_mult": 1.2, "tp2_mult": 2.0, "sl_atr": 1.5}
-    return {"label": "BALANCED",         "tp1_mult": 1.5, "tp2_mult": 2.5, "sl_atr": 1.8}
+        return {"label": "CONSERVATIVE", "tp1_mult": 1.2, "tp2_mult": 2.0, "sl_atr": 1.5,
+                "ladder": [1.2, 2.0, 3.0]}
+    return {"label": "BALANCED",         "tp1_mult": 1.5, "tp2_mult": 2.5, "sl_atr": 1.8,
+            "ladder": [1.5, 2.5, 3.5, 4.5]}
+
+
+def _build_tp_ladder(entry: float, sl: float, direction: str,
+                     tp1: float, tp2: float, ladder_mults: list) -> list:
+    """Bangun TP bertahap (ladder TP1..TPn).
+
+    Rung 1 & 2 = tp1/tp2 (sudah struktural dari calculate_tp1_tp2). Rung 3+ =
+    target murni R-multiple yang lebih jauh (runner). Strictly monotonic menjauh
+    dari entry. Tiap rung: {level, price, r, pct}.
+    """
+    is_long = direction in ("LONG", "PUMP")
+    risk = abs(entry - sl) if (sl and sl != entry) else entry * 0.02
+    prices = []
+    for p in (tp1, tp2):
+        if p is not None:
+            prices.append(round(float(p), 8))
+    prev = prices[-1] if prices else entry
+    for mult in (ladder_mults[2:] if ladder_mults else []):
+        p = round(entry + risk * mult, 8) if is_long else round(entry - risk * mult, 8)
+        if (is_long and p <= prev) or ((not is_long) and p >= prev):
+            continue   # lewati rung yang tidak lebih jauh dari rung sebelumnya
+        prices.append(p)
+        prev = p
+    out = []
+    for i, p in enumerate(prices):
+        r   = round(abs(p - entry) / risk, 2) if risk > 0 else 0.0
+        pct = round((p - entry) / entry * 100 * (1 if is_long else -1), 2) if entry else 0.0
+        out.append({"level": i + 1, "price": p, "r": r, "pct": pct})
+    return out
 
 
 def _entry_action_reco(direction: str, confluence: dict = None,
@@ -4726,6 +4760,27 @@ def _sanitize_trade_levels(trade: dict, direction: str) -> dict:
         trade["tp2_r"] = round(abs(_f(trade["tp2"]) - entry) / risk, 2)
     if "tp" in trade:
         trade["tp"] = trade["tp1"]
+
+    # Rebuild ladder TP biar konsisten dengan entry/sl (mis. setelah override AI):
+    # rung 1/2 = tp1/tp2 final, rung 3+ dihitung ulang dari R-multiple tersimpan.
+    tps = trade.get("tps")
+    if isinstance(tps, list) and tps:
+        rebuilt = []
+        for rung in tps:
+            lvl = rung.get("level")
+            if lvl == 1:
+                p = _f(trade["tp1"])
+            elif lvl == 2:
+                p = _f(trade["tp2"])
+            else:
+                rr = rung.get("r") or 0
+                p = round(entry + risk * rr, 8) if is_long else round(entry - risk * rr, 8)
+            if p is None:
+                continue
+            rmult = round(abs(p - entry) / risk, 2) if risk > 0 else 0.0
+            pct   = round((p - entry) / entry * 100 * (1 if is_long else -1), 2) if entry else 0.0
+            rebuilt.append({"level": lvl, "price": p, "r": rmult, "pct": pct})
+        trade["tps"] = rebuilt
     return trade
 
 
@@ -4949,6 +5004,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         tps = calculate_tp1_tp2(entry, sl, "LONG", tf_4h, tf_1h, liq_1h,
                                 tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
+        tp_ladder = _build_tp_ladder(entry, sl, "LONG", tps["tp1"], tps["tp2"], _tp_prof["ladder"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -4971,6 +5027,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "tp": tps["tp1"], "sl_basis": f"below {entry_type} -ATR buf",
             "entry_mode": entry_mode,
             "tp_profile": _tp_prof["label"],
+            "tps": tp_ladder,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -5041,6 +5098,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         tps = calculate_tp1_tp2(entry, sl, "SHORT", tf_4h, tf_1h, liq_1h,
                                 tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
+        tp_ladder = _build_tp_ladder(entry, sl, "SHORT", tps["tp1"], tps["tp2"], _tp_prof["ladder"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -5063,6 +5121,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "tp": tps["tp1"], "sl_basis": f"above {entry_type} +ATR buf",
             "entry_mode": entry_mode,
             "tp_profile": _tp_prof["label"],
+            "tps": tp_ladder,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -8103,11 +8162,28 @@ def _build_gated_signal_message(
             conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
             lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
 
+    lines.append(f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}")
+
+    # TP bertahap (ladder) — pilih sendiri seberapa agresif exit-nya.
+    _prof = trade.get("tp_profile", "")
+    _ladder = trade.get("tps") or []
+    if _ladder:
+        _n = len(_ladder)
+        for _rg in _ladder:
+            _lvl = _rg.get("level", 0)
+            _tag = " | close 50%" if _lvl == 1 else (" | runner" if _lvl == _n else "")
+            _emoji = "🟡" if _lvl == 1 else "🟢"
+            lines.append(
+                f"{_emoji} TP{_lvl}    : <code>{_f(_rg.get('price'))}</code>  "
+                f"{_rg.get('pct', 0):+.1f}%  ({_rg.get('r', 0)}R){_tag}"
+            )
+    else:
+        lines.append(f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%")
+        lines.append(f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner")
+
     lines += [
-        f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}",
-        f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%",
-        f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner",
-        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}",
+        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}"
+        + (f"  | 🎚️ {_prof}" if _prof else ""),
         "",
         "─── GATE SUMMARY ───",
     ]
@@ -8698,6 +8774,21 @@ def run_gated_scan():
                                                 entry_mode=trade.get("entry_mode"))
                 _mu_prof   = trade.get("tp_profile", "")
                 _mu_entry  = trade.get("entry") or price
+                # TP bertahap (ladder)
+                _mu_ladder = trade.get("tps") or []
+                if _mu_ladder:
+                    _mu_n = len(_mu_ladder)
+                    _mu_tp_lines = "\n".join(
+                        f"🟡 TP{_rg.get('level')}   : {_fmt_price(_rg.get('price'))}  "
+                        f"({_rg.get('r', 0)}R, {_rg.get('pct', 0):+.1f}%)"
+                        + (" ← runner" if _rg.get('level') == _mu_n else "")
+                        for _rg in _mu_ladder
+                    )
+                else:
+                    _mu_tp_lines = (
+                        f"🟡 TP1   : {_fmt_price(trade.get('tp1'))}\n"
+                        f"🟢 TP2   : {_fmt_price(trade.get('tp2'))}"
+                    )
                 _mu_msg = (
                     f"📡 <b>SINYAL BARU — {analysis_sym.replace('USDT','')}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -8705,8 +8796,7 @@ def run_gated_scan():
                     + (f" | TP plan: {_mu_prof}\n" if _mu_prof else "\n")
                     + f"💰 Harga : <b>{_fmt_price(price)}</b>\n"
                     f"🎯 Entry : {_fmt_price(_mu_entry)}\n"
-                    f"🟡 TP1   : {_fmt_price(trade.get('tp1'))}\n"
-                    f"🟢 TP2   : {_fmt_price(trade.get('tp2'))}\n"
+                    f"{_mu_tp_lines}\n"
                     f"🔴 SL    : {_fmt_price(trade.get('sl'))}\n\n"
                     f"📌 {_mu_action}\n"
                     f"⚠️ <i>Not financial advice. DYOR.</i>"

@@ -118,3 +118,48 @@ def test_action_reco_extended_waits():
 def test_action_reco_heuristic_now_on_aligned_momentum():
     r = bot._entry_action_reco("LONG", {"level": "GOOD"}, {"momentum_label": "STRONG_BULL_MOMENTUM"})
     assert "NOW" in r
+
+
+# ── _build_tp_ladder (TP bertahap) ───────────────────────────────
+
+def test_ladder_long_levels_and_monotonic():
+    lad = bot._build_tp_ladder(100.0, 95.0, "LONG", 110.0, 117.5, [2.0, 3.5, 5.0, 7.0, 10.0])
+    assert [r["level"] for r in lad] == [1, 2, 3, 4, 5]
+    prices = [r["price"] for r in lad]
+    assert prices == sorted(prices)                 # naik untuk LONG
+    assert all(p > 100.0 for p in prices)           # semua di atas entry
+    assert lad[0]["price"] == 110.0 and lad[1]["price"] == 117.5   # rung 1/2 = tp1/tp2
+    assert lad[-1]["r"] == 10.0
+
+
+def test_ladder_short_descends():
+    lad = bot._build_tp_ladder(100.0, 103.0, "SHORT", 94.0, 89.5, [2.0, 3.5, 5.0])
+    prices = [r["price"] for r in lad]
+    assert prices == sorted(prices, reverse=True)   # turun untuk SHORT
+    assert all(p < 100.0 for p in prices)
+
+
+def test_ladder_rung_count_follows_profile():
+    cons = bot._build_tp_ladder(100.0, 95.0, "LONG", 106.0, 110.0, [1.2, 2.0, 3.0])
+    aggr = bot._build_tp_ladder(100.0, 95.0, "LONG", 110.0, 117.5, [2.0, 3.5, 5.0, 7.0, 10.0])
+    assert len(cons) == 3
+    assert len(aggr) == 5
+
+
+def test_profile_includes_ladder():
+    p = bot._compute_tp_profile(_reg("BULLISH_TREND", 32), _reg("BULLISH_TREND", 30), "LONG")
+    assert p["ladder"][0] == p["tp1_mult"] and p["ladder"][1] == p["tp2_mult"]
+
+
+def test_sanitize_rebuilds_ladder_consistently():
+    # Setelah override (entry berubah), ladder harus konsisten dengan entry/sl baru.
+    t = {"entry": 200.0, "sl": 190.0, "tp1": 999.0, "tp2": 999.0, "tp": 999.0,
+         "tps": [{"level": 1, "price": 0, "r": 2.0, "pct": 0},
+                 {"level": 2, "price": 0, "r": 3.5, "pct": 0},
+                 {"level": 3, "price": 0, "r": 5.0, "pct": 0}]}
+    bot._sanitize_trade_levels(t, "LONG")
+    tps = t["tps"]
+    assert [r["level"] for r in tps] == [1, 2, 3]
+    # risk = 10 → TP3 = 200 + 10*5 = 250
+    assert tps[2]["price"] == pytest.approx(250.0)
+    assert all(r["price"] > 200.0 for r in tps)
