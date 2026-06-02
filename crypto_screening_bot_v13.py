@@ -8241,7 +8241,25 @@ def run_gated_scan():
             if _active_dir == _signal_dir_now:
                 log.info(f"⏭️ {analysis_sym}: setup {_signal_dir_now} masih PENDING — skip duplicate")
                 continue
-            # Arah berubah → sinyal baru valid, catat perubahan
+            # Arah berubah → kirim peringatan ke Market Update lalu izinkan setup baru
+            _cur_price = tf_1h.get("price", 0)
+            _flip_emoji_old = "🟢" if _active_dir == "LONG" else "🔴"
+            _flip_emoji_new = "🔴" if _active_dir == "LONG" else "🟢"
+            _close_action  = "CLOSE LONG / SHORT" if _active_dir == "LONG" else "CLOSE SHORT / BUY BACK"
+            _bias_flip_msg = (
+                f"🔄 <b>BIAS BERUBAH — {analysis_sym.replace('USDT','')}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{_flip_emoji_old} {_active_dir}  →  {_flip_emoji_new} {_signal_dir_now}\n"
+                f"💰 Harga sekarang: <code>${_cur_price:.4f}</code>\n\n"
+                f"⚠️ Setup <b>{_active_dir}</b> sebelumnya kemungkinan sudah tidak valid.\n"
+                f"💡 Pertimbangkan <b>{_close_action}</b> jika posisi masih terbuka.\n\n"
+                f"🔍 Setup baru <b>{_signal_dir_now}</b> sedang dievaluasi..."
+            )
+            try:
+                send_market_update(_bias_flip_msg)
+                log.info(f"📢 Bias flip alert sent: {analysis_sym} {_active_dir}→{_signal_dir_now}")
+            except Exception as _e:
+                log.warning(f"Bias flip alert error: {_e}")
             log.info(f"🔄 {analysis_sym}: bias berubah {_active_dir}→{_signal_dir_now} — izinkan setup baru")
 
         # Detectors
