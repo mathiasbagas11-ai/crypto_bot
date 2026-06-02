@@ -4032,13 +4032,22 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
         dump_score += 4
         reasons.append("🟡 MACD 1H: Histogram negatif — mild bearish momentum")
 
-    rej = tf_15m.get("rejection", {})
-    fvg = tf_15m.get("fvg", {})
+    rej    = tf_15m.get("rejection", {})
+    rej_1h = tf_1h.get("rejection", {})
+    fvg    = tf_15m.get("fvg", {})
 
     if rej.get("type") == "BULLISH_REJECTION":
         pump_score += 12; reasons.append(f"✅ 15M: Bullish pin bar ({rej['detail']})")
     elif rej.get("type") == "BEARISH_REJECTION":
         dump_score += 12; reasons.append(f"🔴 15M: Bearish pin bar ({rej['detail']})")
+
+    # 1H rejection candle: lebih berat dari 15M (TF lebih tinggi = lebih signifikan)
+    # Hanya dihitung jika strength ≥ 60 (hindari noise wick kecil)
+    _rej1h_str = rej_1h.get("strength", 0)
+    if rej_1h.get("type") == "BULLISH_REJECTION" and _rej1h_str >= 60:
+        pump_score += 10; reasons.append(f"✅ 1H: Bullish rejection candle (str:{_rej1h_str}) — buyer defended level")
+    elif rej_1h.get("type") == "BEARISH_REJECTION" and _rej1h_str >= 60:
+        dump_score += 10; reasons.append(f"🔴 1H: Bearish rejection candle (str:{_rej1h_str}) — seller rejected price")
 
     # ── v14: CANDLE STRUCTURE PATTERNS ───────────
     # 15M patterns (scalp entry precision)
@@ -4068,10 +4077,18 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
     p1h = cp1h.get("pattern", "NONE")
     if p1h in _pattern_pts:
         pp1, dp1 = _pattern_pts[p1h]
-        # 1H patterns: half weight (trend-level context, not scalp entry)
-        pp1h, dp1h = pp1 // 2, dp1 // 2
-        if pp1h: pump_score += pp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{pp1h}pts PUMP)")
-        if dp1h: dump_score += dp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{dp1h}pts DUMP)")
+        # Reversal patterns (Evening Star, Morning Star, Engulfing) dapat full weight
+        # karena mereka sinyal AKHIR dari trend yang ada — tidak boleh di-halve
+        # Continuation/neutral patterns tetap half weight (konteks saja)
+        _reversal_patterns = {"EVENING_STAR", "MORNING_STAR", "BULLISH_ENGULFING", "BEARISH_ENGULFING"}
+        if p1h in _reversal_patterns:
+            pp1h, dp1h = pp1, dp1
+            _w_label = "full weight — reversal konfirmasi"
+        else:
+            pp1h, dp1h = pp1 // 2, dp1 // 2
+            _w_label = "half weight"
+        if pp1h: pump_score += pp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{pp1h}pts PUMP, {_w_label})")
+        if dp1h: dump_score += dp1h; reasons.append(f"🕯️ 1H Candle: {cp1h['detail']} (+{dp1h}pts DUMP, {_w_label})")
 
     # INSIDE BAR on 15M = breakout setup — flag direction warning
     if p15 == "INSIDE_BAR":
@@ -4178,16 +4195,22 @@ def calculate_confluence_v4(tf_4h: dict, tf_1h: dict, tf_15m: dict, oi_data: dic
     outflow_count = sum(1 for mf in [mf_4h, mf_1h, mf_15m] if mf.get("bias") == "OUTFLOW")
     strong_count  = sum(1 for mf in [mf_4h, mf_1h, mf_15m] if mf.get("strength") == "STRONG")
 
+    _mf15m_strong_contra_inflow  = (mf_15m.get("bias") == "OUTFLOW" and mf_15m.get("strength") == "STRONG")
+    _mf15m_strong_contra_outflow = (mf_15m.get("bias") == "INFLOW"  and mf_15m.get("strength") == "STRONG")
+
     if inflow_count >= 2:
-        pts = 12 if strong_count >= 1 else 7
+        # Jika 15M STRONG OUTFLOW sementara HTF inflow, LTF sedang memimpin reversal — kurangi bonus
+        pts = (6 if _mf15m_strong_contra_inflow else (12 if strong_count >= 1 else 7))
         pump_score += pts
         mfi_avg = round(sum(mf.get("mfi", 50) for mf in [mf_4h, mf_1h, mf_15m]) / 3, 0)
-        reasons.append(f"💚 Money Flow: INFLOW di {inflow_count}/3 TF (MFI avg {mfi_avg:.0f}) — buyer pressure")
+        _contra_note = " ⚠️ 15M kontra OUTFLOW" if _mf15m_strong_contra_inflow else ""
+        reasons.append(f"💚 Money Flow: INFLOW di {inflow_count}/3 TF (MFI avg {mfi_avg:.0f}) — buyer pressure{_contra_note}")
     elif outflow_count >= 2:
-        pts = 12 if strong_count >= 1 else 7
+        pts = (6 if _mf15m_strong_contra_outflow else (12 if strong_count >= 1 else 7))
         dump_score += pts
         mfi_avg = round(sum(mf.get("mfi", 50) for mf in [mf_4h, mf_1h, mf_15m]) / 3, 0)
-        reasons.append(f"🔴 Money Flow: OUTFLOW di {outflow_count}/3 TF (MFI avg {mfi_avg:.0f}) — seller pressure")
+        _contra_note = " ⚠️ 15M kontra INFLOW" if _mf15m_strong_contra_outflow else ""
+        reasons.append(f"🔴 Money Flow: OUTFLOW di {outflow_count}/3 TF (MFI avg {mfi_avg:.0f}) — seller pressure{_contra_note}")
     elif inflow_count == 1 and outflow_count == 0:
         pump_score += 3
         reasons.append(f"🟢 Money Flow: mild inflow di 1 TF")
