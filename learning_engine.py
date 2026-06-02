@@ -571,7 +571,46 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
         add_manual_lesson(rule=lesson_text, tags=["evolution", "config_change"], pinned=False)
         log.info(f"🧬 Threshold evolution: {changes}")
 
+        # Tulis ke dynamic_thresholds.json agar screener bisa baca langsung
+        _write_dynamic_thresholds(changes)
+
     return {"changes": changes, "rationale": rationale, "total_analyzed": len(perf_data)}
+
+
+DYNAMIC_THRESHOLDS_FILE = "dynamic_thresholds.json"
+
+
+def _write_dynamic_thresholds(changes: dict):
+    """Tulis threshold overrides ke JSON agar bisa dibaca screener tanpa restart."""
+    try:
+        existing = {}
+        if os.path.exists(DYNAMIC_THRESHOLDS_FILE):
+            with open(DYNAMIC_THRESHOLDS_FILE) as f:
+                existing = json.load(f)
+        existing.update({k: v for k, v in changes.items() if not k.startswith("_")})
+        existing["_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(DYNAMIC_THRESHOLDS_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+        log.info(f"🧬 dynamic_thresholds.json diupdate: {list(changes.keys())}")
+    except Exception as e:
+        log.warning(f"Gagal tulis dynamic_thresholds: {e}")
+
+
+def get_dynamic_thresholds() -> dict:
+    """
+    Baca threshold overrides dari dynamic_thresholds.json.
+    Mapping nama ke constant screener:
+      PREPUMP_ALERT_THRESHOLD → GATE_MASTER_SCORE_MIN (global floor)
+      SCALP_MIN_SCORE         → SCALP_MIN_SCORE_OVERRIDE
+    Returns empty dict jika file tidak ada atau error.
+    """
+    try:
+        if not os.path.exists(DYNAMIC_THRESHOLDS_FILE):
+            return {}
+        with open(DYNAMIC_THRESHOLDS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 # ─────────────────────────────────────────────

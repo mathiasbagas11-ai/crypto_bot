@@ -16,7 +16,7 @@ Fungsi utama:
   reset_daily()                  → reset counter harian (dipanggil scheduler)
 """
 
-import os, json, logging
+import os, json, logging, math
 from datetime import datetime, timezone, date
 from pathlib import Path
 
@@ -120,6 +120,64 @@ def set_daily_loss_limit(pct: float):
 
 # ── Core Calculations ─────────────────────────
 
+OUTCOMES_FILE = Path("signal_outcomes.json")
+_KELLY_WINDOW  = 20   # jumlah trade terakhir yang dipakai Kelly
+_KELLY_MAX_MUL = 1.5  # max multiplier (base × 1.5)
+_KELLY_MIN_MUL = 0.5  # min multiplier (base × 0.5)
+
+
+def calc_adaptive_risk_pct(base_risk_pct: float) -> tuple[float, str]:
+    """
+    Kelly Criterion variant: scale risk berdasarkan win rate + profit factor
+    dari N trade terakhir di signal_outcomes.json.
+
+    Returns (adjusted_risk_pct, reason_str).
+    Jika data kurang atau error, kembalikan base_risk_pct tanpa perubahan.
+    """
+    try:
+        if not OUTCOMES_FILE.exists():
+            return base_risk_pct, "Kelly: belum ada data outcomes"
+        with open(OUTCOMES_FILE) as f:
+            all_outcomes = json.load(f)
+        if not isinstance(all_outcomes, list):
+            return base_risk_pct, "Kelly: format outcomes tidak valid"
+
+        recent = [o for o in all_outcomes if isinstance(o, dict) and "pnl_pct" in o]
+        recent = recent[-_KELLY_WINDOW:]
+        if len(recent) < 5:
+            return base_risk_pct, f"Kelly: data kurang ({len(recent)}/{_KELLY_WINDOW})"
+
+        pnls   = [o["pnl_pct"] for o in recent]
+        wins   = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        wr     = len(wins) / len(recent)
+
+        avg_win  = sum(wins)  / len(wins)  if wins   else 0.0
+        avg_loss = abs(sum(losses) / len(losses)) if losses else 1.0
+        pf       = (avg_win * len(wins)) / max(avg_loss * len(losses), 0.001) if losses else 2.0
+
+        # Kelly fraction yang disederhanakan: edge = wr - (1-wr)/R
+        R      = avg_win / avg_loss if avg_loss > 0 else 1.0
+        edge   = wr - (1 - wr) / max(R, 0.001)
+
+        if pf >= 1.5 and wr >= 0.55 and edge > 0:
+            mul    = _KELLY_MAX_MUL
+            reason = f"Kelly↑ WR={wr:.0%} PF={pf:.2f} → risk ×{mul}"
+        elif pf < 1.0 or wr < 0.40:
+            mul    = _KELLY_MIN_MUL
+            reason = f"Kelly↓ WR={wr:.0%} PF={pf:.2f} → risk ×{mul}"
+        else:
+            mul    = 1.0
+            reason = f"Kelly= WR={wr:.0%} PF={pf:.2f} → risk tidak diubah"
+
+        adjusted = round(base_risk_pct * mul, 2)
+        return adjusted, reason
+
+    except Exception as e:
+        log.debug(f"Kelly calc error: {e}")
+        return base_risk_pct, "Kelly: error saat kalkulasi"
+
+
 def calc_position_size(entry_price: float, sl_price: float,
                        leverage: int = 1) -> dict:
     """
@@ -133,10 +191,11 @@ def calc_position_size(entry_price: float, sl_price: float,
 
     Returns dict dengan semua kalkulasi.
     """
-    s       = _load()
-    s       = _auto_reset_daily(s)
-    capital = s["capital_usdt"]
-    rsk_pct = s["risk_pct"]
+    s        = _load()
+    s        = _auto_reset_daily(s)
+    capital  = s["capital_usdt"]
+    base_pct = s["risk_pct"]
+    rsk_pct, kelly_reason = calc_adaptive_risk_pct(base_pct)
 
     if entry_price <= 0 or sl_price <= 0:
         return {"error": "Harga tidak valid"}
@@ -178,6 +237,8 @@ def calc_position_size(entry_price: float, sl_price: float,
         "daily_pnl_usdt"     : round(s["daily_pnl_usdt"], 2),
         "daily_trades"       : s["daily_trades"],
         "trading_halted"     : s["trading_halted"],
+        "kelly_reason"       : kelly_reason,
+        "base_risk_pct"      : base_pct,
     }
 
 

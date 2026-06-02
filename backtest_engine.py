@@ -981,7 +981,7 @@ def _run_all_detectors_on_bar(symbol: str, h4: list, h1: list, h15: list, oi: di
 
     tf4  = _build_tf_data(h4,  "4h")
     tf1  = _build_tf_data(h1,  "1h")
-    tf15 = _build_tf_data(h15, "1h")  # 15m proxy — 1h candles (acknowledged limitation)
+    tf15 = _build_tf_data(h15, "15m")
 
     if tf4.get("error") or tf1.get("error"):
         return None
@@ -1022,9 +1022,14 @@ def run_signal_backtest(symbol: str, days: int = 30,
             return {"error": f"Symbol {symbol} tidak ditemukan di exchange manapun"}
 
     log.info(f"Signal BT START: {resolved} | {days}d | threshold={score_threshold}")
-    c1h = download_ohlcv(resolved, "1h", days=days, exchange=exchange)
+    c1h  = download_ohlcv(resolved, "1h",  days=days, exchange=exchange)
+    c15m = download_ohlcv(resolved, "15m", days=days, exchange=exchange)
     if len(c1h) < 80:
         return {"error": f"Data kurang: {len(c1h)} candles. Minimal 80."}
+    if len(c15m) < 80:
+        # Fallback: resample dari 1H jika 15M tidak tersedia
+        c15m = resample_to_tf(c1h, "15m")
+        log.warning(f"Signal BT: 15M tidak tersedia untuk {resolved}, fallback resample dari 1H")
 
     c4h = resample_to_tf(c1h, "4h")
 
@@ -1045,7 +1050,7 @@ def run_signal_backtest(symbol: str, days: int = 30,
         cur = c1h[i]
         h1  = c1h[max(0, i - 100):i + 1]
         h4  = [c for c in c4h if c["time"] <= cur["time"]][-50:]
-        h15 = h1  # 15m proxy
+        h15 = [c for c in c15m if c["time"] <= cur["time"]][-100:]
 
         if len(h4) < 20 or len(h1) < 20:
             continue

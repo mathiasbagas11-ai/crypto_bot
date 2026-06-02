@@ -151,10 +151,12 @@ try:
         handle_decisions_command, handle_evolve_command,
         handle_addlesson_command, get_performance_stats_text,
         analyze_signal_outcomes_daily,
+        get_dynamic_thresholds,
     )
     LEARNING_MODULE = True
 except ImportError:
     LEARNING_MODULE = False
+    get_dynamic_thresholds = lambda: {}
     logging.getLogger("v11").warning("learning_engine.py tidak ditemukan — fitur learning dinonaktifkan")
 
 # ── v11: Trade Journal ────────────────────────
@@ -1807,6 +1809,12 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif cvd_pct < -1:
         score_pts -= 1
         reasons.append(f"🟡 CVD: slight outflow {cvd_pct:+.1f}%")
+    # CVD dead-zone: nilai antara -1% s/d 0% bukan benar-benar netral —
+    # ada net sell kecil yang bisa dioverride VWAP. Kasih drag -1 supaya
+    # VWAP saja tidak cukup untuk flip bias ke INFLOW.
+    elif -1.0 < cvd_pct < 0:
+        score_pts -= 1
+        reasons.append(f"⚠️ CVD dead-zone: {cvd_pct:+.1f}% (net sell tipis, drag applied)")
 
     # CVD slope (recent momentum)
     if cvd_slope > 0 and last5_buy / max(last5_sell, 0.001) > 1.3:
@@ -1901,7 +1909,7 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif ltf_score >= 57:
         result["bias"]     = "INFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score >= 50:
+    elif ltf_score >= 55:
         result["bias"]     = "INFLOW"
         result["strength"] = "WEAK"
     elif ltf_score <= 30:
@@ -1910,10 +1918,11 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     elif ltf_score <= 43:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score <= 50:
+    elif ltf_score <= 45:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "WEAK"
     else:
+        # Dead zone 46–54: score terlalu tipis untuk arah apapun
         result["bias"]     = "NEUTRAL"
         result["strength"] = "WEAK"
 
@@ -7656,17 +7665,41 @@ def _save_gate_state(state: dict):
 def _gate_cooldown_ok(symbol: str, state: dict) -> bool:
     """Cek apakah symbol masih dalam cooldown setelah signal dikirim."""
     sent = state.get(_SENT_SIGNALS_KEY, {})
-    last_ts = sent.get(symbol)
-    if not last_ts:
+    entry = sent.get(symbol)
+    if not entry:
         return True
+    # Backwards-compat: entry lama adalah string ISO, entry baru adalah dict
+    last_ts = entry["ts"] if isinstance(entry, dict) else entry
     last = datetime.fromisoformat(last_ts)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 3600
     return elapsed >= GATE_COOLDOWN_HOURS
 
 
-def _gate_mark_sent(symbol: str, state: dict):
-    """Tandai symbol sebagai sudah dikirim signal."""
-    state.setdefault(_SENT_SIGNALS_KEY, {})[symbol] = datetime.now(timezone.utc).isoformat()
+def _gate_mark_sent(symbol: str, state: dict, direction: str = ""):
+    """Tandai symbol sebagai sudah dikirim signal, simpan direction untuk persistence check."""
+    state.setdefault(_SENT_SIGNALS_KEY, {})[symbol] = {
+        "ts":        datetime.now(timezone.utc).isoformat(),
+        "direction": direction,
+    }
+
+
+def _get_persistence_bonus(symbol: str, direction: str, state: dict) -> tuple[int, str]:
+    """
+    Cek apakah signal sama dikirim di scan sebelumnya.
+    Returns (bonus_pts, reason_str):
+      +5  jika direction sama (signal konsisten → reward)
+      -5  jika direction flip (whipsaw → penalty)
+       0  jika tidak ada history
+    """
+    entry = state.get(_SENT_SIGNALS_KEY, {}).get(symbol)
+    if not isinstance(entry, dict):
+        return 0, ""
+    prev_dir = entry.get("direction", "")
+    if not prev_dir:
+        return 0, ""
+    if prev_dir == direction:
+        return 5, f"Persistent {direction} signal +5"
+    return -5, f"Direction flip {prev_dir}→{direction} -5"
 
 
 def _check_money_flow_gate(tf_4h: dict, tf_1h: dict, tf_15m: dict, direction: str) -> tuple[bool, str]:
@@ -8046,8 +8079,15 @@ def run_gated_scan():
         _check_heartbeat(state)
         return
 
-    signals_sent   = 0
-    watchlist_new  = {}
+    signals_sent      = 0
+    watchlist_new     = {}
+    _scan_sent_syms   = set()   # dedup: satu symbol max 1 signal per scan
+
+    # Load dynamic thresholds dari learning engine (di-update tiap /evolve)
+    _dyn = get_dynamic_thresholds()
+    _gate_min = int(_dyn.get("PREPUMP_ALERT_THRESHOLD", GATE_MASTER_SCORE_MIN))
+    if _gate_min != GATE_MASTER_SCORE_MIN:
+        log.info(f"🧬 Dynamic threshold aktif: GATE_MASTER_SCORE_MIN → {_gate_min}")
 
     # ── 2. Evaluate each coin through all gates ───
     for coin in coins:
@@ -8166,11 +8206,18 @@ def run_gated_scan():
             bonus = min(40, (pd_score // 4) + (sc_score // 5) + (sw_score // 6))
             raw_master = min(100, conf_score + bonus)
 
-        gate_results["master_score"] = raw_master >= GATE_MASTER_SCORE_MIN
+        # Signal persistence: +5 jika arah sama dengan scan lalu, -5 jika flip
+        _signal_dir_str = "LONG" if pump_dir else "SHORT"
+        pers_bonus, pers_reason = _get_persistence_bonus(analysis_sym, _signal_dir_str, state)
+        if pers_bonus != 0:
+            raw_master = max(0, min(100, raw_master + pers_bonus))
+            (gate_reasons if pers_bonus > 0 else failed_reasons).append(pers_reason)
+
+        gate_results["master_score"] = raw_master >= _gate_min
         if gate_results["master_score"]:
-            gate_reasons.append(f"Master score {raw_master}/100 ≥ {GATE_MASTER_SCORE_MIN}")
+            gate_reasons.append(f"Master score {raw_master}/100 ≥ {_gate_min}")
         else:
-            failed_reasons.append(f"Master score {raw_master} < {GATE_MASTER_SCORE_MIN}")
+            failed_reasons.append(f"Master score {raw_master} < {_gate_min}")
 
         # GATE 2: Money Flow
         mf_pass, mf_reason = _check_money_flow_gate(tf_4h, tf_1h, tf_15m, direction)
@@ -8319,8 +8366,14 @@ def run_gated_scan():
                 except Exception as _ai_e:
                     log.debug(f"Groq fallback error: {_ai_e}")
 
+            # Dedup: jangan kirim symbol yang sama dua kali dalam satu scan
+            if analysis_sym in _scan_sent_syms:
+                log.info(f"⏭️ Dedup skip {analysis_sym} — sudah dikirim di scan ini")
+                continue
+            _scan_sent_syms.add(analysis_sym)
+
             send_signal(msg)
-            _gate_mark_sent(analysis_sym, state)
+            _gate_mark_sent(analysis_sym, state, direction=_signal_direction)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
 
