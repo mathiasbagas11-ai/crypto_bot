@@ -878,6 +878,14 @@ def generate_confirmed_signal(
         except Exception as _ds_e:
             log.warning(f"DeepSeek review error {symbol}: {_ds_e}")
 
+    # Guard: pastikan TP/SL di sisi benar (terutama setelah override AI) sebelum
+    # sinyal dibangun/dikirim/di-track — cegah sinyal malformed (TP sisi salah).
+    try:
+        from crypto_screening_bot_v13 import _sanitize_trade_levels
+        trade = _sanitize_trade_levels(trade, direction)
+    except Exception as _san_e:
+        log.debug(f"sanitize trade levels error: {_san_e}")
+
     # 6. Set cooldown
     _set_signal_cooldown(symbol)
 

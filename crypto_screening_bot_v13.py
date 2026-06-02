@@ -4598,6 +4598,72 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
     return result
 
 
+def _sanitize_trade_levels(trade: dict, direction: str) -> dict:
+    """Pastikan TP/SL ada di sisi yang BENAR relatif entry, perbaiki kalau tidak.
+
+    Level struktural (atau hasil override AI di deepseek_signal_review) kadang
+    menghasilkan TP di sisi salah dari entry — mis. LONG dengan TP < entry —
+    yang bikin sinyal langsung "kena TP" tapi rugi. Helper ini memperbaiki
+    level yang salah-sisi via fallback R:R, supaya:
+      LONG : sl < entry < tp1 < tp2
+      SHORT: tp2 < tp1 < entry < sl
+    Mutasi & kembalikan dict yang sama. Kalau entry tidak valid, dibiarkan.
+    """
+    if not isinstance(trade, dict):
+        return trade
+    try:
+        entry = float(trade.get("entry") or 0)
+    except (TypeError, ValueError):
+        return trade
+    if entry <= 0:
+        return trade
+
+    is_long = direction in ("LONG", "PUMP")
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    sl = _f(trade.get("sl"))
+    # SL salah-sisi atau hilang → set default 3% (jaga R:R tetap masuk akal).
+    if sl is None or (is_long and sl >= entry) or (not is_long and sl <= entry):
+        sl = round(entry * (0.97 if is_long else 1.03), 8)
+        trade["sl"] = sl
+        trade["sl_basis"] = (str(trade.get("sl_basis", "")) + " | repaired 3%").strip(" |")
+
+    risk = abs(entry - sl) or entry * 0.02
+
+    def _wrong_side(tp):
+        tp = _f(tp)
+        if tp is None or tp <= 0:
+            return True
+        return (is_long and tp <= entry) or (not is_long and tp >= entry)
+
+    if _wrong_side(trade.get("tp1")):
+        trade["tp1"] = round(entry + risk * 2.0, 8) if is_long else round(entry - risk * 2.0, 8)
+        trade["tp1_basis"] = "2R floor (repaired)"
+    if _wrong_side(trade.get("tp2")):
+        trade["tp2"] = round(entry + risk * 3.5, 8) if is_long else round(entry - risk * 3.5, 8)
+        trade["tp2_basis"] = "3.5R floor (repaired)"
+
+    # TP2 harus lebih jauh dari TP1.
+    tp1, tp2 = _f(trade["tp1"]), _f(trade["tp2"])
+    if is_long and tp2 <= tp1:
+        trade["tp2"] = round(entry + risk * 3.5, 8)
+    elif (not is_long) and tp2 >= tp1:
+        trade["tp2"] = round(entry - risk * 3.5, 8)
+
+    # Recompute R multiples & sinkron alias "tp".
+    if risk > 0:
+        trade["tp1_r"] = round(abs(_f(trade["tp1"]) - entry) / risk, 2)
+        trade["tp2_r"] = round(abs(_f(trade["tp2"]) - entry) / risk, 2)
+    if "tp" in trade:
+        trade["tp"] = trade["tp1"]
+    return trade
+
+
 def _fmt_zone(bottom: float, top: float) -> str:
     """Format zona entry sebagai range harga."""
     def _f(v):
@@ -8488,6 +8554,10 @@ def run_gated_scan():
                         raw_master = max(0, min(100, raw_master + ai_review["score_adj"]))
                 except Exception as _ds_e:
                     log.warning(f"DeepSeek review error {analysis_sym}: {_ds_e}")
+
+            # Guard: pastikan TP/SL di sisi benar (mis. setelah override AI)
+            # sebelum sinyal dikirim — cegah sinyal malformed sampai ke user.
+            trade = _sanitize_trade_levels(trade, _signal_direction)
 
             confidence_label = ("HIGH" if raw_master >= 85 else
                                 "MEDIUM" if raw_master >= 75 else "LOW")
