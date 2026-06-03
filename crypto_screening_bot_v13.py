@@ -7227,6 +7227,9 @@ def handle_help_command(chat_id: str):
         "💬 *Reply* ke pesan bot mana aja → diskusi nyambung soal coin/sinyal itu\n"
         "   Lanjut ngobrol tanpa reply juga bisa; ketik `/done` kalau udah.\n"
         "   Bot bisa koreksi kamu, kamu bisa koreksi bot.\n"
+        "🪞 *Refleksi → lesson*: cerita hasil sinyal (mis. \"sinyal BNB tadi kena SL\")\n"
+        "   → bot rangkum pelajaran & tawarin simpan ke memori (ya/skip).\n"
+        "   Pelajaran yang disimpan dipakai pas bot bikin sinyal berikutnya.\n"
         "🎚️ `/style` — Lihat gaya trading yang dipelajari bot (hapus: `/style del 2`)\n"
         "   Insight dari diskusi disimpan setelah kamu konfirmasi (ya/skip).\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -7878,9 +7881,9 @@ def process_update(update: dict):
     elif JOURNAL_MODULE and is_in_wizard(chat_id):
         _thread(handle_journal_wizard_message, text, chat_id).start()
 
-    # v15: Jawaban ya/skip untuk usulan aturan gaya trading (prioritas)
+    # v15: Jawaban ya/skip untuk usulan aturan gaya trading / pelajaran (prioritas)
     elif (SIGNAL_CHAT_MODULE
-          and signal_chat.has_pending_rule(chat_id)
+          and signal_chat.has_pending(chat_id)
           and signal_chat.is_confirm_answer(text)):
         signal_chat.handle_confirm(text, chat_id, send_telegram)
 
@@ -7905,6 +7908,16 @@ def process_update(update: dict):
     # v15: Lanjutan diskusi aktif (tanpa reply, dalam window) → diskusi
     elif SIGNAL_CHAT_MODULE and signal_chat.is_discussion_active(chat_id):
         _thread(signal_chat.handle_followup, text, chat_id, _signal_chat_ai, send_telegram).start()
+
+    # v16: Free-form yang terdengar seperti refleksi hasil sinyal → diskusi reflektif
+    # (bisa menghasilkan lesson). Di-thread; kalau ternyata tanpa konteks sinyal,
+    # fallback ke /ask di dalam thread yang sama.
+    elif (SIGNAL_CHAT_MODULE and len(text) > 3
+          and signal_chat.looks_like_reflection(text)):
+        def _reflect_or_ask(t=text, c=chat_id):
+            if not signal_chat.handle_freeform(t, c, _signal_chat_ai, send_telegram):
+                handle_ask_command(t, c)
+        _thread(_reflect_or_ask).start()
 
     # Free-form question → ask
     elif len(text) > 3:
