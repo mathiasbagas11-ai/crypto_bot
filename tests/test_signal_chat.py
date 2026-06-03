@@ -284,6 +284,84 @@ def test_confirm_without_pending_not_handled(store):
     assert handled is False
 
 
+# ── reflection → lesson memory ───────────────────────────────────
+
+def test_parse_lesson_marker_extracted():
+    clean, lesson = sc.parse_lesson_suggestion(
+        "Iya bener, ini kena SL. [LESSON: jangan entry LONG pas funding ekstrem negatif]")
+    assert "[LESSON" not in clean
+    assert lesson == "jangan entry LONG pas funding ekstrem negatif"
+
+
+def test_parse_lesson_no_marker():
+    clean, lesson = sc.parse_lesson_suggestion("Cuma ngobrol biasa.")
+    assert clean == "Cuma ngobrol biasa."
+    assert lesson is None
+
+
+def test_style_and_lesson_markers_both_stripped():
+    raw = "Oke. [STYLE: suka retest] juga [LESSON: hindari TP kejauhan pas ranging]"
+    clean, rule = sc.parse_style_suggestion(raw)
+    clean, lesson = sc.parse_lesson_suggestion(clean)
+    assert rule == "suka retest"
+    assert lesson == "hindari TP kejauhan pas ranging"
+    assert "[STYLE" not in clean and "[LESSON" not in clean
+
+
+def test_looks_like_reflection_detects_outcome_talk():
+    assert sc.looks_like_reflection("sinyal BNB tadi kena SL") is True
+    assert sc.looks_like_reflection("harusnya TP nya jangan kejauhan") is True
+    assert sc.looks_like_reflection("apa itu order block?") is False
+
+
+def test_pending_lesson_state(store):
+    assert sc.has_pending("chatA") is False
+    sc.set_pending_lesson("chatA", "next time jangan begini")
+    assert sc.get_pending_lesson("chatA") == "next time jangan begini"
+    assert sc.has_pending_lesson("chatA") is True
+    assert sc.has_pending("chatA") is True
+
+
+def test_add_reflection_lesson_pushes_to_learning_engine(store, monkeypatch):
+    captured = {}
+    import learning_engine
+    monkeypatch.setattr(learning_engine, "add_manual_lesson",
+                        lambda rule, **k: captured.update({"rule": rule, **k}),
+                        raising=False)
+    ok = sc.add_reflection_lesson("jangan entry pas funding ekstrem",
+                                  symbol="BNBUSDT", direction="LONG")
+    assert ok is True
+    assert captured["rule"] == "jangan entry pas funding ekstrem"
+    assert captured["pinned"] is True          # feedback user → prioritas
+    assert captured["role"] is None            # ikut ke semua prompt
+    assert "reflection" in captured["tags"]
+    assert "bnbusdt" in captured["tags"] and "long" in captured["tags"]
+
+
+def test_confirm_yes_saves_lesson(store, monkeypatch):
+    captured = {}
+    import learning_engine
+    monkeypatch.setattr(learning_engine, "add_manual_lesson",
+                        lambda rule, **k: captured.update({"rule": rule}),
+                        raising=False)
+    sc.start_convo("chatA", None, {"symbol": "BNBUSDT", "direction": "LONG"})
+    sc.set_pending_lesson("chatA", "jangan entry pas funding ekstrem")
+    sends = []
+    handled = sc.handle_confirm("ya", "chatA", lambda m, c=None: sends.append(m))
+    assert handled is True
+    assert sc.get_pending_lesson("chatA") is None
+    assert captured["rule"] == "jangan entry pas funding ekstrem"
+    assert any("memori" in m for m in sends)
+
+
+def test_confirm_skip_discards_lesson(store):
+    sc.set_pending_lesson("chatA", "jangan begini")
+    sends = []
+    handled = sc.handle_confirm("skip", "chatA", lambda m, c=None: sends.append(m))
+    assert handled is True
+    assert sc.get_pending_lesson("chatA") is None
+
+
 # ── style engine: parse_style_to_prefs ───────────────────────────
 
 @pytest.mark.parametrize("rule,key,expected", [

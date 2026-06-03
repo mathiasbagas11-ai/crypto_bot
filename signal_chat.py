@@ -266,6 +266,17 @@ _STYLE_INSTRUCTION = (
 )
 
 
+_LESSON_INSTRUCTION = (
+    "Kalau user menceritakan HASIL atau PELAJARAN dari sebuah sinyal/trade "
+    "(mis. 'sinyal ini kena SL', 'harusnya jangan entry pas funding ekstrem', "
+    "'TP-nya kejauhan jadi gak kena'), rangkum jadi SATU pelajaran ringkas yang "
+    "ACTIONABLE untuk bikin sinyal berikutnya — fokus ke 'lain kali sebaiknya...'. "
+    "Tulis di baris terpisah dengan format persis: [LESSON: <pelajaran singkat>]. "
+    "Sertakan konteks penting (symbol/arah/kondisi) kalau relevan. "
+    "Kalau obrolan ini bukan soal hasil/pelajaran konkret, jangan tulis baris itu."
+)
+
+
 _PERSONA = (
     "Lo asisten trading crypto pribadi-nya user — ngobrol santai kayak temen yang jago "
     "trading, BUKAN textbook. Pakai Bahasa Indonesia santai (boleh 'gue/lo'), langsung ke "
@@ -308,7 +319,8 @@ def build_discussion_prompt(signal: dict, history: list, user_msg: str,
         f"=== GAYA TRADING USER (tersimpan) ===\n{style_txt}\n\n"
         f"=== RIWAYAT DISKUSI ===\n{convo}\n\n"
         f"=== PESAN USER SEKARANG ===\n{user_msg}\n\n"
-        f"{_STYLE_INSTRUCTION}"
+        f"{_STYLE_INSTRUCTION}\n\n"
+        f"{_LESSON_INSTRUCTION}"
     )
 
 
@@ -325,7 +337,8 @@ def build_personalize_prompt(signal: dict, style_rules: list) -> str:
     )
 
 
-_STYLE_MARKER = re.compile(r"\[STYLE:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+_STYLE_MARKER  = re.compile(r"\[STYLE:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
+_LESSON_MARKER = re.compile(r"\[LESSON:\s*(.+?)\]", re.IGNORECASE | re.DOTALL)
 
 
 def parse_style_suggestion(ai_text: str) -> tuple:
@@ -341,6 +354,21 @@ def parse_style_suggestion(ai_text: str) -> tuple:
     rule = m.group(1).strip()
     clean = _STYLE_MARKER.sub("", ai_text).strip()
     return clean, (rule or None)
+
+
+def parse_lesson_suggestion(ai_text: str) -> tuple:
+    """
+    Pisahkan marker [LESSON: ...] dari teks AI (refleksi hasil sinyal → memori lesson).
+    Return (clean_text, lesson_or_None).
+    """
+    if not ai_text:
+        return "", None
+    m = _LESSON_MARKER.search(ai_text)
+    if not m:
+        return ai_text.strip(), None
+    lesson = m.group(1).strip()
+    clean = _LESSON_MARKER.sub("", ai_text).strip()
+    return clean, (lesson or None)
 
 
 # ─────────────────────────────────────────────
@@ -430,6 +458,26 @@ def has_pending_rule(chat_id: str) -> bool:
     return bool(get_pending_rule(chat_id))
 
 
+def set_pending_lesson(chat_id: str, lesson: Optional[str]) -> None:
+    data = _load_convos()
+    convo = data.setdefault(str(chat_id), {"history": [], "pending_rule": None})
+    convo["pending_lesson"] = lesson
+    _save_convos(data)
+
+
+def get_pending_lesson(chat_id: str) -> Optional[str]:
+    return _get_convo(chat_id).get("pending_lesson")
+
+
+def has_pending_lesson(chat_id: str) -> bool:
+    return bool(get_pending_lesson(chat_id))
+
+
+def has_pending(chat_id: str) -> bool:
+    """True kalau ada usulan (gaya ATAU lesson) yang menunggu konfirmasi user."""
+    return has_pending_rule(chat_id) or has_pending_lesson(chat_id)
+
+
 def is_confirm_answer(text: str) -> bool:
     return text.strip().lower() in (_YES | _NO)
 
@@ -471,6 +519,39 @@ def add_style_rule(rule: str, source: str = "discussion") -> bool:
     except Exception:
         pass
     return True
+
+
+def add_reflection_lesson(lesson: str, symbol: str = None, direction: str = None,
+                          source: str = "chat") -> bool:
+    """
+    Simpan pelajaran hasil refleksi obrolan ke MEMORI LESSON (learning_engine),
+    sehingga ikut di-inject ke prompt pembuatan sinyal berikutnya.
+    Return True kalau tersimpan.
+    """
+    lesson = (lesson or "").strip()
+    if not lesson:
+        return False
+    try:
+        import learning_engine
+    except Exception as e:
+        log.warning(f"add_reflection_lesson: learning_engine tidak tersedia: {e}")
+        return False
+
+    tags = ["reflection", "user_feedback", source]
+    if symbol:
+        tags.append(str(symbol).lower())
+    if direction:
+        tags.append(str(direction).lower())
+
+    try:
+        # role=None → lesson ini ikut ke SEMUA prompt (termasuk screener/signal gen).
+        # pinned=True → prioritas tinggi karena ini feedback langsung dari user.
+        learning_engine.add_manual_lesson(lesson, tags=tags, pinned=True, role=None)
+        log.info(f"📚 Reflection lesson saved from chat: {lesson[:70]}")
+        return True
+    except Exception as e:
+        log.warning(f"add_reflection_lesson error: {e}")
+        return False
 
 
 def remove_style_rule(index: int) -> Optional[str]:
@@ -722,6 +803,7 @@ def _discuss(ctx: dict, user_msg: str, chat_id: str,
         return
 
     clean, rule = parse_style_suggestion(ai_raw)
+    clean, lesson = parse_lesson_suggestion(clean)
     append_turn(chat_id, "bot", clean)
 
     # Penjelasan deterministik hanya di awal & hanya kalau data sinyal lengkap
@@ -741,6 +823,16 @@ def _discuss(ctx: dict, user_msg: str, chat_id: str,
         send_fn(
             f"📝 Gue nangkep gaya trading lo:\n<b>“{rule}”</b>\n\n"
             f"Simpan biar sinyal berikutnya nyesuaiin? Balas <b>ya</b> / <b>skip</b>.",
+            chat_id,
+        )
+
+    # Refleksi hasil sinyal → usul simpan ke memori lesson (feed ke pembuatan sinyal)
+    if lesson:
+        set_pending_lesson(chat_id, lesson)
+        send_fn(
+            f"📚 Gue catat pelajaran ini:\n<b>“{lesson}”</b>\n\n"
+            f"Masukin ke memori biar dipakai pas bikin sinyal berikutnya? "
+            f"Balas <b>ya</b> / <b>skip</b>.",
             chat_id,
         )
 
@@ -774,24 +866,83 @@ def handle_followup(user_msg: str, chat_id: str,
     return True
 
 
+# Kata kunci yang menandakan user lagi cerita HASIL/REFLEKSI sebuah sinyal/trade.
+_REFLECTION_HINTS = re.compile(
+    r"\b(sl|stop ?loss|tp|take ?profit|cut ?loss|kena|nyangkut|loss|rugi|cuan|profit|"
+    r"likuidasi|liq|entry|exit|sinyal\w*|signal|harusnya|mestinya|kejauhan|"
+    r"kecepetan|telat|salah|gagal|meleset|pelajaran|lesson)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_reflection(text: str) -> bool:
+    """Heuristik: apakah pesan free-form ini soal hasil/pelajaran sinyal?"""
+    return bool(text and _REFLECTION_HINTS.search(text))
+
+
+def handle_freeform(user_msg: str, chat_id: str,
+                    ai_fn: Callable[[str], str],
+                    send_fn: Callable[..., None]) -> bool:
+    """
+    Tangani pesan free-form sebagai diskusi/refleksi yang bisa menghasilkan lesson.
+    Konteks di-resolve dari coin yang disebut; kalau tidak ada coin tapi pesannya
+    terdengar seperti refleksi hasil sinyal, pakai sinyal terakhir sebagai konteks.
+    Return False kalau tidak ada konteks/bukan refleksi (biar bot fallback ke /ask).
+    """
+    if not looks_like_reflection(user_msg):
+        return False
+    ctx = _resolve_context(None, user_msg, None)
+    if not ctx:
+        ctx = find_latest_signal()
+    if not ctx:
+        return False
+    _discuss(ctx, user_msg, chat_id, ai_fn, send_fn)
+    return True
+
+
 def handle_confirm(text: str, chat_id: str, send_fn: Callable[..., None]) -> bool:
-    """Tangani jawaban ya/skip untuk pending rule. Return True kalau ditangani."""
-    pending = get_pending_rule(chat_id)
-    if not pending:
+    """
+    Tangani jawaban ya/skip untuk usulan yang pending (gaya trading dan/atau
+    pelajaran refleksi). Kalau dua-duanya pending, satu jawaban berlaku untuk
+    keduanya. Return True kalau ditangani.
+    """
+    pending_rule   = get_pending_rule(chat_id)
+    pending_lesson = get_pending_lesson(chat_id)
+    if not pending_rule and not pending_lesson:
         return False
     if not is_confirm_answer(text):
         return False
 
     set_pending_rule(chat_id, None)
-    if _is_yes(text):
-        added = add_style_rule(pending, source="discussion")
+    set_pending_lesson(chat_id, None)
+
+    if not _is_yes(text):
+        send_fn("👍 Oke, nggak disimpan.", chat_id)
+        return True
+
+    ctx = get_context(chat_id) or {}
+
+    if pending_rule:
+        added = add_style_rule(pending_rule, source="discussion")
         if added:
-            send_fn(f"✅ Tersimpan: <b>“{pending}”</b>\n"
-                    f"Sinyal berikutnya bakal menyesuaikan gaya ini. Lihat semua: /style", chat_id)
+            send_fn(f"✅ Tersimpan (gaya): <b>“{pending_rule}”</b>\n"
+                    f"Sinyal berikutnya bakal menyesuaikan. Lihat semua: /style", chat_id)
         else:
             send_fn("ℹ️ Aturan itu sudah ada sebelumnya — tidak digandakan.", chat_id)
-    else:
-        send_fn("👍 Oke, nggak disimpan.", chat_id)
+
+    if pending_lesson:
+        saved = add_reflection_lesson(
+            pending_lesson,
+            symbol=ctx.get("symbol"),
+            direction=ctx.get("direction"),
+            source="chat",
+        )
+        if saved:
+            send_fn(f"✅ Pelajaran masuk memori: <b>“{pending_lesson}”</b>\n"
+                    f"Bakal dipakai pas bot bikin sinyal berikutnya. Lihat semua: /lessons", chat_id)
+        else:
+            send_fn("⚠️ Gagal simpan pelajaran (learning engine tidak tersedia).", chat_id)
+
     return True
 
 
