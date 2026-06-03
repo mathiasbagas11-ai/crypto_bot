@@ -34,6 +34,25 @@ def test_no_signals_returns_none_direction():
     assert r["confidence"] == "LOW"
 
 
+def test_coinbase_premium_contributes_to_master_score(monkeypatch):
+    # Regression: dulu blok CB premium memakai `direction` sebelum di-assign →
+    # UnboundLocalError yang ketelan except → kontribusi institutional tidak
+    # pernah masuk. Sekarang harus benar-benar menambah weighted_long.
+    monkeypatch.setattr(
+        coinbase_premium, "get_premium_master_contribution",
+        lambda d: {"weighted_long_add": 8.0, "weighted_short_add": 0.0,
+                   "reason": "CB test", "premium_pct": 0.2},
+        raising=False)
+    r = cs.compute_master_score(
+        "BTCUSDT",
+        confluence={"direction": "PUMP", "score": 80, "level": "STRONG"},
+        prepump={}, predump={}, scalp={}, swing={}, oi_data={},
+    )
+    # confluence 80 → w=24 long; CB premium +8 → weighted_long = 32.
+    assert r["direction"] == "LONG"
+    assert r["weighted_long"] == pytest.approx(32.0)
+
+
 def test_strong_aligned_long_is_high_conviction():
     # confluence 80 (w=24) + prepump 70 (w=17.5) + scalp 65 (w=6.5) = 48 long.
     r = cs.compute_master_score(

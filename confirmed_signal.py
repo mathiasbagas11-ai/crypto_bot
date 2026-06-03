@@ -359,9 +359,20 @@ def compute_master_score(
         pass
 
     # ── 6c. Coinbase Premium (Institutional Bias) ───────────────────────
+    # NOTE: `direction` final baru dihitung di blok #7 di bawah. Pakai provisional
+    # direction dari weighted_long/short saat ini supaya kontribusi CB tetap ikut
+    # menentukan arah final. (Sebelumnya blok ini memakai `direction` yang belum
+    # di-assign → UnboundLocalError yang ketelan except → institutional bias tidak
+    # pernah berkontribusi sama sekali.)
     try:
         from coinbase_premium import get_premium_master_contribution
-        cb = get_premium_master_contribution(direction if direction != "NONE" else "LONG")
+        if weighted_long > weighted_short:
+            prov_dir = "LONG"
+        elif weighted_short > weighted_long:
+            prov_dir = "SHORT"
+        else:
+            prov_dir = "NONE"
+        cb = get_premium_master_contribution(prov_dir if prov_dir != "NONE" else "LONG")
         if cb.get("weighted_long_add", 0) > 0:
             weighted_long += cb["weighted_long_add"]
             if cb.get("reason"):
@@ -374,11 +385,11 @@ def compute_master_score(
         p_val = cb.get("premium_pct")
         if p_val is not None:
             if abs(p_val) > 0.15:
-                if p_val > 0 and direction == "SHORT":
+                if p_val > 0 and prov_dir == "SHORT":
                     conflict_r.append(
                         f"🏦 CB Premium {p_val:+.4f}% STRONGLY POSITIVE — SHORT melawan institutional"
                     )
-                elif p_val < 0 and direction == "LONG":
+                elif p_val < 0 and prov_dir == "LONG":
                     conflict_r.append(
                         f"🏦 CB Premium {p_val:+.4f}% STRONGLY NEGATIVE — LONG melawan institutional"
                     )
@@ -819,6 +830,13 @@ def generate_confirmed_signal(
                         _news_ctx = get_structured_news_for_ai(symbol)
                     except Exception:
                         pass
+                # Lessons dari sinyal lalu (closed-loop self-learning)
+                _learn_ctx = None
+                try:
+                    from learning_engine import build_ai_context_block
+                    _learn_ctx = build_ai_context_block("SCREENER") or None
+                except Exception:
+                    _learn_ctx = None
                 ai_review = deepseek_signal_review(
                     symbol       = symbol,
                     direction    = direction,
@@ -829,6 +847,7 @@ def generate_confirmed_signal(
                     tf_4h        = tf_4h, tf_1h = tf_1h, tf_15m = tf_15m,
                     news_context = _news_ctx,
                     signal_type  = "CONFIRMED",
+                    learning_context = _learn_ctx,
                 )
                 if ai_review:
                     # SKIP verdict → batalkan sinyal
@@ -858,6 +877,14 @@ def generate_confirmed_signal(
                         master["ai_adjusted"] = ai_review.get("was_adjusted", False)
         except Exception as _ds_e:
             log.warning(f"DeepSeek review error {symbol}: {_ds_e}")
+
+    # Guard: pastikan TP/SL di sisi benar (terutama setelah override AI) sebelum
+    # sinyal dibangun/dikirim/di-track — cegah sinyal malformed (TP sisi salah).
+    try:
+        from crypto_screening_bot_v13 import _sanitize_trade_levels
+        trade = _sanitize_trade_levels(trade, direction)
+    except Exception as _san_e:
+        log.debug(f"sanitize trade levels error: {_san_e}")
 
     # 6. Set cooldown
     _set_signal_cooldown(symbol)
@@ -919,8 +946,10 @@ def save_signal_bt_cache(symbol: str, stats: dict):
             "avg_score":    stats.get("avg_score", 0),
             "cached_at":    datetime.now(timezone.utc).isoformat(),
         }
-        with open(SIGNAL_BT_CACHE_FILE, "w") as f:
+        tmp = SIGNAL_BT_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(cache, f, indent=2)
+        os.replace(tmp, SIGNAL_BT_CACHE_FILE)   # atomic
     except Exception as e:
         log.debug(f"Signal BT cache save error: {e}")
 
@@ -936,8 +965,10 @@ def _save_confirmed_signal(signal: dict):
         history.append(to_save)
         if len(history) > 200:
             history = history[-200:]
-        with open(CONFIRMED_SIGNAL_FILE, "w") as f:
+        tmp = CONFIRMED_SIGNAL_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(history, f, indent=2)
+        os.replace(tmp, CONFIRMED_SIGNAL_FILE)   # atomic
     except Exception as e:
         log.warning(f"Save confirmed signal error: {e}")
 

@@ -4,6 +4,7 @@ __pycache__/
 *.pyd
 .env
 *.enc
+.encryption_key
 
 # Test artifacts
 .pytest_cache/

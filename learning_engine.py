@@ -31,7 +31,11 @@ LESSONS_FILE     = "lessons.json"
 DECISION_LOG_FILE = "decision_log.json"
 
 # Threshold evolution
-MIN_EVOLVE_POSITIONS = 5    # minimal signal history sebelum evolve
+# Sampel minimal dinaikkan supaya tidak overfit: beberapa kekalahan sial tidak
+# boleh permanen menaikkan gate entry yang dibaca screener live.
+MIN_EVOLVE_POSITIONS = 30   # minimal total closed signals sebelum evolve
+MIN_LOSERS_PER_TYPE  = 8    # minimal loser per signal_type sebelum adjust threshold-nya
+EVOLVE_INTERVAL      = 10    # jalankan auto-evolve tiap +N closed signals baru
 MAX_CHANGE_PER_STEP  = 0.20 # max 20% perubahan per step
 MAX_MANUAL_LESSON_LEN = 400
 
@@ -64,8 +68,10 @@ def _load_lessons() -> dict:
 
 
 def _save_lessons(data: dict):
-    with open(LESSONS_FILE, "w") as f:
+    tmp = LESSONS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, LESSONS_FILE)   # atomic
 
 
 def _load_decision_log() -> list:
@@ -79,8 +85,10 @@ def _load_decision_log() -> list:
 
 
 def _save_decision_log(entries: list):
-    with open(DECISION_LOG_FILE, "w") as f:
+    tmp = DECISION_LOG_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(entries, f, indent=2)
+    os.replace(tmp, DECISION_LOG_FILE)   # atomic
 
 
 # ─────────────────────────────────────────────
@@ -212,10 +220,15 @@ def record_signal_outcome(
 
     _save_lessons(data)
 
-    # Auto-evolve tiap 5 closed signals
+    # Auto-evolve tiap +EVOLVE_INTERVAL closed signals BARU sejak evolve terakhir.
+    # (Dulu pakai `perf_count % MIN_EVOLVE_POSITIONS == 0` yang gampang ke-skip
+    # kalau ada path yang menambah >1 entry sekaligus.)
     perf_count = len(data["performance"])
-    if perf_count >= MIN_EVOLVE_POSITIONS and perf_count % MIN_EVOLVE_POSITIONS == 0:
+    last_evolve = data.get("_last_evolve_count", 0)
+    if perf_count >= MIN_EVOLVE_POSITIONS and (perf_count - last_evolve) >= EVOLVE_INTERVAL:
         result = evolve_thresholds(data["performance"])
+        data["_last_evolve_count"] = perf_count
+        _save_lessons(data)
         if result and result.get("changes"):
             log.info(f"🧬 Auto-evolved thresholds: {result['changes']}")
 
@@ -511,8 +524,8 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     winners = [p for p in perf_data if p.get("pnl_pct", 0) > 0]
     losers  = [p for p in perf_data if p.get("pnl_pct", 0) < -3]
 
-    if len(winners) < 2 and len(losers) < 2:
-        return {"error": "Belum cukup data winner/loser untuk evolve"}
+    if len(losers) < MIN_LOSERS_PER_TYPE:
+        return {"error": f"Belum cukup loser untuk evolve (perlu {MIN_LOSERS_PER_TYPE}, baru {len(losers)})"}
 
     changes   = {}
     rationale = {}
@@ -521,7 +534,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     # Kalau banyak prepump signal dengan score rendah yang SL hit → naikkan threshold
     prepump_losers  = [p for p in losers  if p.get("signal_type") == "PREPUMP"]
     prepump_winners = [p for p in winners if p.get("signal_type") == "PREPUMP"]
-    if prepump_losers and len(prepump_losers) >= 2:
+    if len(prepump_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in prepump_losers) / len(prepump_losers)
         if avg_loser_score < 75:
             new_thresh = min(85, round(avg_loser_score + 5))
@@ -532,7 +545,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
 
     # ── 2. PREDUMP_ALERT_THRESHOLD ─────────────────────────────
     predump_losers = [p for p in losers if p.get("signal_type") == "PREDUMP"]
-    if predump_losers and len(predump_losers) >= 2:
+    if len(predump_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in predump_losers) / len(predump_losers)
         if avg_loser_score < 75:
             new_thresh = min(85, round(avg_loser_score + 5))
@@ -544,7 +557,7 @@ def evolve_thresholds(perf_data: list = None) -> Optional[dict]:
     # ── 3. SCALP_MIN_SCORE ──────────────────────────────────────
     scalp_losers  = [p for p in losers  if p.get("signal_type") == "SCALP"]
     scalp_winners = [p for p in winners if p.get("signal_type") == "SCALP"]
-    if scalp_losers and len(scalp_losers) >= 2:
+    if len(scalp_losers) >= MIN_LOSERS_PER_TYPE:
         avg_loser_score = sum(p.get("score", 0) for p in scalp_losers) / len(scalp_losers)
         avg_win_score   = sum(p.get("score", 0) for p in scalp_winners) / max(1, len(scalp_winners))
         if avg_loser_score < avg_win_score - 10:
@@ -589,28 +602,41 @@ def _write_dynamic_thresholds(changes: dict):
                 existing = json.load(f)
         existing.update({k: v for k, v in changes.items() if not k.startswith("_")})
         existing["_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(DYNAMIC_THRESHOLDS_FILE, "w") as f:
+        tmp = DYNAMIC_THRESHOLDS_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(existing, f, indent=2)
+        os.replace(tmp, DYNAMIC_THRESHOLDS_FILE)   # atomic
+        # Invalidate cache supaya screener langsung pakai nilai baru.
+        _dyn_cache["ts"] = 0.0
         log.info(f"🧬 dynamic_thresholds.json diupdate: {list(changes.keys())}")
     except Exception as e:
         log.warning(f"Gagal tulis dynamic_thresholds: {e}")
 
 
+_dyn_cache = {"data": None, "ts": 0.0}
+_DYN_TTL   = 30.0   # detik — file hanya berubah saat /evolve, jadi cache aman
+
+
 def get_dynamic_thresholds() -> dict:
     """
-    Baca threshold overrides dari dynamic_thresholds.json.
-    Mapping nama ke constant screener:
-      PREPUMP_ALERT_THRESHOLD → GATE_MASTER_SCORE_MIN (global floor)
-      SCALP_MIN_SCORE         → SCALP_MIN_SCORE_OVERRIDE
-    Returns empty dict jika file tidak ada atau error.
+    Baca threshold overrides dari dynamic_thresholds.json (cached, TTL 30s).
+    Keys yang dipakai screener: PREPUMP_ALERT_THRESHOLD, PREDUMP_ALERT_THRESHOLD,
+    SCALP_MIN_SCORE. Returns empty dict jika file tidak ada atau error.
     """
+    import time as _t
+    now = _t.time()
+    if _dyn_cache["data"] is not None and (now - _dyn_cache["ts"]) < _DYN_TTL:
+        return _dyn_cache["data"]
+    data = {}
     try:
-        if not os.path.exists(DYNAMIC_THRESHOLDS_FILE):
-            return {}
-        with open(DYNAMIC_THRESHOLDS_FILE) as f:
-            return json.load(f)
+        if os.path.exists(DYNAMIC_THRESHOLDS_FILE):
+            with open(DYNAMIC_THRESHOLDS_FILE) as f:
+                data = json.load(f)
     except Exception:
-        return {}
+        data = {}
+    _dyn_cache["data"] = data
+    _dyn_cache["ts"]   = now
+    return data
 
 
 # ─────────────────────────────────────────────

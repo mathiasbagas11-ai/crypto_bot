@@ -156,16 +156,20 @@ def _ema(values: list, period: int) -> list:
 
 
 def _rsi(candles: list, period: int = 14) -> float:
+    # Wilder smoothing — konsisten dengan calculate_rsi() di screener &
+    # detect_rsi_divergence() (sebelumnya SMA atas period delta terakhir).
     if len(candles) < period + 1:
         return 50.0
     closes = [c["close"] for c in candles]
-    gains = losses = 0.0
-    for i in range(-period, 0):
-        d = closes[i] - closes[i - 1]
-        if d > 0: gains += d
-        else:     losses -= d
-    avg_gain = gains / period
-    avg_loss = losses / period
+    gains  = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    if len(gains) < period:
+        return 50.0
+    avg_gain = sum(gains[:period]) / period     # seed = SMA pertama
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss

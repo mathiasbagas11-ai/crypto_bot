@@ -26,6 +26,7 @@ SLIPPAGE        = 0.0005
 DEFAULT_DAYS    = 30
 DEFAULT_STAKE   = 100.0
 BT_RESULTS_FILE = "backtest_results.json"
+PF_NO_LOSS      = 99.0   # sentinel finit untuk profit factor saat tidak ada loss
 
 # ── Multi-exchange support ────────────────────
 try:
@@ -612,6 +613,10 @@ def run_backtest(symbol: str, strategy: str = "scalp",
 
     sig_tf = cfg["signal_tf"]
     sig_c  = c4h if sig_tf == "4h" else (c1h if sig_tf == "1h" else c15m)
+    # Durasi 1 bar sinyal (ms) — dipakai untuk mulai simulasi SETELAH bar
+    # sinyal benar-benar close (anti-lookahead pada timing entry).
+    _TF_MS    = {"5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
+    sig_tf_ms = _TF_MS.get(sig_tf, 0)
 
     log.info(f"  4H:{len(c4h)} 1H:{len(c1h)} 15M:{len(c15m)} trade_tf:{len(trade_candles)}")
 
@@ -654,9 +659,13 @@ def run_backtest(symbol: str, strategy: str = "scalp",
         )
         open_trade.multi_ind = mi
 
-        tidx = next((j for j, tc in enumerate(trade_candles) if tc["time"] >= cur["time"]), None)
+        # Entry difill di close bar sinyal (cur["close"]). Simulasi SL/TP mulai
+        # dari trade candle pertama SETELAH bar sinyal close — bukan dari awal
+        # bar yang harganya (close) belum diketahui saat itu (lookahead bias).
+        tidx = next((j for j, tc in enumerate(trade_candles)
+                     if tc["time"] >= cur["time"] + sig_tf_ms), None)
         if tidx is not None:
-            open_trade = _simulate_trade(open_trade, trade_candles[tidx + 1:], cfg["max_hold_candles"])
+            open_trade = _simulate_trade(open_trade, trade_candles[tidx:], cfg["max_hold_candles"])
 
         trades.append(open_trade)
         open_trade = None
@@ -694,7 +703,9 @@ def _calc_stats(trades: list, days: int, stake: float, symbol: str, strategy: st
     wr  = len(wins) / len(trades) * 100
     gp  = sum(p for p in pnl_u if p > 0)
     gl  = abs(sum(p for p in pnl_u if p < 0))
-    pf  = gp / gl if gl > 0 else 999.0
+    # PF tanpa loss tidak terdefinisi (∞). Pakai sentinel finit 99.0 (bukan 999
+    # magic) supaya tidak meledak di sorting/aggregat; 0 kalau tidak ada profit.
+    pf  = gp / gl if gl > 0 else (PF_NO_LOSS if gp > 0 else 0.0)
 
     # Equity & drawdown
     equity = [stake]
@@ -705,22 +716,35 @@ def _calc_stats(trades: list, days: int, stake: float, symbol: str, strategy: st
         ddp  = (peak - e) / peak * 100 if peak > 0 else 0
         if ddp > max_dd_p: max_dd_p, max_dd_u = ddp, peak - e
 
-    # Sharpe/Sortino daily
+    # Sharpe/Sortino — annualize atas hari KALENDER (termasuk hari tanpa trade).
+    # Sebelumnya hanya hari aktif yang dihitung → mean/std bias dan Sharpe
+    # ter-overstate untuk strategi yang jarang entry. Crypto 24/7 → faktor 365.
     daily = {}
     for t in trades:
         d = t.close_time.date().isoformat() if t.close_time else "x"
         daily[d] = daily.get(d, 0) + t.pnl_pct
-    dl = list(daily.values())
-    if len(dl) >= 2:
-        mu  = np.mean(dl); std = np.std(dl, ddof=1)
-        sharpe = mu / std * np.sqrt(252) if std > 0 else 0
-        down   = [r for r in dl if r < 0]
-        dstd   = np.std(down, ddof=1) if len(down) > 1 else (abs(down[0]) if down else 1)
-        sortino = mu / dstd * np.sqrt(252) if dstd > 0 else sharpe
+    active = list(daily.values())
+    n_days = max(days, len(active))
+    series = active + [0.0] * max(0, n_days - len(active))   # pad hari nol
+    # Butuh cukup hari aktif supaya rasio bukan sekadar noise dari sampel kecil.
+    if len(active) >= 5 and len(series) >= 2:
+        mu  = np.mean(series); std = np.std(series, ddof=1)
+        sharpe = mu / std * np.sqrt(365) if std > 0 else 0
+        down   = [r for r in series if r < 0]
+        dstd   = np.std(down, ddof=1) if len(down) > 1 else (abs(down[0]) if down else 0)
+        sortino = mu / dstd * np.sqrt(365) if dstd > 0 else 0
     else:
         sharpe = sortino = 0
 
-    ann_ret = (sum(pnl_p) * 100 / days) * 365 if days > 0 else 0
+    # Annualized return: compounding geometris dari equity curve (bukan
+    # ekstrapolasi linear sum(pnl)×365 yang mengabaikan compounding & jumlah trade).
+    if days > 0 and equity[0] > 0 and equity[-1] > 0:
+        total_mult = equity[-1] / equity[0]
+        ann_ret    = (total_mult ** (365.0 / days) - 1) * 100
+    elif days > 0 and equity[-1] <= 0:
+        ann_ret = -100.0
+    else:
+        ann_ret = 0
     calmar  = ann_ret / max_dd_p if max_dd_p > 0 else 0
     exp     = (wr / 100 * (np.mean(wins) * 100 if wins else 0)) + \
               ((1 - wr / 100) * (np.mean(loss) * 100 if loss else 0))
@@ -745,7 +769,7 @@ def _calc_stats(trades: list, days: int, stake: float, symbol: str, strategy: st
         "total_trades": len(trades), "win_rate": round(wr, 2),
         "total_pnl_pct": round(sum(pnl_p) * 100, 3),
         "total_pnl_usdt": round(sum(pnl_u), 4),
-        "profit_factor": round(min(pf, 999), 3),
+        "profit_factor": round(min(pf, PF_NO_LOSS), 3),
         "expectancy": round(exp, 3),
         "avg_win_pct": round(np.mean(wins) * 100, 3) if wins else 0,
         "avg_loss_pct": round(np.mean(loss) * 100, 3) if loss else 0,
@@ -1404,7 +1428,7 @@ def format_btstats_summary() -> str:
     for r in results: by_s.setdefault(r.get("strategy", "?"), []).append(r)
     lines.append("─── BY STRATEGY ───")
     for strat, runs in sorted(by_s.items()):
-        pf_list = [r["profit_factor"] for r in runs if r["profit_factor"] < 999]
+        pf_list = [r["profit_factor"] for r in runs if r["profit_factor"] < PF_NO_LOSS]
         lines += [
             f"📊 *{strat.upper()}* ({len(runs)} runs)",
             f"  Avg WR: {np.mean([r['win_rate'] for r in runs]):.0f}% | "

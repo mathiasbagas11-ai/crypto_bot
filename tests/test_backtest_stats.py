@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backtest_engine import LocalTrade, _calc_stats, TAKER_FEE, SLIPPAGE
+from backtest_engine import LocalTrade, _calc_stats, TAKER_FEE, SLIPPAGE, PF_NO_LOSS
 
 OPEN = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
 COST = TAKER_FEE + SLIPPAGE  # 0.0015 round-trip-side cost applied per leg
@@ -112,10 +112,11 @@ def test_calc_stats_known_set():
 
 
 def test_calc_stats_profit_factor_capped_when_no_losses():
+    # PF tanpa loss → sentinel finit PF_NO_LOSS (99.0), bukan 999 magic.
     trades = [FakeTrade(0.05, 5.0, day=1), FakeTrade(0.02, 2.0, day=2)]
     r = _calc_stats(trades, days=30, stake=100.0, symbol="BTC",
                     strategy="scalp", cfg={})
-    assert r["profit_factor"] == pytest.approx(999.0)
+    assert r["profit_factor"] == pytest.approx(PF_NO_LOSS)
 
 
 def test_calc_stats_trades_per_day():

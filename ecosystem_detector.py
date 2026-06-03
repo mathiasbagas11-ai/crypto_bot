@@ -414,7 +414,12 @@ def detect_season(force_refresh: bool = False) -> dict:
 
     # 6. Market phase
     btc_score  = all_scores.get("BTC", {}).get("score", 0)
-    avg_alt    = np.mean([s["score"] for eco_id, s in all_scores.items() if eco_id != "BTC"])
+    # Hanya hitung ekosistem yang punya coin ter-fetch (performers non-kosong).
+    # Ekosistem yang coin-nya tidak ketemu return score 0 dan kalau ikut dirata-
+    # rata akan menyeret avg_alt ke 0 → ALTSEASON/BEAR jadi sulit tercapai.
+    _alt_scores = [s["score"] for eco_id, s in all_scores.items()
+                   if eco_id != "BTC" and s.get("performers")]
+    avg_alt    = float(np.mean(_alt_scores)) if _alt_scores else 0.0
     eth_score  = all_scores.get("ETH", {}).get("score", 0)
     meme_score = all_scores.get("MEME", {}).get("score", 0)
 

@@ -183,10 +183,13 @@ def calc_position_size(entry_price: float, sl_price: float,
     """
     Hitung position size yang aman berdasarkan risk % dan SL jarak.
 
-    Formula:
+    Formula (risk-based sizing):
       risk_amount = capital * risk_pct / 100
       sl_distance_pct = |entry - sl| / entry * 100
-      position_size_usdt = risk_amount / (sl_distance_pct/100) / leverage
+      # Notional yang dibutuhkan supaya loss saat SL == risk_amount.
+      # Ini TIDAK bergantung leverage — leverage hanya menentukan margin.
+      position_size_usdt = risk_amount / (sl_distance_pct/100)
+      margin_required = position_size_usdt / leverage
       qty = position_size_usdt / entry_price
 
     Returns dict dengan semua kalkulasi.
@@ -205,17 +208,22 @@ def calc_position_size(entry_price: float, sl_price: float,
         return {"error": "SL terlalu dekat entry"}
 
     risk_amount_usdt     = capital * rsk_pct / 100
-    position_size_usdt   = (risk_amount_usdt / (sl_dist_pct / 100)) * leverage
+    # Notional berbasis-risk: loss saat SL == risk_amount, independen dari leverage.
+    position_size_usdt   = risk_amount_usdt / (sl_dist_pct / 100)
     qty                  = position_size_usdt / entry_price
 
-    # Safety: position size max 30% dari modal (hindari over-leverage)
-    max_position = capital * 0.30 * leverage
+    # Safety: margin yang dipakai max 30% dari modal (hindari over-leverage).
+    # Notional cap = capital * 0.30 * leverage  →  margin cap = capital * 0.30.
+    lev          = max(1, int(leverage))
+    max_position = capital * 0.30 * lev
     if position_size_usdt > max_position:
         position_size_usdt = max_position
         qty                = position_size_usdt / entry_price
         capped             = True
     else:
         capped = False
+
+    margin_required_usdt = position_size_usdt / lev
 
     # Estimasi TP berdasarkan R:R
     rr_options = {
@@ -230,6 +238,7 @@ def calc_position_size(entry_price: float, sl_price: float,
         "risk_amount_usdt"   : round(risk_amount_usdt, 2),
         "sl_distance_pct"    : round(sl_dist_pct, 3),
         "position_size_usdt" : round(position_size_usdt, 2),
+        "margin_required_usdt": round(margin_required_usdt, 2),
         "qty"                : round(qty, 6),
         "leverage"           : leverage,
         "capped"             : capped,
@@ -257,8 +266,9 @@ def record_trade_result(pnl_usdt: float):
     else:
         s["daily_losses"] += 1
 
-    # Cek daily loss limit
-    daily_loss_pct = abs(min(0, s["daily_pnl_usdt"])) / s["capital_usdt"] * 100
+    # Cek daily loss limit (guard kalau capital belum di-set via /setbalance)
+    cap = s["capital_usdt"]
+    daily_loss_pct = (abs(min(0, s["daily_pnl_usdt"])) / cap * 100) if cap > 0 else 0.0
     if daily_loss_pct >= s["daily_loss_limit"] and s["daily_pnl_usdt"] < 0:
         s["trading_halted"] = True
         log.warning(f"⛔ TRADING HALTED — daily loss {daily_loss_pct:.1f}% >= limit {s['daily_loss_limit']:.1f}%")

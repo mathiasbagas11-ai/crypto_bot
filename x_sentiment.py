@@ -293,7 +293,11 @@ def _score_tweet_sentiment(text: str) -> float:
     top  = sum(1 for kw in _TOP_SIGNAL_KEYWORDS if kw in t)
 
     if top >= 2:
-        return 0.3   # Euphoric = potential top = caution, not full bearish
+        # Euforia = potensi puncak = caution. JANGAN dihitung bullish (dulu +0.3
+        # menaikkan sentiment_avg dan bisa memicu gate euforia `avg>0.6` sendiri,
+        # plus melabel BULLISH di news_agent). Disurfacing lewat euphoria_detected
+        # + top_signal_count saja; di rata-rata sentiment diperlakukan netral.
+        return 0.0
 
     total = bull + bear
     if total == 0:

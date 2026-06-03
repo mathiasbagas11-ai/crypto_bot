@@ -335,16 +335,20 @@ OB_LOOKBACK           = 10
 ZSCORE_ANOMALY_THRESH = 2.0
 
 # Pre-pump thresholds
-FUNDING_SQUEEZE_THRESH  = -0.01   # funding < -1% → squeeze potential
-FUNDING_EXTREME_THRESH  = -0.03   # funding < -3% → extreme squeeze
+# CATATAN: funding_rate sudah dalam satuan PERSEN (raw fundingRate * 100 di
+# get_open_interest). Funding normal Binance ~±0.01%/8h, jadi threshold harus
+# pakai magnitude persen yang realistis — bukan -0.01/-0.03 yang ter-trigger di
+# kondisi pasar normal dan over-score sinyal.
+FUNDING_SQUEEZE_THRESH  = -0.05   # funding < -0.05% → squeeze potential
+FUNDING_EXTREME_THRESH  = -0.10   # funding < -0.10% → extreme squeeze
 OI_SURGE_THRESH         = 5.0     # OI naik >5% dalam 1h
 ATR_COIL_RATIO          = 0.015   # price range < 1.5% ATR → coiling
 MOMENTUM_RSI_THRESH     = 55      # RSI > 55 → momentum building
 VOLUME_SURGE_MULT       = 2.0     # volume spike 2x normal
 
-# Pre-dump thresholds (opposite of pre-pump)
-FUNDING_DUMP_THRESH     = 0.01    # funding > +1% → long squeeze potential
-FUNDING_DUMP_EXTREME    = 0.03    # funding > +3% → extreme long squeeze
+# Pre-dump thresholds (opposite of pre-pump) — juga dalam satuan PERSEN
+FUNDING_DUMP_THRESH     = 0.05    # funding > +0.05% → long squeeze potential
+FUNDING_DUMP_EXTREME    = 0.10    # funding > +0.10% → extreme long squeeze
 RSI_OVERBOUGHT_THRESH   = 65      # RSI > 65 → overbought / exhaustion zone
 LS_LONG_HEAVY_THRESH    = 1.5     # L/S > 1.5 → longs too crowded → dump fuel
 
@@ -358,6 +362,28 @@ SWING_TP_PCT            = 0.055   # swing TP: 5.5%
 SWING_SL_PCT            = 0.025   # swing SL: 2.5%
 SCALP_MIN_SCORE         = 55      # minimal score buat scalp signal
 SCALP_ALERT_THRESHOLD   = 62      # score >= 62 → auto alert
+
+
+# ── EFFECTIVE THRESHOLDS (overlay dynamic_thresholds.json dari learning engine) ──
+# evolve_thresholds() menulis override ke dynamic_thresholds.json; helper ini
+# memakai nilai itu kalau ada, kalau tidak fallback ke konstanta di atas.
+def _eff_scalp_min_score() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("SCALP_MIN_SCORE", SCALP_MIN_SCORE))
+    except Exception:
+        return SCALP_MIN_SCORE
+
+def _eff_predump_threshold() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("PREDUMP_ALERT_THRESHOLD", PREDUMP_ALERT_THRESHOLD))
+    except Exception:
+        return PREDUMP_ALERT_THRESHOLD
+
+def _eff_prepump_threshold() -> int:
+    try:
+        return int(get_dynamic_thresholds().get("PREPUMP_ALERT_THRESHOLD", PREPUMP_ALERT_THRESHOLD))
+    except Exception:
+        return PREPUMP_ALERT_THRESHOLD
 
 # ── SIGNAL GATE ──────────────────────────────────────────────────────────────
 GATE_MASTER_SCORE_MIN   = 65      # min score buat sinyal lolos — lebih tinggi = lebih selektif
@@ -1606,17 +1632,26 @@ def detect_volume_anomaly(candles: list) -> dict:
 
 
 def calculate_rsi(candles: list, period: int = 14) -> float:
-    """Hitung RSI dari candles."""
+    """Hitung RSI dengan Wilder smoothing.
+
+    Konsisten dengan detect_rsi_divergence() dan platform charting
+    (TradingView/Binance). Sebelumnya pakai SMA atas `period` delta terakhir
+    sehingga nilainya berbeda dari versi Wilder di file yang sama.
+    """
     if len(candles) < period + 1:
         return 50.0
 
     closes = [c["close"] for c in candles]
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains  = [max(d, 0) for d in deltas[-period:]]
-    losses = [abs(min(d, 0)) for d in deltas[-period:]]
+    gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+    if len(gains) < period:
+        return 50.0
 
-    avg_gain = np.mean(gains) if gains else 0
-    avg_loss = np.mean(losses) if losses else 0
+    avg_gain = float(np.mean(gains[:period]))    # seed = SMA pertama
+    avg_loss = float(np.mean(losses[:period]))
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
         return 100.0
@@ -1626,7 +1661,10 @@ def calculate_rsi(candles: list, period: int = 14) -> float:
 
 
 def calculate_atr(candles: list, period: int = 14) -> float:
-    """Hitung ATR (Average True Range)."""
+    """Hitung ATR dengan Wilder smoothing (RMA) — konsisten dengan charting.
+
+    Sebelumnya pakai SMA atas `period` TR terakhir.
+    """
     if len(candles) < period + 1:
         return 0.0
 
@@ -1637,7 +1675,13 @@ def calculate_atr(candles: list, period: int = 14) -> float:
         pc = candles[i-1]["close"]
         trs.append(max(h-l, abs(h-pc), abs(l-pc)))
 
-    return np.mean(trs[-period:]) if trs else 0.0
+    if len(trs) < period:
+        return float(np.mean(trs)) if trs else 0.0
+
+    atr = float(np.mean(trs[:period]))           # seed = SMA pertama
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
 
 
 def calculate_ema(candles: list, period: int) -> float:
@@ -1904,26 +1948,29 @@ def detect_money_flow(candles: list, period: int = 20) -> dict:
     result["ltf_score"] = ltf_score
     result["reasons"]   = reasons
 
-    if ltf_score >= 70:
+    # Bias/strength di-drive dari score_pts (integer) langsung. ltf_score selalu
+    # kelipatan 10 sehingga band berbasis ltf_score (57/55/43/45) tidak pernah
+    # tercapai → tier WEAK jadi dead code. score_pts memberi granularitas bersih.
+    if score_pts >= 3:
         result["bias"]     = "INFLOW"
         result["strength"] = "STRONG"
-    elif ltf_score >= 57:
+    elif score_pts == 2:
         result["bias"]     = "INFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score >= 55:
+    elif score_pts == 1:
         result["bias"]     = "INFLOW"
         result["strength"] = "WEAK"
-    elif ltf_score <= 30:
+    elif score_pts <= -3:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "STRONG"
-    elif ltf_score <= 43:
+    elif score_pts == -2:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "MODERATE"
-    elif ltf_score <= 45:
+    elif score_pts == -1:
         result["bias"]     = "OUTFLOW"
         result["strength"] = "WEAK"
     else:
-        # Dead zone 46–54: score terlalu tipis untuk arah apapun
+        # score_pts == 0: terlalu tipis untuk arah apapun
         result["bias"]     = "NEUTRAL"
         result["strength"] = "WEAK"
 
@@ -2486,8 +2533,9 @@ def detect_scalp_setup(symbol: str, tf_15m: dict, tf_1h: dict, tf_4h: dict, oi_d
         result["reasons"].append(f"📊 RSI 15M: {rsi_15m:.0f} — overbought (extreme)")
 
     # ── ENTRY ZONE & TRADE PLAN ───────────────────
-    ob_for_zone = ob_15m if direction == "LONG" else ob_15m
-    entry_zone  = calculate_entry_zone(ob_for_zone, fvg_15m, result["sweep"], price, direction)
+    # calculate_entry_zone memilih sisi (bullish/bearish OB) secara internal
+    # sesuai direction, jadi cukup pass OB 15M (primary TF scalp).
+    entry_zone  = calculate_entry_zone(ob_15m, fvg_15m, result["sweep"], price, direction)
     result["entry_zone"] = entry_zone
 
     if price > 0:
@@ -2794,7 +2842,7 @@ def scan_scalp_candidates(symbols: list = None) -> list:
                     continue
 
             scalp = detect_scalp_setup(sym, tf_15m, tf_1h, tf_4h, oi)
-            if scalp["score"] >= SCALP_MIN_SCORE:
+            if scalp["score"] >= _eff_scalp_min_score():
                 # v13: tambah trade plan dengan entry_mode ke scalp
                 price_s = tf_15m.get("price", 0)
                 atr_1h  = tf_1h.get("atr", 0)
@@ -2984,12 +3032,13 @@ def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -
 def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
                    tf_15m: dict = None) -> dict:
     """
-    Deteksi pre-pump setup berdasarkan 4 indikator utama:
+    Deteksi pre-pump setup berdasarkan 3 indikator inti + 1 bonus:
     1. Funding Squeeze       (max 30 poin)
     2. Momentum Runner       (max 35 poin)
-    3. OI + PA + ATR         (max 35 poin)
-    4. Early Warning + v14:  (max 30 poin)  BB Squeeze / Volume Coil / Sudden Breakout
-    Total max = 100 poin
+    3. OI + PA + ATR         (max 35 poin)   → inti = 100 poin
+    4. Early Warning + v14    (bonus aditif, max 30 poin) BB Squeeze / Volume Coil /
+       Sudden Breakout — untuk men-trigger sinyal lebih dini.
+    Total = inti + bonus, lalu di-clamp ke max 100 poin.
     """
     tf_15m = tf_15m or {}
     result = {
@@ -3082,11 +3131,17 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
         mom_score += 10
         result["reasons"].append("💥 BoS confirmed 1H BULLISH — momentum breakout")
 
-    # Volume surge
+    # Volume surge — full bonus hanya kalau candle bullish (akumulasi),
+    # bukan high-volume down candle (mirror logika detect_predump).
     if vol_1h.get("is_anomaly") or (vol_1h.get("multiplier", 1) >= VOLUME_SURGE_MULT):
-        mom_score += 10
         mult = vol_1h.get("multiplier", 1)
-        result["reasons"].append(f"🐳 Volume surge 1H: {mult:.1f}x normal — smart money in")
+        candles_1h = tf_1h.get("candles", [])
+        if candles_1h and candles_1h[-1]["close"] > candles_1h[-1]["open"]:  # bullish candle
+            mom_score += 10
+            result["reasons"].append(f"🐳 Volume surge 1H: {mult:.1f}x normal — smart money in")
+        else:
+            mom_score += 5
+            result["reasons"].append(f"  Volume spike 1H: {mult:.1f}x (arah perlu dikonfirmasi)")
     elif vol_4h.get("is_anomaly"):
         mom_score += 5
         mult = vol_4h.get("multiplier", 1)
@@ -3191,7 +3246,7 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
 
     result["oi_pa_score"] = min(oi_pa_score, 35)
 
-    # ── 4. EARLY WARNING: kondisi SEBELUM pump (max 20 poin) ────────────
+    # ── 4. EARLY WARNING: kondisi SEBELUM pump (bonus aditif, max 30 poin) ──
     # Deteksi akumulasi tersembunyi yang muncul SEBELUM pump terlihat jelas.
     # Ini yang bikin sinyal bisa dikirim lebih awal.
     early_score = 0
@@ -4454,14 +4509,113 @@ def screen_coins(manual: bool = False) -> list:
 # TRADE PLAN
 # ─────────────────────────────────────────────
 
+def _compute_tp_profile(tf_4h: dict, tf_1h: dict, direction: str) -> dict:
+    """Skema TP/SL adaptif ke kondisi market.
+
+    Default condong KONSERVATIF; target jauh (AGGRESSIVE) hanya saat trend
+    searah & kuat (ADX tinggi). Tujuannya mengurangi over-optimisme TP di market
+    ranging/choppy/volatile yang bikin TP2 jarang kena dan trade malah balik arah.
+
+    Returns: {label, tp1_mult, tp2_mult, sl_atr}
+      - tp1_mult/tp2_mult: kelipatan R untuk TP1/TP2
+      - sl_atr: kelipatan ATR untuk SL fallback (MARKET entry)
+    """
+    r4 = (tf_4h or {}).get("market_regime", {}) or {}
+    r1 = (tf_1h or {}).get("market_regime", {}) or {}
+    reg4 = r4.get("regime", "UNKNOWN")
+    reg1 = r1.get("regime", "UNKNOWN")
+    adx4 = r4.get("adx", 0) or 0
+    is_long = direction in ("LONG", "PUMP")
+
+    trend_aligned = (
+        (is_long     and reg4 in ("BULLISH_TREND", "BREAKOUT_UP")) or
+        (not is_long and reg4 in ("BEARISH_TREND", "BREAKOUT_DOWN"))
+    )
+    choppy = (reg4 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or
+              reg1 in ("RANGING", "BB_SQUEEZE", "VOLATILE") or adx4 < 18)
+
+    # `ladder` = kelipatan R untuk TP bertahap (TP1..TPn). ladder[0]/[1] = tp1/tp2.
+    # Jumlah rung ikut agresivitas: choppy = sedikit (3), trending = sampai 5.
+    if trend_aligned and adx4 >= 28:
+        return {"label": "AGGRESSIVE",   "tp1_mult": 2.0, "tp2_mult": 3.5, "sl_atr": 2.0,
+                "ladder": [2.0, 3.5, 5.0, 7.0, 10.0]}
+    if choppy:
+        return {"label": "CONSERVATIVE", "tp1_mult": 1.2, "tp2_mult": 2.0, "sl_atr": 1.5,
+                "ladder": [1.2, 2.0, 3.0]}
+    return {"label": "BALANCED",         "tp1_mult": 1.5, "tp2_mult": 2.5, "sl_atr": 1.8,
+            "ladder": [1.5, 2.5, 3.5, 4.5]}
+
+
+def _build_tp_ladder(entry: float, sl: float, direction: str,
+                     tp1: float, tp2: float, ladder_mults: list) -> list:
+    """Bangun TP bertahap (ladder TP1..TPn).
+
+    Rung 1 & 2 = tp1/tp2 (sudah struktural dari calculate_tp1_tp2). Rung 3+ =
+    target murni R-multiple yang lebih jauh (runner). Strictly monotonic menjauh
+    dari entry. Tiap rung: {level, price, r, pct}.
+    """
+    is_long = direction in ("LONG", "PUMP")
+    risk = abs(entry - sl) if (sl and sl != entry) else entry * 0.02
+    prices = []
+    for p in (tp1, tp2):
+        if p is not None:
+            prices.append(round(float(p), 8))
+    prev = prices[-1] if prices else entry
+    for mult in (ladder_mults[2:] if ladder_mults else []):
+        p = round(entry + risk * mult, 8) if is_long else round(entry - risk * mult, 8)
+        if (is_long and p <= prev) or ((not is_long) and p >= prev):
+            continue   # lewati rung yang tidak lebih jauh dari rung sebelumnya
+        prices.append(p)
+        prev = p
+    out = []
+    for i, p in enumerate(prices):
+        r   = round(abs(p - entry) / risk, 2) if risk > 0 else 0.0
+        pct = round((p - entry) / entry * 100 * (1 if is_long else -1), 2) if entry else 0.0
+        out.append({"level": i + 1, "price": p, "r": r, "pct": pct})
+    return out
+
+
+def _entry_action_reco(direction: str, confluence: dict = None,
+                       realtime: dict = None, entry_mode: str = None) -> str:
+    """Rekomendasi aksi singkat: '{DIR} NOW' vs 'WAIT'.
+
+    Kalau entry_mode sudah diketahui (trade plan final) → pakai itu (definitif).
+    Kalau belum (mis. saat alert bias flip) → heuristik dari momentum + confluence.
+    """
+    dir_word = "LONG" if direction in ("LONG", "PUMP") else "SHORT"
+    is_long  = dir_word == "LONG"
+
+    if entry_mode == "MOMENTUM_NOW":
+        return f"🚀 {dir_word} NOW — entry market, momentum aktif"
+    if entry_mode == "RETEST_WAIT":
+        return f"⏳ WAIT — tunggu harga retest ke zona entry"
+
+    conf  = confluence or {}
+    rt    = realtime or {}
+    level = conf.get("level", "POOR")
+    if conf.get("entry_extended"):
+        return "⏳ WAIT — harga sudah extended, tunggu pullback/retest"
+    mlabel = rt.get("momentum_label", "CONSOLIDATING")
+    mom_aligned = (
+        (is_long     and mlabel in ("STRONG_BULL_MOMENTUM", "BULL_MOMENTUM", "BREAKOUT_UP")) or
+        (not is_long and mlabel in ("STRONG_BEAR_MOMENTUM", "BEAR_MOMENTUM", "BREAKOUT_DOWN"))
+    )
+    if mom_aligned and level in ("EXCELLENT", "GOOD"):
+        return f"🚀 {dir_word} NOW — momentum & confluence mendukung entry sekarang"
+    return f"⏳ WAIT — tunggu konfirmasi/retest ke zona entry"
+
+
 def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                       tf_4h: dict = None, tf_1h: dict = None,
-                      liq_1h: dict = None) -> dict:
+                      liq_1h: dict = None,
+                      tp1_mult: float = 2.0, tp2_mult: float = 3.5) -> dict:
     """
     Hitung TP1 dan TP2 berbasis struktur.
     - Risk (R) = abs(entry - sl)
-    - TP1: minimal 2R, diprioritaskan ke level struktural terdekat yang >= 2R
-    - TP2: minimal 3.5R, ke target struktural selanjutnya atau EQH/EQL
+    - TP1: minimal tp1_mult×R, diprioritaskan ke level struktural terdekat
+    - TP2: minimal tp2_mult×R, ke target struktural selanjutnya atau EQH/EQL
+    - tp1_mult/tp2_mult diset adaptif ke kondisi market oleh caller (lihat
+      _compute_tp_profile) supaya target tidak terlalu optimis di market choppy.
     - Strategy: partial close 50% di TP1, sisanya jalan ke TP2
     """
     tf_4h  = tf_4h  or {}
@@ -4479,8 +4633,8 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
     }
 
     if direction in ("LONG", "PUMP"):
-        min_tp1 = round(entry + risk * 2.0, 8)
-        min_tp2 = round(entry + risk * 3.5, 8)
+        min_tp1 = round(entry + risk * tp1_mult, 8)
+        min_tp2 = round(entry + risk * tp2_mult, 8)
 
         levels = []
         for _, lvl in struct1.get("swing_highs", []):
@@ -4500,13 +4654,13 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                 result["tp2"], result["tp2_basis"] = lvl, basis
 
         if result["tp1"] is None:
-            result["tp1"], result["tp1_basis"] = min_tp1, "2R floor"
+            result["tp1"], result["tp1_basis"] = min_tp1, f"{tp1_mult:g}R floor"
         if result["tp2"] is None:
-            result["tp2"], result["tp2_basis"] = min_tp2, "3.5R floor"
+            result["tp2"], result["tp2_basis"] = min_tp2, f"{tp2_mult:g}R floor"
 
     elif direction in ("SHORT", "DUMP"):
-        min_tp1 = round(entry - risk * 2.0, 8)
-        min_tp2 = round(entry - risk * 3.5, 8)
+        min_tp1 = round(entry - risk * tp1_mult, 8)
+        min_tp2 = round(entry - risk * tp2_mult, 8)
 
         levels = []
         for _, lvl in struct1.get("swing_lows", []):
@@ -4531,16 +4685,103 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                     break
 
         if result["tp1"] is None:
-            result["tp1"], result["tp1_basis"] = min_tp1, "2R floor"
+            result["tp1"], result["tp1_basis"] = min_tp1, f"{tp1_mult:g}R floor"
         # TP2 HARUS selalu lebih rendah dari TP1 — guard wajib
         if result["tp2"] is None or result["tp2"] >= result["tp1"]:
-            result["tp2"], result["tp2_basis"] = min_tp2, "3.5R floor"
+            result["tp2"], result["tp2_basis"] = min_tp2, f"{tp2_mult:g}R floor"
 
     if risk > 0:
         if result["tp1"]: result["tp1_r"] = round(abs(result["tp1"] - entry) / risk, 2)
         if result["tp2"]: result["tp2_r"] = round(abs(result["tp2"] - entry) / risk, 2)
 
     return result
+
+
+def _sanitize_trade_levels(trade: dict, direction: str) -> dict:
+    """Pastikan TP/SL ada di sisi yang BENAR relatif entry, perbaiki kalau tidak.
+
+    Level struktural (atau hasil override AI di deepseek_signal_review) kadang
+    menghasilkan TP di sisi salah dari entry — mis. LONG dengan TP < entry —
+    yang bikin sinyal langsung "kena TP" tapi rugi. Helper ini memperbaiki
+    level yang salah-sisi via fallback R:R, supaya:
+      LONG : sl < entry < tp1 < tp2
+      SHORT: tp2 < tp1 < entry < sl
+    Mutasi & kembalikan dict yang sama. Kalau entry tidak valid, dibiarkan.
+    """
+    if not isinstance(trade, dict):
+        return trade
+    try:
+        entry = float(trade.get("entry") or 0)
+    except (TypeError, ValueError):
+        return trade
+    if entry <= 0:
+        return trade
+
+    is_long = direction in ("LONG", "PUMP")
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    sl = _f(trade.get("sl"))
+    # SL salah-sisi atau hilang → set default 3% (jaga R:R tetap masuk akal).
+    if sl is None or (is_long and sl >= entry) or (not is_long and sl <= entry):
+        sl = round(entry * (0.97 if is_long else 1.03), 8)
+        trade["sl"] = sl
+        trade["sl_basis"] = (str(trade.get("sl_basis", "")) + " | repaired 3%").strip(" |")
+
+    risk = abs(entry - sl) or entry * 0.02
+
+    def _wrong_side(tp):
+        tp = _f(tp)
+        if tp is None or tp <= 0:
+            return True
+        return (is_long and tp <= entry) or (not is_long and tp >= entry)
+
+    if _wrong_side(trade.get("tp1")):
+        trade["tp1"] = round(entry + risk * 2.0, 8) if is_long else round(entry - risk * 2.0, 8)
+        trade["tp1_basis"] = "2R floor (repaired)"
+    if _wrong_side(trade.get("tp2")):
+        trade["tp2"] = round(entry + risk * 3.5, 8) if is_long else round(entry - risk * 3.5, 8)
+        trade["tp2_basis"] = "3.5R floor (repaired)"
+
+    # TP2 harus lebih jauh dari TP1.
+    tp1, tp2 = _f(trade["tp1"]), _f(trade["tp2"])
+    if is_long and tp2 <= tp1:
+        trade["tp2"] = round(entry + risk * 3.5, 8)
+    elif (not is_long) and tp2 >= tp1:
+        trade["tp2"] = round(entry - risk * 3.5, 8)
+
+    # Recompute R multiples & sinkron alias "tp".
+    if risk > 0:
+        trade["tp1_r"] = round(abs(_f(trade["tp1"]) - entry) / risk, 2)
+        trade["tp2_r"] = round(abs(_f(trade["tp2"]) - entry) / risk, 2)
+    if "tp" in trade:
+        trade["tp"] = trade["tp1"]
+
+    # Rebuild ladder TP biar konsisten dengan entry/sl (mis. setelah override AI):
+    # rung 1/2 = tp1/tp2 final, rung 3+ dihitung ulang dari R-multiple tersimpan.
+    tps = trade.get("tps")
+    if isinstance(tps, list) and tps:
+        rebuilt = []
+        for rung in tps:
+            lvl = rung.get("level")
+            if lvl == 1:
+                p = _f(trade["tp1"])
+            elif lvl == 2:
+                p = _f(trade["tp2"])
+            else:
+                rr = rung.get("r") or 0
+                p = round(entry + risk * rr, 8) if is_long else round(entry - risk * rr, 8)
+            if p is None:
+                continue
+            rmult = round(abs(p - entry) / risk, 2) if risk > 0 else 0.0
+            pct   = round((p - entry) / entry * 100 * (1 if is_long else -1), 2) if entry else 0.0
+            rebuilt.append({"level": lvl, "price": p, "r": rmult, "pct": pct})
+        trade["tps"] = rebuilt
+    return trade
 
 
 def _fmt_zone(bottom: float, top: float) -> str:
@@ -4742,6 +4983,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "PUMP", entry_candidates, tf_1h, tf_15m, oi_data)
+        _tp_prof  = _compute_tp_profile(tf_4h, tf_1h, "LONG")
 
         if entry_candidates:
             entry_candidates.sort(key=lambda x: (-x[3], abs(x[1] - price)))
@@ -4757,10 +4999,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             entry_type  = "MARKET"
             zone_bottom = round(price * 0.99, 8)
             zone_top    = price
-            sl = round(price - atr * 2.0, 8) if atr > 0 else round(price * 0.96, 8)
+            sl = round(price - atr * _tp_prof["sl_atr"], 8) if atr > 0 else round(price * 0.96, 8)
             sl = max(sl, round(price * 0.94, 8))
 
-        tps = calculate_tp1_tp2(entry, sl, "LONG", tf_4h, tf_1h, liq_1h)
+        tps = calculate_tp1_tp2(entry, sl, "LONG", tf_4h, tf_1h, liq_1h,
+                                tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
+        tp_ladder = _build_tp_ladder(entry, sl, "LONG", tps["tp1"], tps["tp2"], _tp_prof["ladder"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -4782,6 +5026,8 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "is_limit": entry_type != "MARKET", "atr_based": atr > 0,
             "tp": tps["tp1"], "sl_basis": f"below {entry_type} -ATR buf",
             "entry_mode": entry_mode,
+            "tp_profile": _tp_prof["label"],
+            "tps": tp_ladder,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -4831,6 +5077,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         # v13: entry mode detection
         mode_info = _determine_entry_mode(price, "DUMP", entry_candidates, tf_1h, tf_15m, oi_data)
+        _tp_prof  = _compute_tp_profile(tf_4h, tf_1h, "SHORT")
 
         if entry_candidates:
             entry_candidates.sort(key=lambda x: (-x[3], abs(x[1] - price)))
@@ -4846,10 +5093,12 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             entry_type  = "MARKET"
             zone_bottom = price
             zone_top    = round(price * 1.01, 8)
-            sl = round(price + atr * 2.0, 8) if atr > 0 else round(price * 1.04, 8)
+            sl = round(price + atr * _tp_prof["sl_atr"], 8) if atr > 0 else round(price * 1.04, 8)
             sl = min(sl, round(price * 1.06, 8))
 
-        tps = calculate_tp1_tp2(entry, sl, "SHORT", tf_4h, tf_1h, liq_1h)
+        tps = calculate_tp1_tp2(entry, sl, "SHORT", tf_4h, tf_1h, liq_1h,
+                                tp1_mult=_tp_prof["tp1_mult"], tp2_mult=_tp_prof["tp2_mult"])
+        tp_ladder = _build_tp_ladder(entry, sl, "SHORT", tps["tp1"], tps["tp2"], _tp_prof["ladder"])
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
@@ -4871,6 +5120,8 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "is_limit": entry_type != "MARKET", "atr_based": atr > 0,
             "tp": tps["tp1"], "sl_basis": f"above {entry_type} +ATR buf",
             "entry_mode": entry_mode,
+            "tp_profile": _tp_prof["label"],
+            "tps": tp_ladder,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
@@ -4898,6 +5149,15 @@ def fmt_num(n: float) -> str:
 
 # alias untuk backward compat dengan main.py patches
 format_number = fmt_num
+
+
+def _fmt_price(v) -> str:
+    """Format harga presisi penuh (bukan singkatan K/M) untuk entry/TP/SL."""
+    try:
+        v = float(v or 0)
+    except (TypeError, ValueError):
+        return "$0"
+    return f"${v:,.4f}" if v >= 1 else f"${v:.8f}"
 
 # ─────────────────────────────────────────────
 # TELEGRAM UTILS
@@ -5421,10 +5681,17 @@ def build_coin_analysis_block(symbol: str, price: float, confluence: dict,
                 _sym_mem = get_symbol_memory(symbol)
             except Exception:
                 pass
+            _learn_ctx = None
+            if LEARNING_MODULE:
+                try:
+                    _learn_ctx = build_ai_context_block("SCREENER") or None
+                except Exception:
+                    pass
             insight = deepseek_analyze_coin(
                 symbol, confluence, tf_4h, tf_1h, tf_15m, oi, price,
                 prepump, predump, scalp, swing,
                 news_context=_news_ctx, symbol_memory=_sym_mem,
+                learning_context=_learn_ctx,
             )
             if insight:
                 ai_label = "🤖 <b>AI Insight (DeepSeek):</b>"
@@ -6014,6 +6281,14 @@ def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
     enriched = []
     _news_cache: dict = {}   # symbol → news_ctx, hindari double fetch
 
+    # Lessons global dari sinyal lalu — sama untuk semua kandidat, hitung sekali.
+    _learn_ctx = None
+    if LEARNING_MODULE:
+        try:
+            _learn_ctx = build_ai_context_block("SCREENER") or None
+        except Exception:
+            _learn_ctx = None
+
     for cand in candidates:
         sym   = cand.get("symbol", "")
         trade = cand.get("trade", {})
@@ -6044,6 +6319,7 @@ def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
                 tf_15m       = cand.get("tf_15m", {}),
                 news_context = news_ctx,
                 signal_type  = direction,
+                learning_context = _learn_ctx,
             )
 
             if review.get("ai_verdict") == "SKIP":
@@ -7886,11 +8162,28 @@ def _build_gated_signal_message(
             conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
             lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
 
+    lines.append(f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}")
+
+    # TP bertahap (ladder) — pilih sendiri seberapa agresif exit-nya.
+    _prof = trade.get("tp_profile", "")
+    _ladder = trade.get("tps") or []
+    if _ladder:
+        _n = len(_ladder)
+        for _rg in _ladder:
+            _lvl = _rg.get("level", 0)
+            _tag = " | close 50%" if _lvl == 1 else (" | runner" if _lvl == _n else "")
+            _emoji = "🟡" if _lvl == 1 else "🟢"
+            lines.append(
+                f"{_emoji} TP{_lvl}    : <code>{_f(_rg.get('price'))}</code>  "
+                f"{_rg.get('pct', 0):+.1f}%  ({_rg.get('r', 0)}R){_tag}"
+            )
+    else:
+        lines.append(f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%")
+        lines.append(f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner")
+
     lines += [
-        f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}",
-        f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%",
-        f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner",
-        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}",
+        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}"
+        + (f"  | 🎚️ {_prof}" if _prof else ""),
         "",
         "─── GATE SUMMARY ───",
     ]
@@ -8246,6 +8539,9 @@ def run_gated_scan():
             _flip_emoji_old = "🟢" if _active_dir == "LONG" else "🔴"
             _flip_emoji_new = "🔴" if _active_dir == "LONG" else "🟢"
             _close_action  = "CLOSE LONG / SHORT" if _active_dir == "LONG" else "CLOSE SHORT / BUY BACK"
+            # Rekomendasi aksi untuk arah baru (NOW vs WAIT) — heuristik momentum
+            # + confluence karena trade plan baru belum dibangun di titik ini.
+            _flip_action = _entry_action_reco(_signal_dir_now, confluence, realtime_momentum)
             _bias_flip_msg = (
                 f"🔄 <b>BIAS BERUBAH — {analysis_sym.replace('USDT','')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -8253,7 +8549,7 @@ def run_gated_scan():
                 f"💰 Harga sekarang: <code>${_cur_price:.4f}</code>\n\n"
                 f"⚠️ Setup <b>{_active_dir}</b> sebelumnya kemungkinan sudah tidak valid.\n"
                 f"💡 Pertimbangkan <b>{_close_action}</b> jika posisi masih terbuka.\n\n"
-                f"🔍 Setup baru <b>{_signal_dir_now}</b> sedang dievaluasi..."
+                f"📌 Aksi {_signal_dir_now}: {_flip_action}"
             )
             try:
                 send_market_update(_bias_flip_msg)
@@ -8418,6 +8714,10 @@ def run_gated_scan():
                 except Exception as _ds_e:
                     log.warning(f"DeepSeek review error {analysis_sym}: {_ds_e}")
 
+            # Guard: pastikan TP/SL di sisi benar (mis. setelah override AI)
+            # sebelum sinyal dikirim — cegah sinyal malformed sampai ke user.
+            trade = _sanitize_trade_levels(trade, _signal_direction)
+
             confidence_label = ("HIGH" if raw_master >= 85 else
                                 "MEDIUM" if raw_master >= 75 else "LOW")
             msg = _build_gated_signal_message(
@@ -8465,6 +8765,45 @@ def run_gated_scan():
             _gate_mark_sent(analysis_sym, state, direction=_signal_direction)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
+
+            # Notif ringkas entry/TP/SL ke topic Market Update (#1)
+            try:
+                _mu_emoji  = "🟢" if _signal_direction == "LONG" else "🔴"
+                _mu_action = _entry_action_reco(_signal_direction, confluence,
+                                                realtime_momentum,
+                                                entry_mode=trade.get("entry_mode"))
+                _mu_prof   = trade.get("tp_profile", "")
+                _mu_entry  = trade.get("entry") or price
+                # TP bertahap (ladder)
+                _mu_ladder = trade.get("tps") or []
+                if _mu_ladder:
+                    _mu_n = len(_mu_ladder)
+                    _mu_tp_lines = "\n".join(
+                        f"🟡 TP{_rg.get('level')}   : {_fmt_price(_rg.get('price'))}  "
+                        f"({_rg.get('r', 0)}R, {_rg.get('pct', 0):+.1f}%)"
+                        + (" ← runner" if _rg.get('level') == _mu_n else "")
+                        for _rg in _mu_ladder
+                    )
+                else:
+                    _mu_tp_lines = (
+                        f"🟡 TP1   : {_fmt_price(trade.get('tp1'))}\n"
+                        f"🟢 TP2   : {_fmt_price(trade.get('tp2'))}"
+                    )
+                _mu_msg = (
+                    f"📡 <b>SINYAL BARU — {analysis_sym.replace('USDT','')}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{_mu_emoji} {_signal_direction} | Score {raw_master}/100"
+                    + (f" | TP plan: {_mu_prof}\n" if _mu_prof else "\n")
+                    + f"💰 Harga : <b>{_fmt_price(price)}</b>\n"
+                    f"🎯 Entry : {_fmt_price(_mu_entry)}\n"
+                    f"{_mu_tp_lines}\n"
+                    f"🔴 SL    : {_fmt_price(trade.get('sl'))}\n\n"
+                    f"📌 {_mu_action}\n"
+                    f"⚠️ <i>Not financial advice. DYOR.</i>"
+                )
+                send_market_update(_mu_msg)
+            except Exception as _mu_e:
+                log.debug(f"Market update notif error {analysis_sym}: {_mu_e}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
@@ -8821,7 +9160,8 @@ def run_prepump_auto():
     log.info("🎯 Auto pre-pump scan triggered")
     candidates = scan_prepump_candidates()
 
-    hot = [c for c in candidates if c["total_score"] >= PREPUMP_ALERT_THRESHOLD]
+    _pp_thr = _eff_prepump_threshold()
+    hot = [c for c in candidates if c["total_score"] >= _pp_thr]
 
     if hot:
         # v15: DeepSeek review sebelum kirim
@@ -8869,10 +9209,10 @@ def run_prepump_auto():
                         direction="LONG", reasons=c.get("reasons",[])[:3])
                 except Exception as e:
                     log.debug(f"prepump log_decision error: {e}")
-        log.info(f"🔥 Pre-pump HOT alert: {len(hot)} kandidat (score >= {PREPUMP_ALERT_THRESHOLD})")
+        log.info(f"🔥 Pre-pump HOT alert: {len(hot)} kandidat (score >= {_pp_thr})")
     else:
         best = candidates[0]["total_score"] if candidates else 0
-        log.info(f"Pre-pump scan: no HOT signal (best score={best}, threshold={PREPUMP_ALERT_THRESHOLD})")
+        log.info(f"Pre-pump scan: no HOT signal (best score={best}, threshold={_pp_thr})")
 
 
 def run_predump_auto():
@@ -8883,7 +9223,8 @@ def run_predump_auto():
     log.info("💀 Auto pre-dump scan triggered")
     candidates = scan_predump_candidates()
 
-    hot = [c for c in candidates if c["total_score"] >= PREDUMP_ALERT_THRESHOLD]
+    _pd_thr = _eff_predump_threshold()
+    hot = [c for c in candidates if c["total_score"] >= _pd_thr]
 
     if hot:
         # v15: DeepSeek review sebelum kirim
@@ -8931,10 +9272,10 @@ def run_predump_auto():
                         direction="SHORT", reasons=c.get("reasons",[])[:3])
                 except Exception as e:
                     log.debug(f"predump log_decision error: {e}")
-        log.info(f"🔴 Pre-dump HOT alert: {len(hot)} kandidat (score >= {PREDUMP_ALERT_THRESHOLD})")
+        log.info(f"🔴 Pre-dump HOT alert: {len(hot)} kandidat (score >= {_pd_thr})")
     else:
         best = candidates[0]["total_score"] if candidates else 0
-        log.info(f"Pre-dump scan: no HOT signal (best score={best}, threshold={PREDUMP_ALERT_THRESHOLD})")
+        log.info(f"Pre-dump scan: no HOT signal (best score={best}, threshold={_pd_thr})")
 
 
 def run_scalp_auto():

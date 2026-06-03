@@ -89,3 +89,25 @@ def test_is_blacklisted_strips_usdt(monkeypatch):
 def test_is_blacklisted_unknown_symbol(monkeypatch):
     monkeypatch.setattr(sm, "_load", lambda: {})
     assert sm.is_blacklisted("DOGEUSDT") == (False, "")
+
+
+# ── get_symbol_memory (AI-prompt shape) ──────────────────────────
+
+def test_get_symbol_memory_empty_for_unknown(monkeypatch):
+    monkeypatch.setattr(sm, "_load", lambda: {})
+    assert sm.get_symbol_memory("BTCUSDT") == {}
+
+
+def test_get_symbol_memory_roundtrip(monkeypatch):
+    # record_symbol_outcome → get_symbol_memory harus kasih shape yang dipakai
+    # deepseek_analyze_coin (win_rate, total_trades, best_signal_type, lessons).
+    store = {}
+    monkeypatch.setattr(sm, "_load", lambda: store)
+    monkeypatch.setattr(sm, "_save", lambda d: None)   # mutasi sudah in-place
+    sm.record_symbol_outcome("SOLUSDT", "SCALP", "LONG", "TP_HIT", 3.0, 70, hold_minutes=30)
+    sm.record_symbol_outcome("SOLUSDT", "SCALP", "LONG", "SL_HIT", -2.0, 60, hold_minutes=40)
+    m = sm.get_symbol_memory("SOLUSDT")
+    assert m["total_trades"] == 2
+    assert m["win_rate"] == 50.0
+    assert m["best_signal_type"] == "SCALP"
+    assert isinstance(m["lessons"], list)

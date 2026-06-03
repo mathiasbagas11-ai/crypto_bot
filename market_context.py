@@ -392,8 +392,13 @@ def get_btc_dominance() -> dict:
     except Exception as e:
         log.warning(f"BTC dominance fetch error: {e}")
 
-    empty["_ts"] = time.time()
-    _cache["btc_dominance"] = empty
+    # Fetch gagal: JANGAN hapus rolling readings yang sudah terkumpul dan JANGAN
+    # cache error dengan TTL penuh (dulu bikin trend selalu STABLE + menahan
+    # retry). Pakai cache lama (stale) kalau ada; selain itu empty tanpa disimpan
+    # supaya call berikutnya mencoba fetch lagi.
+    prev = _cache.get("btc_dominance")
+    if prev and prev.get("readings"):
+        return prev
     return empty
 
 

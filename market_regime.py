@@ -359,9 +359,15 @@ def detect_market_regime(candles: list) -> dict:
     base_atr = sum(prior_ranges) / len(prior_ranges) if prior_ranges else 1
     atr_ratio = curr_atr / base_atr if base_atr > 0 else 1.0
 
-    # EMA21 for trend filter
-    ema21_window = closes[-21:]
-    ema21 = sum(ema21_window) / len(ema21_window) if len(ema21_window) >= 21 else closes[-1]
+    # EMA21 for trend filter — EMA sungguhan (dulu ini SMA meski dinamai EMA,
+    # sehingga klasifikasi trend gampang flip di sekitar MA).
+    if len(closes) >= 21:
+        k = 2 / (21 + 1)
+        ema21 = sum(closes[:21]) / 21          # seed dengan SMA awal
+        for px in closes[21:]:
+            ema21 = px * k + ema21 * (1 - k)
+    else:
+        ema21 = closes[-1]
     price_above_ema = closes[-1] > ema21
 
     result = {
