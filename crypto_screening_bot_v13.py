@@ -192,7 +192,7 @@ except ImportError:
 try:
     from signal_tracker import (
         on_scan_start, on_signal_sent,
-        format_tracker_summary,
+        format_tracker_summary, take_lesson_snapshot,
     )
     TRACKER_MODULE = True
 except ImportError:
@@ -9450,6 +9450,10 @@ if __name__ == "__main__":
             "cron", hour=23, minute=0, id="daily_learning"
         )
 
+    # 12-hour lesson snapshot: unrealized P&L semua pending signals → lesson baru
+    if TRACKER_MODULE:
+        scheduler.add_job(take_lesson_snapshot, "interval", hours=12, id="lesson_snapshot_12h")
+
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
     # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
@@ -9469,7 +9473,8 @@ if __name__ == "__main__":
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"News Agent=60m | "
-        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | Daily-learning=23:00 UTC"
+        f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | "
+        f"Daily-learning=23:00 UTC | Lesson-snapshot=tiap 12j"
     )
 
     try:

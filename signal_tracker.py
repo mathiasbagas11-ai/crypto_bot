@@ -846,6 +846,92 @@ def format_tracker_summary() -> str:
 # INTEGRATION HOOK — Dipanggil dari run_scan()
 # ─────────────────────────────────────────────
 
+def take_lesson_snapshot() -> int:
+    """
+    Tiap 12 jam: ambil unrealized P&L semua pending signals dan inject ke learning engine.
+    Sinyal TIDAK diclose — tracking tetap jalan sampai TP/SL/expiry asli.
+    Return jumlah sinyal yang di-snapshot.
+    """
+    try:
+        from learning_engine import record_signal_outcome
+    except ImportError:
+        log.warning("take_lesson_snapshot: learning_engine tidak tersedia")
+        return 0
+
+    pending = _load_pending()
+    now     = datetime.now(timezone.utc)
+    snapped = 0
+    changed = False
+
+    for sig in pending:
+        if sig.get("status") != "PENDING":
+            continue
+
+        # Cek apakah sudah >= 12 jam sejak snapshot terakhir (atau belum pernah snapshot)
+        last_snap_raw = sig.get("last_snapshot_at")
+        if last_snap_raw:
+            try:
+                last_snap_dt = datetime.fromisoformat(last_snap_raw)
+                if last_snap_dt.tzinfo is None:
+                    last_snap_dt = last_snap_dt.replace(tzinfo=timezone.utc)
+                if (now - last_snap_dt).total_seconds() < 12 * 3600:
+                    continue
+            except Exception:
+                pass
+
+        symbol    = sig.get("symbol", "")
+        direction = sig.get("direction", "")
+        entry     = sig.get("entry_price", 0.0)
+        if not symbol or not direction or entry <= 0:
+            continue
+
+        curr_price = _get_current_price(symbol)
+        if not curr_price:
+            continue
+
+        if direction == "LONG":
+            pnl_pct = (curr_price - entry) / entry * 100
+        else:
+            pnl_pct = (entry - curr_price) / entry * 100
+
+        try:
+            created_at = datetime.fromisoformat(sig["created_at"])
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            hold_min = int((now - created_at).total_seconds() / 60)
+        except Exception:
+            hold_min = 0
+
+        try:
+            record_signal_outcome(
+                symbol           = symbol,
+                signal_type      = sig.get("signal_type", "SCREENER"),
+                direction        = direction,
+                entry_price      = entry,
+                score            = sig.get("score", 0),
+                confluence_level = sig.get("confluence_level", ""),
+                outcome          = "SNAPSHOT_12H",
+                exit_price       = curr_price,
+                hold_minutes     = hold_min,
+                pnl_pct          = round(pnl_pct, 3),
+                notes            = "12h unrealized snapshot",
+                indicators       = sig.get("indicators", {}),
+            )
+            sig["last_snapshot_at"] = now.isoformat()
+            snapped += 1
+            changed  = True
+            log.info(f"📸 12h snapshot: {symbol} {direction} | unrealized PnL: {pnl_pct:+.2f}%")
+        except Exception as e:
+            log.warning(f"take_lesson_snapshot error {symbol}: {e}")
+
+    if changed:
+        _save_pending(pending)
+
+    if snapped:
+        log.info(f"📸 Lesson snapshot selesai: {snapped} sinyal di-snapshot")
+    return snapped
+
+
 def on_scan_start(send_telegram_fn=None) -> list:
     """
     Dipanggil di AWAL setiap run_scan().
