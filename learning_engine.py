@@ -1147,15 +1147,21 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
         if not outcomes:
             return "📊 Signal outcomes masih kosong."
 
-        # Group by strategy
+        # Group by signal_type (field di signal_outcomes.json adalah signal_type, bukan strategy)
         stats_by_strategy = {}
         for sig in outcomes:
-            if sig.get("status") not in ("TP_HIT", "SL_HIT") and \
-               not sig.get("status", "").startswith("EXPIRED"):
+            status = sig.get("status", "")
+            if status not in ("TP_HIT", "SL_HIT") and not status.startswith("EXPIRED"):
                 continue  # Skip unresolved
 
-            strategy = sig.get("strategy", "UNKNOWN")
+            # Pakai signal_type (field yang ada), fallback ke strategy untuk backward compat
+            strategy = sig.get("signal_type") or sig.get("strategy") or "UNKNOWN"
             pnl = sig.get("pnl_pct", 0)
+
+            # Win/loss berdasarkan outcome (TP_HIT = win, SL_HIT/EXPIRED_LOSS = loss),
+            # bukan dari pnl_pct yang kadang salah untuk CONFIRMED signals.
+            is_win  = status == "TP_HIT"
+            is_loss = status in ("SL_HIT", "EXPIRED_LOSS")
 
             if strategy not in stats_by_strategy:
                 stats_by_strategy[strategy] = {
@@ -1169,9 +1175,9 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
 
             stats_by_strategy[strategy]["trades"] += 1
             stats_by_strategy[strategy]["pnls"].append(pnl)
-            if pnl > 0:
+            if is_win:
                 stats_by_strategy[strategy]["wins"] += 1
-            elif pnl < 0:
+            elif is_loss:
                 stats_by_strategy[strategy]["losses"] += 1
 
         # Compute aggregates
