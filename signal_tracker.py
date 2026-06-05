@@ -357,6 +357,7 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
                     hold_minutes    = int(hold_h * 60),
                     pnl_pct         = pnl,
                     notes           = f"Auto-tracked by signal_tracker",
+                    reasons         = sig.get("reasons", []),
                 )
                 log.info(f"📚 Learning engine updated: {symbol} {le_outcome}")
             except Exception as e:
@@ -916,6 +917,7 @@ def take_lesson_snapshot() -> int:
                 pnl_pct          = round(pnl_pct, 3),
                 notes            = "12h unrealized snapshot",
                 indicators       = sig.get("indicators", {}),
+                reasons          = sig.get("reasons", []),
             )
             sig["last_snapshot_at"] = now.isoformat()
             snapped += 1
