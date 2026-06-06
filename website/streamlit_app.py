@@ -14,9 +14,10 @@ st_autorefresh(interval=30_000, key="ar")
 
 ROOT       = pathlib.Path(__file__).parent.parent
 HERE       = pathlib.Path(__file__).parent
-PORT_FILE  = HERE / "my_portfolio.json"
-SHEET_FILE = HERE / "sheet_config.json"
-WIB        = timezone(timedelta(hours=7))
+PORT_FILE   = HERE / "my_portfolio.json"
+SHEET_FILE  = HERE / "sheet_config.json"
+WALLET_FILE = HERE / "wallets.json"
+WIB         = timezone(timedelta(hours=7))
 
 # ── Supabase helpers ─────────────────────────────────────
 def _sb_cfg():
@@ -162,6 +163,104 @@ def rows_to_csv(rows, columns=None):
         w.writerow({c: r.get(c, "") for c in columns})
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
+# ── Winner / smart-money wallet tracker (Solana, realtime) ─
+def load_wallets():
+    if WALLET_FILE.exists():
+        try:
+            d = json.loads(WALLET_FILE.read_text())
+            if isinstance(d, dict) and isinstance(d.get("watch"), list):
+                return d
+        except: pass
+    return {"watch": []}   # watch: [{address, label, snapshots:[{ts,value}]}]
+
+def save_wallets(d):
+    try: WALLET_FILE.write_text(json.dumps(d, indent=2, default=str))
+    except Exception: pass
+
+def is_sol_address(a):
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", (a or "").strip()))
+
+def short_addr(a):
+    a = a or ""
+    return f"{a[:4]}…{a[-4:]}" if len(a) > 10 else a
+
+def helius_key():
+    return _secret("HELIUS_API_KEY", "")
+
+def summarize_wallet(result):
+    """Ubah hasil Helius getAssetsByOwner → ringkasan portfolio (USD)."""
+    items   = result.get("items", []) or []
+    tokens  = []
+    tok_usd = 0.0
+    for it in items:
+        ti = it.get("token_info")
+        if not ti:                       # lewati NFT / aset non-fungible
+            continue
+        pi  = ti.get("price_info") or {}
+        usd = pf(pi.get("total_price", 0))
+        bal = pf(ti.get("balance", 0))
+        dec = ti.get("decimals", 0) or 0
+        amt = bal / (10 ** dec) if dec else bal
+        sym = ti.get("symbol") or ((it.get("content", {}) or {}).get("metadata", {}) or {}).get("symbol") or "?"
+        if usd > 0 or amt > 0:
+            tokens.append({"symbol": sym, "amount": amt, "usd": usd})
+            tok_usd += usd
+    native  = result.get("nativeBalance") or {}
+    sol_usd = pf(native.get("total_price", 0))
+    sol_amt = pf(native.get("lamports", 0)) / 1e9
+    if sol_amt > 0:
+        tokens.append({"symbol": "SOL", "amount": sol_amt, "usd": sol_usd})
+    tokens.sort(key=lambda t: -t["usd"])
+    return {
+        "total_usd": round(tok_usd + sol_usd, 2),
+        "sol_usd":   round(sol_usd, 2),
+        "sol_amt":   round(sol_amt, 4),
+        "n_tokens":  len([t for t in tokens if t["usd"] > 0]),
+        "tokens":    tokens,
+    }
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_wallet(address, key):
+    """Portfolio realtime via Helius DAS. Return (summary|None, error|None)."""
+    if not key:
+        return None, "no_key"
+    url = f"https://mainnet.helius-rpc.com/?api-key={key}"
+    payload = {
+        "jsonrpc": "2.0", "id": "w", "method": "getAssetsByOwner",
+        "params": {
+            "ownerAddress": address, "page": 1, "limit": 1000,
+            "displayOptions": {"showFungible": True, "showNativeBalance": True},
+        },
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=12)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        data = r.json()
+        if data.get("error"):
+            return None, str(data["error"])[:140]
+        return summarize_wallet(data.get("result", {})), None
+    except Exception as e:
+        return None, str(e)[:140]
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_sol_balance_public(address):
+    """Fallback tanpa API key: saldo SOL via RPC publik. Return (lamports|None, err)."""
+    try:
+        r = requests.post(
+            "https://api.mainnet-beta.solana.com",
+            json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        data = r.json()
+        if data.get("error"):
+            return None, str(data["error"])[:120]
+        return pf(data.get("result", {}).get("value", 0)), None
+    except Exception as e:
+        return None, str(e)[:120]
+
 # ── CSS ──────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -237,6 +336,7 @@ decisions   = load_json("decision_log.json", [])
 port        = load_portfolio()
 open_pos    = port.get("open_positions", [])
 sheet_cfg   = load_sheet_cfg()
+wallets     = load_wallets()
 
 # Supabase data
 connected          = sb_connected()
@@ -399,7 +499,7 @@ st.divider()
 # TABS
 # ══════════════════════════════════════════════════════════
 (tab_port, tab_open, tab_hist, tab_coins, tab_pending,
- tab_lessons, tab_log, tab_sheet, tab_learn) = st.tabs([
+ tab_lessons, tab_log, tab_wallets, tab_sheet, tab_learn) = st.tabs([
     "📊 Portfolio",
     f"📍 Open Positions ({len(open_pos)})",
     f"📋 Trade History ({total_trades})",
@@ -407,6 +507,7 @@ st.divider()
     f"⏳ Bot Pending ({len(pending)})",
     f"🧠 Lessons ({len(lessons)})",
     "📡 Decision Log",
+    f"🐋 Winner Wallets ({len(wallets.get('watch', []))})",
     "📑 Spreadsheet",
     "📚 Belajar",
 ])
@@ -765,6 +866,146 @@ with tab_log:
         st.markdown(f"""<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:14px">
           <table class="tbl"><thead><tr><th>Waktu</th><th>Symbol</th><th>Actor</th><th>Decision</th><th>Score</th><th>Reasons</th></tr></thead>
           <tbody>{rows}</tbody></table></div>""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════
+# TAB — WINNER WALLETS (smart-money tracker, realtime on-chain)
+# ══════════════════════════════════════════════════════════
+with tab_wallets:
+    st.markdown('<div class="sec-label">Smart Money · Solana</div><div class="sec-title">Winner Wallet Tracker</div>', unsafe_allow_html=True)
+    st.caption("Pantau wallet 'winner' / smart-money secara realtime: total nilai portfolio, holding token, dan tren nilai. Data on-chain via Helius.")
+
+    hkey = helius_key()
+    if hkey:
+        st.markdown('<div class="ok-badge" style="margin-bottom:8px">● Helius aktif · nilai USD realtime</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="err-badge" style="margin-bottom:8px">✕ Helius belum diset · mode saldo SOL saja</div>', unsafe_allow_html=True)
+        with st.expander("⚙️ Aktifkan nilai USD realtime (Helius — gratis)", expanded=False):
+            st.markdown("""
+1. Daftar gratis di [helius.dev](https://helius.dev) → buat **API Key**.
+2. Tambahkan ke **Secrets** (Streamlit Cloud / Railway):
+```
+HELIUS_API_KEY = "xxxxxxxx-xxxx-xxxx"
+```
+3. Reload halaman. Tanpa key, dashboard tetap jalan tapi hanya menampilkan saldo **SOL** (via RPC publik).
+            """)
+
+    # ── Tambah wallet ke watchlist ────────────────────────────
+    with st.form("add_wallet", clear_on_submit=True):
+        wc1, wc2, wc3 = st.columns([3, 2, 1])
+        addr_in  = wc1.text_input("Alamat wallet (base58)", placeholder="9LCa...SQa3")
+        label_in = wc2.text_input("Label (opsional)", placeholder="Smart money #1")
+        wc3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if wc3.form_submit_button("➕ Pantau", use_container_width=True):
+            a = addr_in.strip()
+            if not is_sol_address(a):
+                st.error("Alamat Solana tidak valid (base58, 32–44 karakter).")
+            elif any(w["address"] == a for w in wallets["watch"]):
+                st.warning("Wallet sudah ada di daftar pantau.")
+            else:
+                wallets["watch"].append({"address": a, "label": label_in.strip(), "snapshots": []})
+                save_wallets(wallets)
+                st.success(f"✅ {short_addr(a)} dipantau"); st.rerun()
+
+    watch = wallets.get("watch", [])
+    if not watch:
+        st.info("Belum ada wallet dipantau. Tambahkan alamat Solana di atas untuk mulai tracking realtime.")
+    else:
+        dirty = False
+        now   = datetime.now(WIB)
+        # ringkasan agregat
+        grand_total = 0.0
+
+        for idx, w in enumerate(watch):
+            addr = w["address"]
+            summary, err = (None, None)
+            if hkey:
+                summary, err = fetch_wallet(addr, hkey)
+            else:
+                lamports, perr = fetch_sol_balance_public(addr)
+                if lamports is not None:
+                    sol_amt = lamports / 1e9
+                    summary = {"total_usd": 0.0, "sol_usd": 0.0, "sol_amt": round(sol_amt, 4),
+                               "n_tokens": 0, "tokens": [{"symbol": "SOL", "amount": sol_amt, "usd": 0.0}]}
+                else:
+                    err = perr
+
+            # rekam snapshot tren (maks 1×/menit, simpan 60 titik)
+            if summary and hkey:
+                snaps = w.setdefault("snapshots", [])
+                last_ts = None
+                if snaps:
+                    try: last_ts = datetime.fromisoformat(snaps[-1]["ts"])
+                    except: last_ts = None
+                if last_ts is None or (now - last_ts).total_seconds() > 55:
+                    snaps.append({"ts": now.isoformat(), "value": summary["total_usd"]})
+                    w["snapshots"] = snaps[-60:]
+                    dirty = True
+
+            # hitung tren %
+            trend_pct, trend_n = None, 0
+            snaps = w.get("snapshots", [])
+            if len(snaps) >= 2 and pf(snaps[0]["value"]) > 0:
+                trend_pct = (pf(snaps[-1]["value"]) - pf(snaps[0]["value"])) / pf(snaps[0]["value"]) * 100
+                trend_n = len(snaps)
+
+            label = w.get("label") or short_addr(addr)
+            tot   = summary["total_usd"] if summary else 0.0
+            grand_total += tot
+            tc = "#00e676" if (trend_pct or 0) >= 0 else "#ff4757"
+
+            # header kartu
+            head = (f'<div class="card" style="margin-bottom:6px">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+                    f'<div><span style="font-size:16px;font-weight:800">{label}</span>'
+                    f'<span class="mono" style="font-size:11px;color:#64748b;margin-left:8px">{short_addr(addr)}</span>'
+                    f'<a href="https://solscan.io/account/{addr}" target="_blank" style="font-size:11px;color:#00d4ff;margin-left:8px;text-decoration:none">↗ solscan</a></div>')
+            if summary:
+                trend_html = (f'<span style="color:{tc};font-weight:700;font-size:12px;margin-left:10px">{trend_pct:+.2f}% ({trend_n} titik)</span>'
+                              if trend_pct is not None else '<span style="color:#64748b;font-size:11px;margin-left:10px">tren menyusul…</span>')
+                sol_usd_txt = f" (${summary['sol_usd']:,.0f})" if summary["sol_usd"] > 0 else ""
+                head += (f'<div style="text-align:right"><span style="font-size:20px;font-weight:900;font-family:\'JetBrains Mono\';color:#00d4ff">${tot:,.2f}</span>{trend_html}'
+                         f'<div style="font-size:11px;color:#64748b">{summary["n_tokens"]} token · SOL {summary["sol_amt"]:,.3f}{sol_usd_txt}</div></div>')
+            else:
+                head += f'<div class="err-badge">✕ {err or "gagal fetch"}</div>'
+            head += "</div>"
+            st.markdown(head, unsafe_allow_html=True)
+
+            # tabel holding + tren + hapus
+            cL, cR = st.columns([2, 1])
+            with cL:
+                if summary and summary["tokens"]:
+                    rows = ""
+                    for t in summary["tokens"][:8]:
+                        usd = t["usd"]
+                        rows += (f'<tr><td class="mono" style="font-weight:700">{t["symbol"]}</td>'
+                                 f'<td class="mono" style="color:#94a3b8">{t["amount"]:,.4f}</td>'
+                                 f'<td class="mono" style="text-align:right;color:{"#00e676" if usd>0 else "#64748b"}">${usd:,.2f}</td></tr>')
+                    st.markdown(f'<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:12px">'
+                                f'<table class="tbl"><thead><tr><th>Token</th><th>Jumlah</th><th style="text-align:right">Nilai USD</th></tr></thead>'
+                                f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
+                elif summary:
+                    st.caption("Tidak ada holding bernilai terdeteksi.")
+            with cR:
+                snaps = w.get("snapshots", [])
+                if len(snaps) >= 2:
+                    import pandas as pd
+                    dfx = pd.DataFrame({"v": [pf(s["value"]) for s in snaps]})
+                    st.line_chart(dfx["v"], height=120, use_container_width=True)
+                if st.button("🗑️ Hapus", key=f"delw_{idx}", use_container_width=True):
+                    wallets["watch"].pop(idx)
+                    save_wallets(wallets)
+                    st.rerun()
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        if hkey and len(watch) > 1:
+            st.markdown(f'<div class="kpi" style="margin-top:6px"><div class="kpi-label">Total Gabungan Dipantau</div>'
+                        f'<div class="kpi-val" style="color:#00d4ff">${grand_total:,.2f}</div>'
+                        f'<div class="kpi-sub">{len(watch)} wallet · auto-refresh 30 detik</div></div>', unsafe_allow_html=True)
+
+        if dirty:
+            save_wallets(wallets)
+
+    st.caption("⚠️ Snapshot tren disimpan lokal (maks 60 titik/wallet). Bukan saran finansial — pelajari strateginya, jangan menyalin buta.")
 
 # ══════════════════════════════════════════════════════════
 # TAB — SPREADSHEET (koneksi Google Sheets + ekspor CSV)

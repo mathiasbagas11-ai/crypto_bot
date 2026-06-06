@@ -17,5 +17,6 @@ signal_chat_map.json
 signal_chat_convos.json
 trading_style.json
 
-# website runtime config (URL sheet personal)
+# website runtime config (data personal)
 website/sheet_config.json
+website/wallets.json
