@@ -12,15 +12,16 @@ st.set_page_config(
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=30_000, key="ar")
 
-ROOT      = pathlib.Path(__file__).parent.parent
-HERE      = pathlib.Path(__file__).parent
-PORT_FILE = HERE / "my_portfolio.json"
-WIB       = timezone(timedelta(hours=7))
+ROOT       = pathlib.Path(__file__).parent.parent
+HERE       = pathlib.Path(__file__).parent
+PORT_FILE  = HERE / "my_portfolio.json"
+SHEET_FILE = HERE / "sheet_config.json"
+WIB        = timezone(timedelta(hours=7))
 
 # ── Supabase helpers ─────────────────────────────────────
 def _sb_cfg():
-    url = st.secrets.get("SUPABASE_URL", "") or ""
-    key = st.secrets.get("SUPABASE_ANON_KEY", "") or ""
+    url = _secret("SUPABASE_URL", "") or ""
+    key = _secret("SUPABASE_ANON_KEY", "") or ""
     return url.rstrip("/"), key
 
 def _sb_headers(key):
@@ -90,6 +91,77 @@ def pf(v):
     try: return float(v)
     except: return 0.0
 
+# ── Google Sheets / Spreadsheet helpers ───────────────────
+import re, io, csv as _csv
+
+def parse_sheet_id(text):
+    """Ambil spreadsheet ID + gid dari URL Google Sheets atau ID mentah."""
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    gid = "0"
+    m_gid = re.search(r"[#&?]gid=(\d+)", text)
+    if m_gid:
+        gid = m_gid.group(1)
+    m_id = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", text)
+    if m_id:
+        return m_id.group(1), gid
+    # mungkin ID mentah (tanpa URL)
+    if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", text):
+        return text, gid
+    return "", ""
+
+def sheet_csv_url(sheet_id, gid="0"):
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+def _secret(key, default=""):
+    """Akses Secrets dengan aman — tidak crash bila secrets.toml tidak ada."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+def load_sheet_cfg():
+    if SHEET_FILE.exists():
+        try: return json.loads(SHEET_FILE.read_text())
+        except: pass
+    # fallback ke Secrets bila ada
+    return {"url": _secret("REPORT_SHEET_URL", "")}
+
+def save_sheet_cfg(cfg):
+    try: SHEET_FILE.write_text(json.dumps(cfg, indent=2))
+    except Exception: pass
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_sheet(sheet_id, gid):
+    """Baca Google Sheet (yang sudah dipublish/anyone-with-link) sebagai DataFrame."""
+    import pandas as pd
+    url = sheet_csv_url(sheet_id, gid)
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code} — pastikan sheet di-share 'Anyone with the link'."
+        text = r.content.decode("utf-8", errors="replace")
+        if text.lstrip().lower().startswith("<!doctype html") or "<html" in text[:200].lower():
+            return None, "Sheet belum publik. Buka Share → 'Anyone with the link: Viewer'."
+        df = pd.read_csv(io.StringIO(text))
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+def rows_to_csv(rows, columns=None):
+    """List[dict] → bytes CSV (UTF-8 BOM agar rapi di Excel/Sheets)."""
+    if not rows:
+        return ("﻿" + (",".join(columns) if columns else "")).encode("utf-8")
+    if columns is None:
+        columns = list({k for r in rows for k in r.keys()})
+    buf = io.StringIO()
+    w = _csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow({c: r.get(c, "") for c in columns})
+    return ("﻿" + buf.getvalue()).encode("utf-8")
+
 # ── CSS ──────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -118,6 +190,41 @@ section[data-testid="stSidebar"]{ background:#0d1117;border-right:1px solid #1e2
 .ok-badge{ display:inline-flex;align-items:center;gap:6px;background:#00e67622;border:1px solid #00e67644;color:#00e676;font-size:11px;font-weight:700;padding:3px 12px;border-radius:100px }
 .err-badge{ display:inline-flex;align-items:center;gap:6px;background:#ff475722;border:1px solid #ff475744;color:#ff4757;font-size:11px;font-weight:700;padding:3px 12px;border-radius:100px }
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} .live-dot{display:inline-block;width:8px;height:8px;background:#00e676;border-radius:50%;animation:pulse 1.5s infinite;margin-right:5px}
+.dl-note{ font-size:12px;color:#64748b;margin:2px 0 14px }
+.step-box{ background:#0f1621;border:1px solid #1e2a38;border-radius:12px;padding:16px 18px;margin-bottom:10px }
+.step-box b{ color:#e2e8f0 }
+.learn-q{ font-weight:700;color:#00d4ff;font-size:15px;margin-bottom:6px }
+.learn-a{ color:#cbd5e1;font-size:14px;line-height:1.7 }
+.gloss{ display:grid;grid-template-columns:160px 1fr;gap:10px 16px;font-size:14px }
+.gloss .t{ font-weight:700;color:#00d4ff;font-family:'JetBrains Mono',monospace }
+.gloss .d{ color:#94a3b8;line-height:1.6 }
+
+/* ── RESPONSIVE: HP / tablet / laptop ─────────────────────── */
+/* Streamlit kolom otomatis menumpuk di layar sempit */
+@media (max-width: 820px){
+  .block-container{ padding:1rem 0.9rem 3rem!important }
+  [data-testid="stHorizontalBlock"]{ flex-wrap:wrap!important;gap:8px!important }
+  [data-testid="stHorizontalBlock"] > [data-testid="column"]{
+    flex:1 1 calc(50% - 8px)!important; min-width:calc(50% - 8px)!important; width:auto!important;
+  }
+  .kpi-val{ font-size:22px }
+  .kpi{ padding:14px 16px }
+  .sec-title{ font-size:17px }
+  .gloss{ grid-template-columns:1fr; gap:4px 0 }
+  .gloss .t{ margin-top:8px }
+  /* tabel: izinkan scroll horizontal, jangan dipotong */
+  .tbl{ font-size:12px }
+  .tbl th,.tbl td{ padding:8px 9px;white-space:nowrap }
+}
+@media (max-width: 480px){
+  [data-testid="stHorizontalBlock"] > [data-testid="column"]{
+    flex:1 1 100%!important; min-width:100%!important;
+  }
+  h1,.sec-title{ letter-spacing:-.5px }
+  .kpi-val{ font-size:20px }
+}
+/* Tab list bisa di-scroll di HP, tidak terpotong */
+[data-baseweb="tab-list"]{ overflow-x:auto!important; flex-wrap:nowrap!important; -webkit-overflow-scrolling:touch }
 </style>
 """, unsafe_allow_html=True)
 
@@ -129,6 +236,7 @@ lessons     = lessons_raw.get("lessons", []) if isinstance(lessons_raw, dict) el
 decisions   = load_json("decision_log.json", [])
 port        = load_portfolio()
 open_pos    = port.get("open_positions", [])
+sheet_cfg   = load_sheet_cfg()
 
 # Supabase data
 connected          = sb_connected()
@@ -290,7 +398,8 @@ st.divider()
 # ══════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════
-tab_port, tab_open, tab_hist, tab_coins, tab_pending, tab_lessons, tab_log = st.tabs([
+(tab_port, tab_open, tab_hist, tab_coins, tab_pending,
+ tab_lessons, tab_log, tab_sheet, tab_learn) = st.tabs([
     "📊 Portfolio",
     f"📍 Open Positions ({len(open_pos)})",
     f"📋 Trade History ({total_trades})",
@@ -298,6 +407,8 @@ tab_port, tab_open, tab_hist, tab_coins, tab_pending, tab_lessons, tab_log = st.
     f"⏳ Bot Pending ({len(pending)})",
     f"🧠 Lessons ({len(lessons)})",
     "📡 Decision Log",
+    "📑 Spreadsheet",
+    "📚 Belajar",
 ])
 
 # ══════════════════════════════════════════════════════════
@@ -654,5 +765,172 @@ with tab_log:
         st.markdown(f"""<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:14px">
           <table class="tbl"><thead><tr><th>Waktu</th><th>Symbol</th><th>Actor</th><th>Decision</th><th>Score</th><th>Reasons</th></tr></thead>
           <tbody>{rows}</tbody></table></div>""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════
+# TAB — SPREADSHEET (koneksi Google Sheets + ekspor CSV)
+# ══════════════════════════════════════════════════════════
+with tab_sheet:
+    import pandas as pd
+
+    st.markdown('<div class="sec-label">Integrasi</div><div class="sec-title">Hubungkan Spreadsheet</div>', unsafe_allow_html=True)
+    st.caption("Dua arah: **tarik** laporan dari Google Sheets ke dashboard, atau **ekspor** laporan bot ke CSV untuk dibuka di Excel / Google Sheets.")
+
+    # ── A. Baca dari Google Sheets ────────────────────────────
+    st.markdown('<div class="sec-label" style="margin-top:8px">A · Baca dari Google Sheets</div>', unsafe_allow_html=True)
+    with st.expander("ℹ️ Cara menyiapkan Google Sheet (sekali saja)", expanded=False):
+        st.markdown("""
+1. Buka Google Sheet laporanmu.
+2. Klik **Share** → ubah ke **Anyone with the link → Viewer**.
+3. Salin URL-nya, tempel di kolom bawah, lalu **Simpan**.
+
+> Dashboard membaca lewat ekspor CSV publik Google — **aman**, hanya bisa *melihat*, tidak bisa mengubah sheet-mu.
+        """)
+
+    cur_url = sheet_cfg.get("url", "")
+    in_url  = st.text_input("URL / ID Google Sheet", value=cur_url,
+                            placeholder="https://docs.google.com/spreadsheets/d/XXXX/edit#gid=0")
+    bcol1, bcol2 = st.columns([1, 3])
+    with bcol1:
+        if st.button("💾 Simpan & Muat", use_container_width=True):
+            sheet_cfg["url"] = in_url.strip()
+            save_sheet_cfg(sheet_cfg)
+            st.cache_data.clear()
+            st.rerun()
+    with bcol2:
+        if cur_url:
+            st.caption(f"Tersimpan: `{cur_url[:60]}{'…' if len(cur_url) > 60 else ''}`")
+
+    if in_url.strip():
+        sid, gid = parse_sheet_id(in_url)
+        if not sid:
+            st.error("URL/ID tidak dikenali. Tempel URL lengkap Google Sheets atau ID-nya.")
+        else:
+            df_sheet, err = fetch_sheet(sid, gid)
+            if err:
+                st.warning(f"⚠️ {err}")
+            elif df_sheet is not None:
+                st.markdown(f'<div class="ok-badge" style="margin-bottom:10px">● Terhubung · {len(df_sheet)} baris × {len(df_sheet.columns)} kolom</div>', unsafe_allow_html=True)
+                st.dataframe(df_sheet, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Unduh sheet ini (CSV)",
+                                   data=df_sheet.to_csv(index=False).encode("utf-8"),
+                                   file_name="google_sheet.csv", mime="text/csv")
+    else:
+        st.info("Belum ada sheet terhubung. Tempel URL di atas untuk menampilkan laporan dari Google Sheets.")
+
+    st.divider()
+
+    # ── B. Ekspor laporan bot ke CSV ──────────────────────────
+    st.markdown('<div class="sec-label">B · Ekspor laporan bot ke CSV</div><div class="sec-title">Unduh untuk Excel / Google Sheets</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dl-note">Setiap file bisa langsung dibuka di Excel atau diimpor ke Google Sheets (File → Import).</div>', unsafe_allow_html=True)
+
+    exports = [
+        ("📋 Trade History (Supabase)", all_trades,
+         ["ts", "coin", "direction", "entry_price", "leverage", "margin_usdt", "result", "pnl_usdt", "pnl_pct", "note"],
+         "trade_history.csv"),
+        ("📡 Sinyal Selesai (outcomes)", outcomes,
+         ["created_at", "symbol", "direction", "signal_type", "entry_price", "tp", "sl", "score", "status", "pnl_pct", "hold_hours"],
+         "signal_outcomes.csv"),
+        ("⏳ Sinyal Pending", pending,
+         ["created_at", "symbol", "direction", "signal_type", "entry_price", "tp", "sl", "score", "confluence_level", "status"],
+         "pending_signals.csv"),
+        ("📡 Decision Log", decisions,
+         ["ts", "actor", "symbol", "decision", "score", "confluence_level", "direction", "summary"],
+         "decision_log.csv"),
+        ("🧠 Lessons", lessons,
+         ["created_at", "outcome", "confidence", "pnl_pct", "rule", "tags"],
+         "lessons.csv"),
+    ]
+    ec1, ec2 = st.columns(2)
+    for i, (label, rows, cols, fname) in enumerate(exports):
+        col = ec1 if i % 2 == 0 else ec2
+        with col:
+            n = len(rows) if rows else 0
+            st.download_button(f"{label}  ·  {n} baris",
+                               data=rows_to_csv(rows, cols),
+                               file_name=fname, mime="text/csv",
+                               use_container_width=True, disabled=(n == 0),
+                               key=f"dl_{fname}")
+
+    st.divider()
+
+    # ── C. Tarik data bot LANGSUNG ke Google Sheets ───────────
+    st.markdown('<div class="sec-label">C · Tarik data bot otomatis ke Google Sheets</div>', unsafe_allow_html=True)
+    sb_url, _ = _sb_cfg()
+    if sb_url and connected:
+        import_formula = f'=IMPORTDATA("{sb_url}/rest/v1/trades?select=*&apikey={_sb_cfg()[1]}", ",")'
+        st.markdown("""Kalau bot sudah sync ke **Supabase**, kamu bisa menarik datanya langsung ke Google Sheets
+dengan satu rumus (data auto-update). Tempel rumus ini di sel **A1** sheet baru:""")
+        st.code(import_formula, language="text")
+        st.caption("Google Sheets akan menarik tabel `trades` secara berkala. Ganti `trades` → `balance_log` untuk riwayat saldo.")
+    else:
+        st.info("Hubungkan Supabase (lihat sidebar) untuk mengaktifkan auto-import ke Google Sheets via rumus `=IMPORTDATA()`. Sementara itu, gunakan ekspor CSV di atas.")
+
+# ══════════════════════════════════════════════════════════
+# TAB — BELAJAR (pusat edukasi)
+# ══════════════════════════════════════════════════════════
+with tab_learn:
+    st.markdown('<div class="sec-label">Pusat Edukasi</div><div class="sec-title">Belajar Baca Laporan & Strategi Bot</div>', unsafe_allow_html=True)
+    st.caption("Bukan saran finansial. Tujuannya memahami cara bot mengambil keputusan supaya kamu bisa belajar & mengembangkan strateginya sendiri.")
+
+    lc1, lc2 = st.columns(2)
+
+    with lc1:
+        st.markdown('<div class="sec-label" style="margin-top:8px">📖 Glosarium Istilah</div>', unsafe_allow_html=True)
+        gloss = [
+            ("Entry", "Harga rencana masuk posisi."),
+            ("TP", "Take Profit — target harga untuk merealisasikan profit."),
+            ("SL", "Stop Loss — batas kerugian; posisi ditutup agar rugi tidak membesar."),
+            ("LONG / SHORT", "LONG = untung saat harga naik. SHORT = untung saat harga turun."),
+            ("Master Score", "Skor 0–100 hasil gabungan banyak detektor. Makin tinggi, makin kuat konfirmasinya."),
+            ("Confluence", "Berapa banyak sinyal yang 'sepakat' (struktur, Order Block, FVG, dll)."),
+            ("MoneyFlow", "Arah aliran dana (inflow/outflow) di beberapa timeframe."),
+            ("R:R", "Risk/Reward — perbandingan potensi rugi vs potensi untung. 1:3 = risiko 1 untuk target 3."),
+            ("Win Rate", "Persentase sinyal/trade yang berakhir profit."),
+            ("Profit Factor", "Total profit ÷ total loss. >1 berarti sistem menguntungkan."),
+            ("Drawdown", "Penurunan saldo dari puncak ke lembah; ukuran 'rasa sakit' terbesar."),
+        ]
+        rows = "".join(f'<div class="t">{t}</div><div class="d">{d}</div>' for t, d in gloss)
+        st.markdown(f'<div class="card"><div class="gloss">{rows}</div></div>', unsafe_allow_html=True)
+
+    with lc2:
+        st.markdown('<div class="sec-label" style="margin-top:8px">🔄 Alur Kerja Bot (6 tahap)</div>', unsafe_allow_html=True)
+        steps = [
+            ("1 · Scan Pasar", "Ambil candle OHLCV semua koin dari Binance. Anti-lookahead: hitung pakai candle yang sudah closed."),
+            ("2 · Hitung Indikator", "RSI, MACD, EMA, Bollinger, ATR, volume, Open Interest, funding rate — lintas 15M/1H/4H/1D."),
+            ("3 · Fusi & Skor", "Tiap detektor 'voting' bullish/bearish. Digabung jadi Master Score + cek korelasi BTC/ETH."),
+            ("4 · Gerbang (Gates)", "News gate, sentimen, whale, blacklist koin. Sinyal lemah/berisiko dijatuhkan diam-diam."),
+            ("5 · Rencana Trade", "Tentukan entry mode, TP1–TP3, SL, dan blok risiko. Kirim ke Telegram + catat sebagai pending."),
+            ("6 · Lacak & Belajar", "Cek apakah kena TP atau SL. SL → mini-backtest → lesson → learning engine diperbarui."),
+        ]
+        body = "".join(f'<div class="step-box"><b>{t}</b><div style="color:#94a3b8;font-size:13px;margin-top:4px;line-height:1.6">{d}</div></div>' for t, d in steps)
+        st.markdown(body, unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-label" style="margin-top:18px">🧭 Cara Membaca Tiap Tab</div>', unsafe_allow_html=True)
+    qa = [
+        ("Tab Portfolio", "Ringkasan kesehatan akun: saldo, P&L, win rate, profit factor, equity curve, dan P&L per koin."),
+        ("Tab Trade History", "Semua trade yang sudah ditutup (dari Telegram via Supabase). Bisa difilter LONG/SHORT & hasil."),
+        ("Tab Bot Pending", "Sinyal yang sedang ditunggu hasilnya. Progress bar = umur sinyal terhadap timeout."),
+        ("Tab Coin Stats", "Performa bot per koin: win rate, P&L%, dan 5 hasil terakhir (titik hijau/merah)."),
+        ("Tab Lessons", "Pelajaran otomatis yang ditarik bot dari trade yang gagal — inti dari proses 'belajar'."),
+        ("Tab Spreadsheet", "Tarik laporan dari Google Sheets, atau ekspor laporan bot ke CSV/Sheets."),
+    ]
+    cols = st.columns(2)
+    for i, (q, a) in enumerate(qa):
+        with cols[i % 2]:
+            st.markdown(f'<div class="card" style="margin-bottom:10px"><div class="learn-q">{q}</div><div class="learn-a">{a}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-label" style="margin-top:18px">🛡️ Dasar Manajemen Risiko</div>', unsafe_allow_html=True)
+    st.markdown("""
+<div class="card">
+<div class="learn-a">
+• <b>Risiko per trade kecil</b> — banyak trader pakai 1–2% modal per posisi, supaya beberapa kekalahan beruntun tidak menghabiskan akun.<br>
+• <b>Selalu pasang SL</b> — tentukan batas rugi <i>sebelum</i> masuk, bukan sesudah harga bergerak melawan.<br>
+• <b>Utamakan R:R bagus</b> — cari setup dengan reward minimal 2–3× risiko.<br>
+• <b>Batas rugi harian</b> — kalau sudah menyentuh batas, berhenti dulu. Menghindari <i>revenge trading</i>.<br>
+• <b>Konsistensi &gt; keberuntungan</b> — satu trade besar tidak membuktikan strategi; ribuan trade yang membuktikannya.
+</div>
+</div>
+    """, unsafe_allow_html=True)
+    st.info("⚠️ Semua konten di sini hanya untuk edukasi. Kripto sangat berisiko — selalu lakukan riset sendiri (DYOR).")
 
 st.markdown('<div style="text-align:center;color:#1e2a38;font-size:12px;margin-top:48px;border-top:1px solid #1e2a38;padding-top:24px">CryptoBot v13 · Personal Dashboard · Bukan saran finansial</div>', unsafe_allow_html=True)

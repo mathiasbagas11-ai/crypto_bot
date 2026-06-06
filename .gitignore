@@ -16,3 +16,6 @@ coverage.xml
 signal_chat_map.json
 signal_chat_convos.json
 trading_style.json
+
+# website runtime config (URL sheet personal)
+website/sheet_config.json
