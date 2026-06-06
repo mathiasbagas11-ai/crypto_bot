@@ -81,3 +81,81 @@ def test_quality_score_capped_at_10():
 def test_quality_score_minimal_coin():
     # pc=0 -> +0.5, tiny volume -> +0.3, no volume increase -> nothing.
     assert bot.calculate_quality_score({}, 0) == 0.8
+
+
+# ── v16: reversal patterns (V-Shape + Quasimodo) ──────────────────
+import reversal_patterns as rp
+
+
+def _c(o, h, l, c, v=1.0):
+    return {"open": o, "high": h, "low": l, "close": c, "volume": v, "time": 0}
+
+
+def _seg(a, b, n):
+    return [a + (b - a) * i / (n - 1) for i in range(n)]
+
+
+def test_vshape_bullish_confirm():
+    candles = [_c(100, 101, 99, 100, 1.0) for _ in range(8)]
+    for px in [98, 96, 94, 92, 90]:
+        candles.append(_c(px + 1, px + 1.5, px - 1, px, 1.5))
+    candles.append(_c(90, 91, 88, 91, 3.0))          # pivot + rejection wick
+    for px in [93, 94, 96, 97]:
+        candles.append(_c(px - 1, px + 0.5, px - 1.2, px, 2.0))
+    r = rp.detect_v_shape(candles)
+    assert r["type"] == "V_SHAPE_BULLISH"
+    assert r["direction"] == "LONG"
+    assert r["stage"] in ("EARLY", "CONFIRM")
+    assert r["score"] > 50
+
+
+def test_vshape_bearish():
+    candles = [_c(100, 101, 99, 100, 1.0) for _ in range(8)]
+    for px in [102, 104, 106, 108, 110]:
+        candles.append(_c(px - 1, px + 1, px - 1.5, px, 1.5))
+    candles.append(_c(110, 112, 109, 109, 3.0))      # pivot high + upper wick
+    for px in [107, 106, 104, 103]:
+        candles.append(_c(px + 1, px + 1.2, px - 0.5, px, 2.0))
+    r = rp.detect_v_shape(candles)
+    assert r["type"] == "V_SHAPE_BEARISH"
+    assert r["direction"] == "SHORT"
+
+
+def test_vshape_none_on_uptrend():
+    up = [_c(100 + i, 101 + i, 99 + i, 100 + i, 1.0) for i in range(30)]
+    assert rp.detect_v_shape(up)["type"] == "NONE"
+
+
+def test_vshape_guard_short_input():
+    assert rp.detect_v_shape([])["type"] == "NONE"
+    assert rp.detect_v_shape([_c(1, 1, 1, 1)] * 5)["type"] == "NONE"
+
+
+def test_qm_bullish_confirm_in_rs_zone():
+    # LS low ~95 → LS-high ~105 → head sweep ~92 → break >105 (CHoCH) → retrace into RS
+    path = _seg(100, 95, 6) + _seg(95, 105, 7) + _seg(105, 92, 7) + _seg(92, 107, 8) + _seg(107, 94.4, 6)
+    qc = [_c(p, p + 0.6, p - 0.6, p, 1.0) for p in path]
+    r = rp.detect_qm_pattern(qc)
+    assert r["type"] == "QM_BULLISH"
+    assert r["direction"] == "LONG"
+    assert r["meta"]["choch"] is True
+    assert r["stage"] == "CONFIRM"
+    assert r["zone"]["bottom"] < r["zone"]["top"]
+
+
+def test_qm_bearish():
+    path = _seg(100, 105, 6) + _seg(105, 95, 7) + _seg(95, 108, 7) + _seg(108, 93, 8) + _seg(93, 104.7, 6)
+    qc = [_c(p, p + 0.6, p - 0.6, p, 1.0) for p in path]
+    r = rp.detect_qm_pattern(qc)
+    assert r["type"] == "QM_BEARISH"
+    assert r["direction"] == "SHORT"
+    assert r["meta"]["choch"] is True
+
+
+def test_qm_none_on_uptrend():
+    up = [_c(100 + i, 101 + i, 99 + i, 100 + i, 1.0) for i in range(40)]
+    assert rp.detect_qm_pattern(up)["type"] == "NONE"
+
+
+def test_qm_guard_short_input():
+    assert rp.detect_qm_pattern([_c(1, 1, 1, 1)] * 5)["type"] == "NONE"
