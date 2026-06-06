@@ -9831,6 +9831,13 @@ def scan_market_pulse(symbols: list = None) -> list:
             "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
             "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
         ]
+    # Whale tracker (opsional) — bias wallet per koin, guarded
+    _wt_mod = None
+    try:
+        import whale_tracker as _wt_mod
+    except Exception:
+        _wt_mod = None
+
     results = []
     log.info(f"🌐 Market pulse: {len(symbols)} symbols...")
     for sym in symbols:
@@ -9841,11 +9848,28 @@ def scan_market_pulse(symbols: list = None) -> list:
             tf_4h = analyze_timeframe(sym, "4h")
             cl = _classify_market_state(tf_1h, tf_4h)
             price = tf_1h.get("price", 0)
+
+            # Money flow (1H) — CVD + MFI, zero extra API call
+            mf = tf_1h.get("money_flow", {}) or {}
+            # Whale wallet bias (opsional)
+            whale_bias = "NEUTRAL"
+            if _wt_mod is not None:
+                try:
+                    _wctx = _wt_mod.get_whale_context_for_coin(
+                        sym.replace("USDT", "").replace("UST", ""))
+                    whale_bias = _wctx.get("whale_bias", "NEUTRAL")
+                except Exception:
+                    whale_bias = "NEUTRAL"
+
             entry = {
                 "symbol": sym, "price": price, "state": cl["state"],
                 "adx": cl["adx"], "regime": cl["regime"],
                 "trend_4h": cl["trend_4h"], "rev": cl["rev"],
                 "retest": None, "retest_src": None,
+                "mf_bias": mf.get("bias", "NEUTRAL"),
+                "cvd_pct": mf.get("cvd_pct", 0.0),
+                "mfi": mf.get("mfi", 50),
+                "whale_bias": whale_bias,
             }
             if cl["state"] in ("PUMP", "DUMP"):
                 rz, rs = _pulse_retest_zone(tf_1h, cl["state"])
@@ -9855,6 +9879,18 @@ def scan_market_pulse(symbols: list = None) -> list:
         except Exception as e:
             log.warning(f"Market pulse error {sym}: {e}")
     return results
+
+
+def _pulse_flow_tag(r: dict) -> str:
+    """Baris kecil money-flow + whale untuk satu koin di Market Pulse."""
+    mf_emoji = {"INFLOW": "💚", "OUTFLOW": "🔴", "NEUTRAL": "⚪"}.get(r.get("mf_bias", "NEUTRAL"), "⚪")
+    mfi = r.get("mfi", 50)
+    parts = [f"💧 MF {mf_emoji} CVD {r.get('cvd_pct', 0):+.1f}% · MFI {mfi:.0f}"]
+    wb = r.get("whale_bias", "NEUTRAL")
+    if wb != "NEUTRAL":
+        wh_emoji = {"BULLISH": "🟢", "BEARISH": "🔴"}.get(wb, "⚪")
+        parts.append(f"🐳 {wh_emoji} {wb}")
+    return "  ·  ".join(parts)
 
 
 def build_market_pulse_message(results: list) -> str:
@@ -9879,11 +9915,13 @@ def build_market_pulse_message(results: list) -> str:
         for r in sorted(pumps, key=lambda x: -x["adx"])[:10]:
             rt = f" · retest {fmt_num(r['retest'])} ({r['retest_src']})" if r.get("retest") else ""
             lines.append(f"  ▲ <b>{_sym(r)}</b> {fmt_num(r['price'])} · ADX {r['adx']:.0f}{rt}")
+            lines.append(f"      {_pulse_flow_tag(r)}")
     if dumps:
         lines.append("\n🔴 <b>CONTINUING DUMP</b> — wait for retest:")
         for r in sorted(dumps, key=lambda x: -x["adx"])[:10]:
             rt = f" · retest {fmt_num(r['retest'])} ({r['retest_src']})" if r.get("retest") else ""
             lines.append(f"  ▼ <b>{_sym(r)}</b> {fmt_num(r['price'])} · ADX {r['adx']:.0f}{rt}")
+            lines.append(f"      {_pulse_flow_tag(r)}")
     if revs:
         lines.append("\n🔄 <b>REVERSAL FORMING</b>:")
         for r in revs[:10]:
@@ -9891,6 +9929,7 @@ def build_market_pulse_message(results: list) -> str:
             ptag = "V-Shape" if rv.get("type", "").startswith("V_SHAPE") else "QM"
             dtag = "🟢 LONG" if rv.get("direction") == "LONG" else "🔴 SHORT"
             lines.append(f"  ⟳ <b>{_sym(r)}</b> {dtag} · {ptag} · {rv.get('stage','')} · {fmt_num(r['price'])}")
+            lines.append(f"      {_pulse_flow_tag(r)}")
     if rang:
         lines.append("\n⚪ <b>RANGING / NEUTRAL</b>:")
         lines.append("  " + ", ".join(_sym(r) for r in rang[:25]))

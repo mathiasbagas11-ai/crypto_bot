@@ -223,3 +223,32 @@ def test_pulse_message_groups():
 
 def test_pulse_message_empty():
     assert "Data tidak tersedia" in bot.build_market_pulse_message([])
+
+
+def test_pulse_flow_tag_with_whale():
+    r = {"mf_bias": "INFLOW", "cvd_pct": 3.2, "mfi": 63, "whale_bias": "BULLISH"}
+    tag = bot._pulse_flow_tag(r)
+    assert "MF" in tag and "CVD +3.2%" in tag and "MFI 63" in tag
+    assert "🐳" in tag and "BULLISH" in tag
+
+
+def test_pulse_flow_tag_neutral_whale_hidden():
+    r = {"mf_bias": "OUTFLOW", "cvd_pct": -4.1, "mfi": 31, "whale_bias": "NEUTRAL"}
+    tag = bot._pulse_flow_tag(r)
+    assert "CVD -4.1%" in tag
+    assert "🐳" not in tag   # whale neutral disembunyikan
+
+
+def test_pulse_flow_tag_defaults_safe():
+    # field hilang → tidak crash, pakai default neutral
+    tag = bot._pulse_flow_tag({})
+    assert "MF" in tag and "🐳" not in tag
+
+
+def test_pulse_message_includes_flow():
+    results = [{"symbol": "SOLUSDT", "price": 145.3, "state": "PUMP", "adx": 32,
+                "regime": "BULLISH_TREND", "trend_4h": "BULLISH", "rev": None,
+                "retest": 141.0, "retest_src": "OB", "mf_bias": "INFLOW",
+                "cvd_pct": 3.2, "mfi": 63, "whale_bias": "BULLISH"}]
+    msg = bot.build_market_pulse_message(results)
+    assert "💧 MF" in msg and "🐳" in msg
