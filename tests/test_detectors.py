@@ -159,3 +159,67 @@ def test_qm_none_on_uptrend():
 
 def test_qm_guard_short_input():
     assert rp.detect_qm_pattern([_c(1, 1, 1, 1)] * 5)["type"] == "NONE"
+
+
+# ── v16: market pulse classification ──────────────────────────────
+def _pulse_tf(trend1="NEUTRAL", regime="RANGING", adx=10, rev=None):
+    d = {"structure": {"trend": trend1, "bos": False, "choch": False},
+         "market_regime": {"regime": regime, "adx": adx}, "adx": adx,
+         "v_shape": {"type": "NONE", "stage": "NONE", "score": 0},
+         "qm_pattern": {"type": "NONE", "stage": "NONE", "score": 0}}
+    if rev:
+        d["qm_pattern"] = rev
+    return d
+
+
+def _pulse_tf4(trend):
+    return {"structure": {"trend": trend}}
+
+
+def test_pulse_classify_pump():
+    r = bot._classify_market_state(_pulse_tf("BULLISH", "BULLISH_TREND", 30), _pulse_tf4("BULLISH"))
+    assert r["state"] == "PUMP"
+
+
+def test_pulse_classify_dump():
+    r = bot._classify_market_state(_pulse_tf("BEARISH", "BEARISH_TREND", 28), _pulse_tf4("BEARISH"))
+    assert r["state"] == "DUMP"
+
+
+def test_pulse_classify_ranging_low_adx():
+    # trend bullish tapi ADX di bawah ambang → ranging, bukan pump
+    r = bot._classify_market_state(_pulse_tf("BULLISH", "BULLISH_TREND", 12), _pulse_tf4("NEUTRAL"))
+    assert r["state"] == "RANGING"
+
+
+def test_pulse_reversal_priority():
+    rev = {"type": "QM_BULLISH", "direction": "LONG", "stage": "CONFIRM", "score": 80}
+    r = bot._classify_market_state(_pulse_tf("BEARISH", "BEARISH_TREND", 30, rev=rev), _pulse_tf4("BEARISH"))
+    assert r["state"] == "REVERSAL"
+    assert r["rev"]["type"] == "QM_BULLISH"
+
+
+def test_pulse_retest_zone_pump():
+    tf = {"order_blocks": {"bullish_ob": {"mid": 100.0, "bottom": 99.0, "distance_pct": -2.0}},
+          "fvg": {"bullish_fvg": {"mid": 98.0, "distance_pct": -4.0}}}
+    price, src = bot._pulse_retest_zone(tf, "PUMP")
+    assert price == 100.0 and src == "OB"   # OB lebih dekat (|dist| lebih kecil)
+
+
+def test_pulse_message_groups():
+    results = [
+        {"symbol": "SOLUSDT", "price": 145.3, "state": "PUMP", "adx": 32, "regime": "BULLISH_TREND",
+         "trend_4h": "BULLISH", "rev": None, "retest": 141.0, "retest_src": "OB"},
+        {"symbol": "ARBUSDT", "price": 0.73, "state": "DUMP", "adx": 29, "regime": "BEARISH_TREND",
+         "trend_4h": "BEARISH", "rev": None, "retest": 0.78, "retest_src": "FVG"},
+        {"symbol": "BTCUSDT", "price": 67000, "state": "RANGING", "adx": 14, "regime": "RANGING",
+         "trend_4h": "NEUTRAL", "rev": None, "retest": None, "retest_src": None},
+    ]
+    msg = bot.build_market_pulse_message(results)
+    assert "CONTINUING PUMP" in msg and "SOL" in msg
+    assert "CONTINUING DUMP" in msg and "ARB" in msg
+    assert "RANGING" in msg and "BTC" in msg
+
+
+def test_pulse_message_empty():
+    assert "Data tidak tersedia" in bot.build_market_pulse_message([])

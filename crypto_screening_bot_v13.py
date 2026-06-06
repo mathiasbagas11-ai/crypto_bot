@@ -388,6 +388,11 @@ IGNITION_RANGE_MULT        = 1.8   # range candle ≥ 1.8x rata-rata
 IGNITION_VOL_MULT          = 2.0   # volume ≥ 2.0x rata-rata
 IGNITION_NEAR_ZONE_PCT     = 1.5   # harga ≤ 1.5% dari entry_ref pola
 
+# ── v16 — MARKET PULSE (status SEMUA koin → Market Update thread) ─
+MARKET_PULSE_ENABLED       = os.getenv("MARKET_PULSE_ENABLED", "1") not in ("0", "false", "False")
+MARKET_PULSE_INTERVAL      = int(os.getenv("MARKET_PULSE_INTERVAL", "60"))  # menit
+MARKET_PULSE_ADX_MIN       = 20    # ADX minimum buat dianggap trending (pump/dump)
+
 
 # ── EFFECTIVE THRESHOLDS (overlay dynamic_thresholds.json dari learning engine) ──
 # evolve_thresholds() menulis override ke dynamic_thresholds.json; helper ini
@@ -9751,6 +9756,168 @@ def run_reversal_auto():
 
 
 # ─────────────────────────────────────────────
+# v16: MARKET PULSE — status semua koin (continuing pump/dump/reversal/ranging)
+# ─────────────────────────────────────────────
+def _pulse_retest_zone(tf: dict, direction: str):
+    """Cari zona retest terdekat searah tren (OB/FVG). Return (price, source)."""
+    ob = tf.get("order_blocks", {}) or {}
+    fvg = tf.get("fvg", {}) or {}
+    cands = []
+    if direction == "PUMP":
+        if ob.get("bullish_ob"):
+            o = ob["bullish_ob"]
+            cands.append((o.get("mid") or o.get("bottom"), "OB", abs(o.get("distance_pct", 99))))
+        if fvg.get("bullish_fvg"):
+            f = fvg["bullish_fvg"]
+            cands.append((f.get("mid"), "FVG", abs(f.get("distance_pct", 99))))
+    else:
+        if ob.get("bearish_ob"):
+            o = ob["bearish_ob"]
+            cands.append((o.get("mid") or o.get("top"), "OB", abs(o.get("distance_pct", 99))))
+        if fvg.get("bearish_fvg"):
+            f = fvg["bearish_fvg"]
+            cands.append((f.get("mid"), "FVG", abs(f.get("distance_pct", 99))))
+    cands = [c for c in cands if c[0]]
+    if not cands:
+        return None, None
+    cands.sort(key=lambda x: x[2])
+    return cands[0][0], cands[0][1]
+
+
+def _classify_market_state(tf_1h: dict, tf_4h: dict) -> dict:
+    """Klasifikasi status koin: PUMP | DUMP | REVERSAL | RANGING (basis 1H, bias 4H)."""
+    st1 = tf_1h.get("structure", {}) or {}
+    reg1 = tf_1h.get("market_regime", {}) or {}
+    trend1 = st1.get("trend", "NEUTRAL")
+    trend4 = (tf_4h.get("structure", {}) or {}).get("trend", "NEUTRAL")
+    adx1 = tf_1h.get("adx", 0) or reg1.get("adx", 0)
+    regime = reg1.get("regime", "UNKNOWN")
+
+    vs = tf_1h.get("v_shape", {}) or {}
+    qm = tf_1h.get("qm_pattern", {}) or {}
+    rev = None
+    for p in (qm, vs):
+        if p.get("type", "NONE") != "NONE" and p.get("stage", "NONE") != "NONE" \
+                and p.get("score", 0) >= REVERSAL_EARLY_MIN_SCORE:
+            rev = p
+            break
+
+    bull = trend1 == "BULLISH" or regime in ("BREAKOUT_UP", "BULLISH_TREND")
+    bear = trend1 == "BEARISH" or regime in ("BREAKOUT_DOWN", "BEARISH_TREND")
+
+    if rev:
+        state = "REVERSAL"
+    elif bull and adx1 >= MARKET_PULSE_ADX_MIN:
+        state = "PUMP"
+    elif bear and adx1 >= MARKET_PULSE_ADX_MIN:
+        state = "DUMP"
+    else:
+        state = "RANGING"
+
+    return {
+        "state": state, "adx": round(adx1, 0), "regime": regime,
+        "trend_1h": trend1, "trend_4h": trend4, "rev": rev,
+        "bos": st1.get("bos", False), "choch": st1.get("choch", False),
+    }
+
+
+def scan_market_pulse(symbols: list = None) -> list:
+    """Scan status SEMUA koin untuk Market Pulse. Lightweight (1H+4H, no OI)."""
+    if symbols is None:
+        symbols = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+            "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT",
+            "NEARUSDT", "APTUSDT", "INJUSDT", "SUIUSDT", "ARBUSDT",
+            "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
+            "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
+        ]
+    results = []
+    log.info(f"🌐 Market pulse: {len(symbols)} symbols...")
+    for sym in symbols:
+        try:
+            tf_1h = analyze_timeframe(sym, "1h")
+            if tf_1h.get("error"):
+                continue
+            tf_4h = analyze_timeframe(sym, "4h")
+            cl = _classify_market_state(tf_1h, tf_4h)
+            price = tf_1h.get("price", 0)
+            entry = {
+                "symbol": sym, "price": price, "state": cl["state"],
+                "adx": cl["adx"], "regime": cl["regime"],
+                "trend_4h": cl["trend_4h"], "rev": cl["rev"],
+                "retest": None, "retest_src": None,
+            }
+            if cl["state"] in ("PUMP", "DUMP"):
+                rz, rs = _pulse_retest_zone(tf_1h, cl["state"])
+                entry["retest"], entry["retest_src"] = rz, rs
+            results.append(entry)
+            time.sleep(0.25)
+        except Exception as e:
+            log.warning(f"Market pulse error {sym}: {e}")
+    return results
+
+
+def build_market_pulse_message(results: list) -> str:
+    """Digest status semua koin → Market Update thread."""
+    ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
+    lines = ["━━━━━━━━━━━━━━━━━━━━━━━━", "🌐 <b>MARKET PULSE</b> — status semua koin",
+             f"🕐 {ts}  ·  <i>TF 1H (bias 4H)</i>", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if not results:
+        lines.append("❄️ Data tidak tersedia saat ini.")
+        return "\n".join(lines)
+
+    pumps = [r for r in results if r["state"] == "PUMP"]
+    dumps = [r for r in results if r["state"] == "DUMP"]
+    revs = [r for r in results if r["state"] == "REVERSAL"]
+    rang = [r for r in results if r["state"] == "RANGING"]
+
+    def _sym(r):
+        return r["symbol"].replace("USDT", "")
+
+    if pumps:
+        lines.append("\n🟢 <b>CONTINUING PUMP</b> — wait for retest:")
+        for r in sorted(pumps, key=lambda x: -x["adx"])[:10]:
+            rt = f" · retest {fmt_num(r['retest'])} ({r['retest_src']})" if r.get("retest") else ""
+            lines.append(f"  ▲ <b>{_sym(r)}</b> {fmt_num(r['price'])} · ADX {r['adx']:.0f}{rt}")
+    if dumps:
+        lines.append("\n🔴 <b>CONTINUING DUMP</b> — wait for retest:")
+        for r in sorted(dumps, key=lambda x: -x["adx"])[:10]:
+            rt = f" · retest {fmt_num(r['retest'])} ({r['retest_src']})" if r.get("retest") else ""
+            lines.append(f"  ▼ <b>{_sym(r)}</b> {fmt_num(r['price'])} · ADX {r['adx']:.0f}{rt}")
+    if revs:
+        lines.append("\n🔄 <b>REVERSAL FORMING</b>:")
+        for r in revs[:10]:
+            rv = r["rev"] or {}
+            ptag = "V-Shape" if rv.get("type", "").startswith("V_SHAPE") else "QM"
+            dtag = "🟢 LONG" if rv.get("direction") == "LONG" else "🔴 SHORT"
+            lines.append(f"  ⟳ <b>{_sym(r)}</b> {dtag} · {ptag} · {rv.get('stage','')} · {fmt_num(r['price'])}")
+    if rang:
+        lines.append("\n⚪ <b>RANGING / NEUTRAL</b>:")
+        lines.append("  " + ", ".join(_sym(r) for r in rang[:25]))
+
+    lines.append("\n⚠️ <i>Not financial advice. DYOR.</i>")
+    return "\n".join(lines)
+
+
+def run_market_pulse():
+    """Broadcast Market Pulse (status semua koin) ke Market Update thread."""
+    if not MARKET_PULSE_ENABLED:
+        return
+    log.info("🌐 Market pulse broadcast triggered")
+    results = scan_market_pulse()
+    if not results:
+        log.info("Market pulse: no data")
+        return
+    msg = build_market_pulse_message(results)
+    send_market_update(msg)
+    n_pump = sum(1 for r in results if r["state"] == "PUMP")
+    n_dump = sum(1 for r in results if r["state"] == "DUMP")
+    n_rev = sum(1 for r in results if r["state"] == "REVERSAL")
+    log.info(f"🌐 Market pulse sent: {len(results)} koin "
+             f"({n_pump} pump, {n_dump} dump, {n_rev} reversal)")
+
+
+# ─────────────────────────────────────────────
 # STANDALONE ENTRY POINT
 # ─────────────────────────────────────────────
 
@@ -9763,6 +9930,7 @@ if __name__ == "__main__":
     log.info(f"Pre-dump  : scan tiap {PREPUMP_SCAN_INTERVAL}m, alert jika score >= {PREDUMP_ALERT_THRESHOLD}")
     log.info(f"Scalp     : scan tiap {PREPUMP_SCAN_INTERVAL}m, alert jika score >= {SCALP_ALERT_THRESHOLD}")
     log.info(f"Reversal  : {'✅ V-Shape+QM scan tiap '+str(REVERSAL_SCAN_INTERVAL)+'m (2-tahap early/confirm)' if (REVERSAL_SCAN_ENABLED and REVERSAL_MODULE) else '⚠️ disabled'}")
+    log.info(f"MarketPulse: {'✅ status semua koin tiap '+str(MARKET_PULSE_INTERVAL)+'m → Market Update' if MARKET_PULSE_ENABLED else '⚠️ disabled'}")
     log.info(f"Top coins : {TOP_COINS_COUNT}")
     log.info(f"Gemini    : {'✅ Key set' if GEMINI_API_KEY else '⚠️ No key'} (manual: /analyze /ask /chart /news /macro)")
     log.info(f"NewsAPI   : {'✅ Key set' if NEWSAPI_KEY else '⚠️ No key — /news disabled'}")
@@ -9851,6 +10019,13 @@ if __name__ == "__main__":
                           id="reversal_scan", jitter=30)
         log.info(f"🔄 Reversal engine aktif: V-Shape + QM scan tiap {REVERSAL_SCAN_INTERVAL}m (2-tahap)")
 
+    # v16: Market Pulse — status semua koin → Market Update thread
+    if MARKET_PULSE_ENABLED:
+        scheduler.add_job(run_market_pulse, "interval", minutes=MARKET_PULSE_INTERVAL,
+                          id="market_pulse", jitter=60)
+        threading.Thread(target=run_market_pulse, daemon=True, name="market_pulse_startup").start()
+        log.info(f"🌐 Market Pulse aktif: status semua koin tiap {MARKET_PULSE_INTERVAL}m (+ startup)")
+
     # Risk daily reset jam 00:00 UTC
     if RISK_MODULE:
         scheduler.add_job(risk_reset_daily, "cron", hour=0, minute=0, id="risk_daily_reset")
@@ -9891,6 +10066,7 @@ if __name__ == "__main__":
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"Reversal={REVERSAL_SCAN_INTERVAL if REVERSAL_SCAN_ENABLED else 'off'}m | "
+        f"MarketPulse={MARKET_PULSE_INTERVAL if MARKET_PULSE_ENABLED else 'off'}m | "
         f"News Agent=60m | "
         f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | "
         f"Daily-learning=23:00 UTC | Lesson-snapshot=tiap 12j"
