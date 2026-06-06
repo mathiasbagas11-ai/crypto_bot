@@ -212,6 +212,7 @@ def summarize_wallet(result):
         tokens.append({"symbol": "SOL", "amount": sol_amt, "usd": sol_usd})
     tokens.sort(key=lambda t: -t["usd"])
     return {
+        "source":    "solana",
         "total_usd": round(tok_usd + sol_usd, 2),
         "sol_usd":   round(sol_usd, 2),
         "sol_amt":   round(sol_amt, 4),
@@ -260,6 +261,81 @@ def fetch_sol_balance_public(address):
         return pf(data.get("result", {}).get("value", 0)), None
     except Exception as e:
         return None, str(e)[:120]
+
+# ── Hyperliquid (perp DEX, API publik tanpa key) ──────────
+HL_API = "https://api.hyperliquid.xyz/info"
+
+def is_evm_address(a):
+    return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", (a or "").strip()))
+
+def detect_source(addr, pref="Auto"):
+    if pref and pref != "Auto":
+        return pref.lower()
+    if is_evm_address(addr):  return "hyperliquid"
+    if is_sol_address(addr):  return "solana"
+    return "unknown"
+
+def summarize_hyperliquid(d):
+    """clearinghouseState Hyperliquid → ringkasan akun perp (USD)."""
+    ms        = d.get("marginSummary") or {}
+    acct      = pf(ms.get("accountValue", 0))
+    positions = []
+    upnl      = 0.0
+    for ap in d.get("assetPositions", []) or []:
+        p    = ap.get("position") or {}
+        szi  = pf(p.get("szi", 0))
+        u    = pf(p.get("unrealizedPnl", 0))
+        upnl += u
+        lev  = (p.get("leverage") or {}).get("value", "")
+        positions.append({
+            "coin":  p.get("coin", "?"),
+            "side":  "LONG" if szi >= 0 else "SHORT",
+            "size":  abs(szi),
+            "entry": pf(p.get("entryPx", 0)),
+            "value": pf(p.get("positionValue", 0)),
+            "upnl":  u,
+            "roe":   pf(p.get("returnOnEquity", 0)) * 100,
+            "lev":   lev,
+            "liq":   pf(p.get("liquidationPx", 0) or 0),
+        })
+    positions.sort(key=lambda x: -x["value"])
+    return {
+        "source":         "hyperliquid",
+        "total_usd":      round(acct, 2),
+        "unrealized_pnl": round(upnl, 2),
+        "withdrawable":   pf(d.get("withdrawable", 0)),
+        "n_pos":          len(positions),
+        "positions":      positions,
+    }
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_hyperliquid(address):
+    """Akun perp Hyperliquid realtime — tanpa API key. Return (summary|None, err)."""
+    try:
+        r = requests.post(HL_API, json={"type": "clearinghouseState", "user": address}, timeout=12)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        d = r.json()
+        if not isinstance(d, dict) or "marginSummary" not in d:
+            return None, "Wallet tidak punya akun Hyperliquid (atau respons tak terduga)."
+        return summarize_hyperliquid(d), None
+    except Exception as e:
+        return None, str(e)[:140]
+
+def fetch_wallet_any(address, source, hkey):
+    """Dispatch fetch sesuai sumber. Return (summary|None, err)."""
+    if source == "hyperliquid":
+        return fetch_hyperliquid(address)
+    if source == "solana":
+        if hkey:
+            return fetch_wallet(address, hkey)
+        lamports, perr = fetch_sol_balance_public(address)
+        if lamports is None:
+            return None, perr
+        sol_amt = lamports / 1e9
+        return ({"source": "solana", "total_usd": 0.0, "sol_usd": 0.0, "sol_amt": round(sol_amt, 4),
+                 "n_tokens": 0, "tokens": [{"symbol": "SOL", "amount": sol_amt, "usd": 0.0}]}, None)
+    return None, "Sumber wallet tidak dikenali."
 
 # ── CSS ──────────────────────────────────────────────────
 st.markdown("""
@@ -871,66 +947,64 @@ with tab_log:
 # TAB — WINNER WALLETS (smart-money tracker, realtime on-chain)
 # ══════════════════════════════════════════════════════════
 with tab_wallets:
-    st.markdown('<div class="sec-label">Smart Money · Solana</div><div class="sec-title">Winner Wallet Tracker</div>', unsafe_allow_html=True)
-    st.caption("Pantau wallet 'winner' / smart-money secara realtime: total nilai portfolio, holding token, dan tren nilai. Data on-chain via Helius.")
+    st.markdown('<div class="sec-label">Smart Money · Multi-sumber</div><div class="sec-title">Winner Wallet Tracker</div>', unsafe_allow_html=True)
+    st.caption("Pantau wallet 'winner' / smart-money realtime dari banyak sumber: **Solana** (holding token via Helius) & **Hyperliquid** (posisi perp + PnL, tanpa API key).")
 
     hkey = helius_key()
-    if hkey:
-        st.markdown('<div class="ok-badge" style="margin-bottom:8px">● Helius aktif · nilai USD realtime</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="err-badge" style="margin-bottom:8px">✕ Helius belum diset · mode saldo SOL saja</div>', unsafe_allow_html=True)
-        with st.expander("⚙️ Aktifkan nilai USD realtime (Helius — gratis)", expanded=False):
+    badges = ('<span class="ok-badge">● Hyperliquid · realtime (no key)</span> '
+              + ('<span class="ok-badge">● Helius · Solana USD</span>' if hkey
+                 else '<span class="err-badge">✕ Helius belum diset · Solana = saldo SOL saja</span>'))
+    st.markdown(f'<div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">{badges}</div>', unsafe_allow_html=True)
+    if not hkey:
+        with st.expander("⚙️ Aktifkan nilai USD penuh untuk wallet Solana (Helius — gratis)", expanded=False):
             st.markdown("""
 1. Daftar gratis di [helius.dev](https://helius.dev) → buat **API Key**.
 2. Tambahkan ke **Secrets** (Streamlit Cloud / Railway):
 ```
 HELIUS_API_KEY = "xxxxxxxx-xxxx-xxxx"
 ```
-3. Reload halaman. Tanpa key, dashboard tetap jalan tapi hanya menampilkan saldo **SOL** (via RPC publik).
+3. Reload halaman. **Hyperliquid tidak butuh key** dan sudah jalan penuh sekarang.
             """)
 
     # ── Tambah wallet ke watchlist ────────────────────────────
     with st.form("add_wallet", clear_on_submit=True):
-        wc1, wc2, wc3 = st.columns([3, 2, 1])
-        addr_in  = wc1.text_input("Alamat wallet (base58)", placeholder="9LCa...SQa3")
+        wc1, wc2, wc3, wc4 = st.columns([3, 2, 1.4, 1])
+        addr_in  = wc1.text_input("Alamat wallet", placeholder="9LCa…SQa3 (Solana)  atau  0x1234… (Hyperliquid)")
         label_in = wc2.text_input("Label (opsional)", placeholder="Smart money #1")
-        wc3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if wc3.form_submit_button("➕ Pantau", use_container_width=True):
-            a = addr_in.strip()
-            if not is_sol_address(a):
+        src_in   = wc3.selectbox("Sumber", ["Auto", "Solana", "Hyperliquid"])
+        wc4.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if wc4.form_submit_button("➕ Pantau", use_container_width=True):
+            a   = addr_in.strip()
+            src = detect_source(a, src_in)
+            if src == "unknown":
+                st.error("Alamat tidak dikenali. Pakai alamat Solana (base58) atau Hyperliquid (0x…).")
+            elif src == "solana" and not is_sol_address(a):
                 st.error("Alamat Solana tidak valid (base58, 32–44 karakter).")
+            elif src == "hyperliquid" and not is_evm_address(a):
+                st.error("Alamat Hyperliquid harus format EVM (0x + 40 hex).")
             elif any(w["address"] == a for w in wallets["watch"]):
                 st.warning("Wallet sudah ada di daftar pantau.")
             else:
-                wallets["watch"].append({"address": a, "label": label_in.strip(), "snapshots": []})
+                wallets["watch"].append({"address": a, "label": label_in.strip(),
+                                         "source": src, "snapshots": []})
                 save_wallets(wallets)
-                st.success(f"✅ {short_addr(a)} dipantau"); st.rerun()
+                st.success(f"✅ {short_addr(a)} ({src}) dipantau"); st.rerun()
 
     watch = wallets.get("watch", [])
     if not watch:
-        st.info("Belum ada wallet dipantau. Tambahkan alamat Solana di atas untuk mulai tracking realtime.")
+        st.info("Belum ada wallet dipantau. Tambahkan alamat Solana atau Hyperliquid di atas untuk mulai tracking realtime.")
     else:
-        dirty = False
-        now   = datetime.now(WIB)
-        # ringkasan agregat
+        dirty       = False
+        now         = datetime.now(WIB)
         grand_total = 0.0
 
         for idx, w in enumerate(watch):
             addr = w["address"]
-            summary, err = (None, None)
-            if hkey:
-                summary, err = fetch_wallet(addr, hkey)
-            else:
-                lamports, perr = fetch_sol_balance_public(addr)
-                if lamports is not None:
-                    sol_amt = lamports / 1e9
-                    summary = {"total_usd": 0.0, "sol_usd": 0.0, "sol_amt": round(sol_amt, 4),
-                               "n_tokens": 0, "tokens": [{"symbol": "SOL", "amount": sol_amt, "usd": 0.0}]}
-                else:
-                    err = perr
+            src  = w.get("source") or detect_source(addr)
+            summary, err = fetch_wallet_any(addr, src, hkey)
 
-            # rekam snapshot tren (maks 1×/menit, simpan 60 titik)
-            if summary and hkey:
+            # rekam snapshot tren bila nilai USD tersedia (HL selalu; Solana butuh key)
+            if summary and pf(summary.get("total_usd", 0)) > 0:
                 snaps = w.setdefault("snapshots", [])
                 last_ts = None
                 if snaps:
@@ -941,50 +1015,83 @@ HELIUS_API_KEY = "xxxxxxxx-xxxx-xxxx"
                     w["snapshots"] = snaps[-60:]
                     dirty = True
 
-            # hitung tren %
+            # tren %
             trend_pct, trend_n = None, 0
             snaps = w.get("snapshots", [])
             if len(snaps) >= 2 and pf(snaps[0]["value"]) > 0:
                 trend_pct = (pf(snaps[-1]["value"]) - pf(snaps[0]["value"])) / pf(snaps[0]["value"]) * 100
-                trend_n = len(snaps)
+                trend_n   = len(snaps)
 
             label = w.get("label") or short_addr(addr)
             tot   = summary["total_usd"] if summary else 0.0
             grand_total += tot
             tc = "#00e676" if (trend_pct or 0) >= 0 else "#ff4757"
 
+            if src == "hyperliquid":
+                src_chip = '<span style="background:#7c3aed22;color:#a78bfa;border:1px solid #7c3aed55;padding:1px 8px;border-radius:100px;font-size:10px;font-weight:700">HYPERLIQUID</span>'
+                explorer = f'https://app.hyperliquid.xyz/explorer/address/{addr}'
+                exp_name = 'explorer'
+            else:
+                src_chip = '<span style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff55;padding:1px 8px;border-radius:100px;font-size:10px;font-weight:700">SOLANA</span>'
+                explorer = f'https://solscan.io/account/{addr}'
+                exp_name = 'solscan'
+
             # header kartu
             head = (f'<div class="card" style="margin-bottom:6px">'
                     f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
-                    f'<div><span style="font-size:16px;font-weight:800">{label}</span>'
-                    f'<span class="mono" style="font-size:11px;color:#64748b;margin-left:8px">{short_addr(addr)}</span>'
-                    f'<a href="https://solscan.io/account/{addr}" target="_blank" style="font-size:11px;color:#00d4ff;margin-left:8px;text-decoration:none">↗ solscan</a></div>')
+                    f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="font-size:16px;font-weight:800">{label}</span>{src_chip}'
+                    f'<span class="mono" style="font-size:11px;color:#64748b">{short_addr(addr)}</span>'
+                    f'<a href="{explorer}" target="_blank" style="font-size:11px;color:#00d4ff;text-decoration:none">↗ {exp_name}</a></div>')
             if summary:
                 trend_html = (f'<span style="color:{tc};font-weight:700;font-size:12px;margin-left:10px">{trend_pct:+.2f}% ({trend_n} titik)</span>'
                               if trend_pct is not None else '<span style="color:#64748b;font-size:11px;margin-left:10px">tren menyusul…</span>')
-                sol_usd_txt = f" (${summary['sol_usd']:,.0f})" if summary["sol_usd"] > 0 else ""
+                if src == "hyperliquid":
+                    uc  = "#00e676" if summary["unrealized_pnl"] >= 0 else "#ff4757"
+                    sub = (f'{summary["n_pos"]} posisi · uPnL <span style="color:{uc}">{summary["unrealized_pnl"]:+,.2f}</span>'
+                           f' · withdrawable ${summary["withdrawable"]:,.0f}')
+                else:
+                    sol_usd_txt = f" (${summary['sol_usd']:,.0f})" if summary.get("sol_usd", 0) > 0 else ""
+                    sub = f'{summary["n_tokens"]} token · SOL {summary["sol_amt"]:,.3f}{sol_usd_txt}'
                 head += (f'<div style="text-align:right"><span style="font-size:20px;font-weight:900;font-family:\'JetBrains Mono\';color:#00d4ff">${tot:,.2f}</span>{trend_html}'
-                         f'<div style="font-size:11px;color:#64748b">{summary["n_tokens"]} token · SOL {summary["sol_amt"]:,.3f}{sol_usd_txt}</div></div>')
+                         f'<div style="font-size:11px;color:#64748b">{sub}</div></div>')
             else:
                 head += f'<div class="err-badge">✕ {err or "gagal fetch"}</div>'
             head += "</div>"
             st.markdown(head, unsafe_allow_html=True)
 
-            # tabel holding + tren + hapus
+            # detail (branch per sumber) + tren + hapus
             cL, cR = st.columns([2, 1])
             with cL:
-                if summary and summary["tokens"]:
-                    rows = ""
-                    for t in summary["tokens"][:8]:
-                        usd = t["usd"]
-                        rows += (f'<tr><td class="mono" style="font-weight:700">{t["symbol"]}</td>'
-                                 f'<td class="mono" style="color:#94a3b8">{t["amount"]:,.4f}</td>'
-                                 f'<td class="mono" style="text-align:right;color:{"#00e676" if usd>0 else "#64748b"}">${usd:,.2f}</td></tr>')
-                    st.markdown(f'<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:12px">'
-                                f'<table class="tbl"><thead><tr><th>Token</th><th>Jumlah</th><th style="text-align:right">Nilai USD</th></tr></thead>'
-                                f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
-                elif summary:
-                    st.caption("Tidak ada holding bernilai terdeteksi.")
+                if summary and src == "hyperliquid":
+                    if summary["positions"]:
+                        rows = ""
+                        for p in summary["positions"][:10]:
+                            sc = "#00e676" if p["side"] == "LONG" else "#ff4757"
+                            uc = "#00e676" if p["upnl"] >= 0 else "#ff4757"
+                            rows += (f'<tr><td class="mono" style="font-weight:700">{p["coin"]}</td>'
+                                     f'<td style="color:{sc};font-weight:700">{p["side"]} {p["lev"]}x</td>'
+                                     f'<td class="mono" style="color:#94a3b8">${p["entry"]:,.4f}</td>'
+                                     f'<td class="mono" style="text-align:right">${p["value"]:,.0f}</td>'
+                                     f'<td class="mono" style="text-align:right;color:{uc};font-weight:700">{p["upnl"]:+,.2f}</td></tr>')
+                        st.markdown(f'<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:12px">'
+                                    f'<table class="tbl"><thead><tr><th>Coin</th><th>Arah</th><th>Entry</th>'
+                                    f'<th style="text-align:right">Notional</th><th style="text-align:right">uPnL</th></tr></thead>'
+                                    f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
+                    else:
+                        st.caption("Tidak ada posisi perp terbuka.")
+                elif summary:   # solana
+                    if summary["tokens"]:
+                        rows = ""
+                        for t in summary["tokens"][:8]:
+                            usd = t["usd"]
+                            rows += (f'<tr><td class="mono" style="font-weight:700">{t["symbol"]}</td>'
+                                     f'<td class="mono" style="color:#94a3b8">{t["amount"]:,.4f}</td>'
+                                     f'<td class="mono" style="text-align:right;color:{"#00e676" if usd>0 else "#64748b"}">${usd:,.2f}</td></tr>')
+                        st.markdown(f'<div style="overflow-x:auto;background:#0f1621;border:1px solid #1e2a38;border-radius:12px">'
+                                    f'<table class="tbl"><thead><tr><th>Token</th><th>Jumlah</th><th style="text-align:right">Nilai USD</th></tr></thead>'
+                                    f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
+                    else:
+                        st.caption("Tidak ada holding bernilai terdeteksi.")
             with cR:
                 snaps = w.get("snapshots", [])
                 if len(snaps) >= 2:
@@ -997,7 +1104,7 @@ HELIUS_API_KEY = "xxxxxxxx-xxxx-xxxx"
                     st.rerun()
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        if hkey and len(watch) > 1:
+        if len(watch) > 1 and grand_total > 0:
             st.markdown(f'<div class="kpi" style="margin-top:6px"><div class="kpi-label">Total Gabungan Dipantau</div>'
                         f'<div class="kpi-val" style="color:#00d4ff">${grand_total:,.2f}</div>'
                         f'<div class="kpi-sub">{len(watch)} wallet · auto-refresh 30 detik</div></div>', unsafe_allow_html=True)
