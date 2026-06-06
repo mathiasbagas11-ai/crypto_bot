@@ -81,3 +81,174 @@ def test_quality_score_capped_at_10():
 def test_quality_score_minimal_coin():
     # pc=0 -> +0.5, tiny volume -> +0.3, no volume increase -> nothing.
     assert bot.calculate_quality_score({}, 0) == 0.8
+
+
+# ── v16: reversal patterns (V-Shape + Quasimodo) ──────────────────
+import reversal_patterns as rp
+
+
+def _c(o, h, l, c, v=1.0):
+    return {"open": o, "high": h, "low": l, "close": c, "volume": v, "time": 0}
+
+
+def _seg(a, b, n):
+    return [a + (b - a) * i / (n - 1) for i in range(n)]
+
+
+def test_vshape_bullish_confirm():
+    candles = [_c(100, 101, 99, 100, 1.0) for _ in range(8)]
+    for px in [98, 96, 94, 92, 90]:
+        candles.append(_c(px + 1, px + 1.5, px - 1, px, 1.5))
+    candles.append(_c(90, 91, 88, 91, 3.0))          # pivot + rejection wick
+    for px in [93, 94, 96, 97]:
+        candles.append(_c(px - 1, px + 0.5, px - 1.2, px, 2.0))
+    r = rp.detect_v_shape(candles)
+    assert r["type"] == "V_SHAPE_BULLISH"
+    assert r["direction"] == "LONG"
+    assert r["stage"] in ("EARLY", "CONFIRM")
+    assert r["score"] > 50
+
+
+def test_vshape_bearish():
+    candles = [_c(100, 101, 99, 100, 1.0) for _ in range(8)]
+    for px in [102, 104, 106, 108, 110]:
+        candles.append(_c(px - 1, px + 1, px - 1.5, px, 1.5))
+    candles.append(_c(110, 112, 109, 109, 3.0))      # pivot high + upper wick
+    for px in [107, 106, 104, 103]:
+        candles.append(_c(px + 1, px + 1.2, px - 0.5, px, 2.0))
+    r = rp.detect_v_shape(candles)
+    assert r["type"] == "V_SHAPE_BEARISH"
+    assert r["direction"] == "SHORT"
+
+
+def test_vshape_none_on_uptrend():
+    up = [_c(100 + i, 101 + i, 99 + i, 100 + i, 1.0) for i in range(30)]
+    assert rp.detect_v_shape(up)["type"] == "NONE"
+
+
+def test_vshape_guard_short_input():
+    assert rp.detect_v_shape([])["type"] == "NONE"
+    assert rp.detect_v_shape([_c(1, 1, 1, 1)] * 5)["type"] == "NONE"
+
+
+def test_qm_bullish_confirm_in_rs_zone():
+    # LS low ~95 → LS-high ~105 → head sweep ~92 → break >105 (CHoCH) → retrace into RS
+    path = _seg(100, 95, 6) + _seg(95, 105, 7) + _seg(105, 92, 7) + _seg(92, 107, 8) + _seg(107, 94.4, 6)
+    qc = [_c(p, p + 0.6, p - 0.6, p, 1.0) for p in path]
+    r = rp.detect_qm_pattern(qc)
+    assert r["type"] == "QM_BULLISH"
+    assert r["direction"] == "LONG"
+    assert r["meta"]["choch"] is True
+    assert r["stage"] == "CONFIRM"
+    assert r["zone"]["bottom"] < r["zone"]["top"]
+
+
+def test_qm_bearish():
+    path = _seg(100, 105, 6) + _seg(105, 95, 7) + _seg(95, 108, 7) + _seg(108, 93, 8) + _seg(93, 104.7, 6)
+    qc = [_c(p, p + 0.6, p - 0.6, p, 1.0) for p in path]
+    r = rp.detect_qm_pattern(qc)
+    assert r["type"] == "QM_BEARISH"
+    assert r["direction"] == "SHORT"
+    assert r["meta"]["choch"] is True
+
+
+def test_qm_none_on_uptrend():
+    up = [_c(100 + i, 101 + i, 99 + i, 100 + i, 1.0) for i in range(40)]
+    assert rp.detect_qm_pattern(up)["type"] == "NONE"
+
+
+def test_qm_guard_short_input():
+    assert rp.detect_qm_pattern([_c(1, 1, 1, 1)] * 5)["type"] == "NONE"
+
+
+# ── v16: market pulse classification ──────────────────────────────
+def _pulse_tf(trend1="NEUTRAL", regime="RANGING", adx=10, rev=None):
+    d = {"structure": {"trend": trend1, "bos": False, "choch": False},
+         "market_regime": {"regime": regime, "adx": adx}, "adx": adx,
+         "v_shape": {"type": "NONE", "stage": "NONE", "score": 0},
+         "qm_pattern": {"type": "NONE", "stage": "NONE", "score": 0}}
+    if rev:
+        d["qm_pattern"] = rev
+    return d
+
+
+def _pulse_tf4(trend):
+    return {"structure": {"trend": trend}}
+
+
+def test_pulse_classify_pump():
+    r = bot._classify_market_state(_pulse_tf("BULLISH", "BULLISH_TREND", 30), _pulse_tf4("BULLISH"))
+    assert r["state"] == "PUMP"
+
+
+def test_pulse_classify_dump():
+    r = bot._classify_market_state(_pulse_tf("BEARISH", "BEARISH_TREND", 28), _pulse_tf4("BEARISH"))
+    assert r["state"] == "DUMP"
+
+
+def test_pulse_classify_ranging_low_adx():
+    # trend bullish tapi ADX di bawah ambang → ranging, bukan pump
+    r = bot._classify_market_state(_pulse_tf("BULLISH", "BULLISH_TREND", 12), _pulse_tf4("NEUTRAL"))
+    assert r["state"] == "RANGING"
+
+
+def test_pulse_reversal_priority():
+    rev = {"type": "QM_BULLISH", "direction": "LONG", "stage": "CONFIRM", "score": 80}
+    r = bot._classify_market_state(_pulse_tf("BEARISH", "BEARISH_TREND", 30, rev=rev), _pulse_tf4("BEARISH"))
+    assert r["state"] == "REVERSAL"
+    assert r["rev"]["type"] == "QM_BULLISH"
+
+
+def test_pulse_retest_zone_pump():
+    tf = {"order_blocks": {"bullish_ob": {"mid": 100.0, "bottom": 99.0, "distance_pct": -2.0}},
+          "fvg": {"bullish_fvg": {"mid": 98.0, "distance_pct": -4.0}}}
+    price, src = bot._pulse_retest_zone(tf, "PUMP")
+    assert price == 100.0 and src == "OB"   # OB lebih dekat (|dist| lebih kecil)
+
+
+def test_pulse_message_groups():
+    results = [
+        {"symbol": "SOLUSDT", "price": 145.3, "state": "PUMP", "adx": 32, "regime": "BULLISH_TREND",
+         "trend_4h": "BULLISH", "rev": None, "retest": 141.0, "retest_src": "OB"},
+        {"symbol": "ARBUSDT", "price": 0.73, "state": "DUMP", "adx": 29, "regime": "BEARISH_TREND",
+         "trend_4h": "BEARISH", "rev": None, "retest": 0.78, "retest_src": "FVG"},
+        {"symbol": "BTCUSDT", "price": 67000, "state": "RANGING", "adx": 14, "regime": "RANGING",
+         "trend_4h": "NEUTRAL", "rev": None, "retest": None, "retest_src": None},
+    ]
+    msg = bot.build_market_pulse_message(results)
+    assert "CONTINUING PUMP" in msg and "SOL" in msg
+    assert "CONTINUING DUMP" in msg and "ARB" in msg
+    assert "RANGING" in msg and "BTC" in msg
+
+
+def test_pulse_message_empty():
+    assert "Data tidak tersedia" in bot.build_market_pulse_message([])
+
+
+def test_pulse_flow_tag_with_whale():
+    r = {"mf_bias": "INFLOW", "cvd_pct": 3.2, "mfi": 63, "whale_bias": "BULLISH"}
+    tag = bot._pulse_flow_tag(r)
+    assert "MF" in tag and "CVD +3.2%" in tag and "MFI 63" in tag
+    assert "🐳" in tag and "BULLISH" in tag
+
+
+def test_pulse_flow_tag_neutral_whale_hidden():
+    r = {"mf_bias": "OUTFLOW", "cvd_pct": -4.1, "mfi": 31, "whale_bias": "NEUTRAL"}
+    tag = bot._pulse_flow_tag(r)
+    assert "CVD -4.1%" in tag
+    assert "🐳" not in tag   # whale neutral disembunyikan
+
+
+def test_pulse_flow_tag_defaults_safe():
+    # field hilang → tidak crash, pakai default neutral
+    tag = bot._pulse_flow_tag({})
+    assert "MF" in tag and "🐳" not in tag
+
+
+def test_pulse_message_includes_flow():
+    results = [{"symbol": "SOLUSDT", "price": 145.3, "state": "PUMP", "adx": 32,
+                "regime": "BULLISH_TREND", "trend_4h": "BULLISH", "rev": None,
+                "retest": 141.0, "retest_src": "OB", "mf_bias": "INFLOW",
+                "cvd_pct": 3.2, "mfi": 63, "whale_bias": "BULLISH"}]
+    msg = bot.build_market_pulse_message(results)
+    assert "💧 MF" in msg and "🐳" in msg
