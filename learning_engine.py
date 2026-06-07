@@ -278,12 +278,13 @@ def _derive_lesson(perf: dict) -> Optional[dict]:
     elif outcome == "SL_HIT" or pnl < -3:
         category = "bad"
     elif outcome in ("SNAPSHOT_12H", "SNAPSHOT"):
+        # Unrealized snapshot: hanya meaningful kalau gerakannya signifikan
         if pnl > 2:
             category = "good"
         elif pnl < -2:
             category = "bad"
         else:
-            return None   # belum cukup gerak
+            return None   # belum cukup gerak untuk disimpulkan
     elif outcome == "EXPIRED" and abs(pnl) < 1:
         return None
     elif outcome == "MANUAL_CLOSE" and pnl > 1.5:
