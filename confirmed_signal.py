@@ -896,6 +896,9 @@ def generate_confirmed_signal(
         "trade":        trade,
         "oi_data":      oi_data,
         "val_result":   val_result,
+        "tf_4h":        tf_4h,
+        "tf_1h":        tf_1h,
+        "tf_15m":       tf_15m,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1004,6 +1007,8 @@ def format_confirmed_signal_message(signal: dict) -> str:
 
     # Trade plan
     entry  = trade.get("entry", price)
+    tp0    = trade.get("tp0")
+    tp0_b  = trade.get("tp0_basis", "")
     tp1    = trade.get("tp1")
     tp2    = trade.get("tp2")
     sl     = trade.get("sl")
@@ -1035,6 +1040,21 @@ def format_confirmed_signal_message(signal: dict) -> str:
         weak  = " (weak)" if "WEAK" in d else ""
         comp_lines.append(f"  {agree} {icons.get(k,'')} {k.upper()}: {s}/100 → +{w:.0f}pt{weak}")
 
+    # LRLR info dari timeframe data (jika tersedia di signal)
+    lrlr_lines = []
+    for _tf_key, _tf_label in [("tf_1h", "1H"), ("tf_4h", "4H")]:
+        _tf = signal.get(_tf_key, {})
+        _lr = _tf.get("lrlr", {}) if _tf else {}
+        if _lr.get("valid"):
+            _dir_icon = "📈" if _lr["direction"] == "BULLISH" else "📉" if _lr["direction"] == "BEARISH" else "➡️"
+            _pos = _lr.get("price_vs_channel", "INSIDE")
+            _clr = _lr.get("clear_lrlr_target")
+            _clr_str = f" → Clear: {_f(_clr)}" if _clr else ""
+            lrlr_lines.append(
+                f"  {_dir_icon} LRLR {_tf_label}: {_lr['direction']} | Mid {_f(_lr['mid'])} | "
+                f"Upper {_f(_lr['upper'])} | Pos: {_pos}{_clr_str}"
+            )
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{conf_emoji} *CONFIRMED ENTRY SIGNAL*",
@@ -1047,10 +1067,19 @@ def format_confirmed_signal_message(signal: dict) -> str:
         "",
         "─────── TRADE PLAN ───────",
         f"{'🟢' if direc == 'LONG' else '🔴'} Entry   : *{_f(entry)}*  ← MARKET",
+    ]
+    if tp0:
+        lines.append(f"🔵 TP0    : *{_f(tp0)}*  {_pct(entry,tp0)} ← {tp0_b} | konfirmasi awal")
+    lines += [
         f"🟡 TP1    : *{_f(tp1)}*  {_pct(entry,tp1)}  ({tp1_r}R) ← {tp1_b} | close 50%",
         f"🟢 TP2    : *{_f(tp2)}*  {_pct(entry,tp2)}  ({tp2_r}R) ← {tp2_b} | runner",
         f"🔴 SL     : *{_f(sl)}*  {_pct(entry,sl)}",
         f"📐 R:R    : *{rr:.1f}:1*  {'✅' if rr >= 2.0 else '⚠️ < 2R'}",
+    ]
+    if lrlr_lines:
+        lines += ["", "─────── LINEAR REG CHANNEL ───────"]
+        lines.extend(lrlr_lines)
+    lines += [
         "",
         "─────── SIGNAL BREAKDOWN ───────",
     ]

@@ -2396,6 +2396,92 @@ def detect_trendline(candles: list, swing_type: str = "lows") -> dict:
     return result
 
 
+def detect_linear_regression_channel(candles: list, period: int = 50) -> dict:
+    """
+    Linear Regression Channel (LRLR) — regresi statistik semua candle dalam period.
+    Berbeda dengan detect_trendline (hanya swing points), LRLR memakai SEMUA close
+    sehingga menghasilkan garis mean yang jauh lebih stabil dan objektif.
+
+    Return:
+      valid             : bool — True jika R² >= 0.3 (fit cukup baik)
+      mid               : nilai center regression di candle terakhir
+      upper             : mid + 2×stdev residual  (resistance dinamis)
+      lower             : mid - 2×stdev residual  (support dinamis)
+      slope_pct         : kemiringan dalam % per candle
+      direction         : BULLISH | BEARISH | FLAT
+      r_squared         : kualitas fit 0–1
+      price_vs_channel  : ABOVE | INSIDE | BELOW
+      clear_lrlr_target : level yang harus ditembus untuk "clear LRLR"
+                          (upper jika price < upper, None jika sudah di atas)
+    """
+    empty = {
+        "valid": False, "mid": None, "upper": None, "lower": None,
+        "slope_pct": 0.0, "direction": "FLAT", "r_squared": 0.0,
+        "price_vs_channel": "INSIDE", "clear_lrlr_target": None,
+    }
+    if not candles or len(candles) < 20:
+        return empty
+
+    n = min(period, len(candles))
+    subset = candles[-n:]
+    closes = np.array([c["close"] for c in subset], dtype=float)
+    xs = np.arange(n, dtype=float)
+
+    x_mean = xs.mean()
+    y_mean = closes.mean()
+    ss_xy  = np.sum((xs - x_mean) * (closes - y_mean))
+    ss_xx  = np.sum((xs - x_mean) ** 2)
+    if ss_xx == 0:
+        return empty
+    slope     = ss_xy / ss_xx
+    intercept = y_mean - slope * x_mean
+
+    fitted    = slope * xs + intercept
+    residuals = closes - fitted
+    stdev     = float(np.std(residuals))
+
+    ss_res = float(np.sum(residuals ** 2))
+    ss_tot = float(np.sum((closes - y_mean) ** 2))
+    r_sq   = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # Level di candle paling akhir (index n-1)
+    current_mid   = float(slope * (n - 1) + intercept)
+    current_upper = current_mid + 2.0 * stdev
+    current_lower = current_mid - 2.0 * stdev
+    current_price = float(candles[-1]["close"])
+
+    slope_pct = (slope / y_mean) * 100 if y_mean != 0 else 0.0
+    if slope_pct > 0.01:
+        direction = "BULLISH"
+    elif slope_pct < -0.01:
+        direction = "BEARISH"
+    else:
+        direction = "FLAT"
+
+    if current_price > current_upper:
+        price_vs_channel = "ABOVE"
+    elif current_price < current_lower:
+        price_vs_channel = "BELOW"
+    else:
+        price_vs_channel = "INSIDE"
+
+    # Target "clear LRLR" = harga upper band channel
+    # Jika price sudah di atas, tidak ada clear target lagi
+    clear_target = round(current_upper, 8) if current_price < current_upper else None
+
+    return {
+        "valid":             r_sq >= 0.3,
+        "mid":               round(current_mid, 8),
+        "upper":             round(current_upper, 8),
+        "lower":             round(current_lower, 8),
+        "slope_pct":         round(slope_pct, 4),
+        "direction":         direction,
+        "r_squared":         round(r_sq, 4),
+        "price_vs_channel":  price_vs_channel,
+        "clear_lrlr_target": clear_target,
+    }
+
+
 def calculate_entry_zone(ob: dict, fvg: dict, sweep: dict, price: float, direction: str) -> dict:
     """
     Hitung entry zone sebagai RANGE (bukan single price).
@@ -2984,6 +3070,7 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "sweep":          detect_liquidity_sweep(closed_candles, structure),
         "trendline_sup":  detect_trendline(closed_candles, "lows"),
         "trendline_res":  detect_trendline(closed_candles, "highs"),
+        "lrlr":           detect_linear_regression_channel(closed_candles),
         "money_flow":     detect_money_flow(closed_candles),     # v13: CVD+MFI+VWAP
         "ema9":           calculate_ema(closed_candles, 9),
         "ema21":          calculate_ema(closed_candles, 21),
@@ -4711,6 +4798,8 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
 
     struct4 = tf_4h.get("structure", {})
     struct1 = tf_1h.get("structure", {})
+    lrlr_4h = tf_4h.get("lrlr", {})
+    lrlr_1h = tf_1h.get("lrlr", {})
     risk = abs(entry - sl) if (sl and sl != entry) else entry * 0.02
 
     result = {
@@ -4731,6 +4820,16 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
         if liq_1h.get("nearest_eqh") and liq_1h["nearest_eqh"]["distance_pct"] > 0.5:
             eqh_p = entry * (1 + liq_1h["nearest_eqh"]["distance_pct"] / 100)
             levels.append(("EQH", round(eqh_p * 0.997, 8)))
+
+        # LRLR: tambahkan mid & upper sebagai target "clear LRLR"
+        for lrlr_tf, lrlr_label in [(lrlr_1h, "1H"), (lrlr_4h, "4H")]:
+            if lrlr_tf.get("valid"):
+                lrlr_mid = lrlr_tf.get("mid")
+                lrlr_upper = lrlr_tf.get("upper")
+                if lrlr_mid and lrlr_mid > entry * 1.003:
+                    levels.append((f"LRLR {lrlr_label} Mid", round(lrlr_mid * 0.999, 8)))
+                if lrlr_upper and lrlr_upper > entry * 1.005:
+                    levels.append((f"LRLR {lrlr_label} Clear", round(lrlr_upper * 0.998, 8)))
 
         levels.sort(key=lambda x: x[1])
 
@@ -4757,6 +4856,16 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
         if liq_1h.get("nearest_eql") and liq_1h["nearest_eql"]["distance_pct"] > 0.5:
             eql_p = entry * (1 - liq_1h["nearest_eql"]["distance_pct"] / 100)
             levels.append(("EQL", round(eql_p * 1.003, 8)))
+
+        # LRLR: tambahkan mid & lower sebagai target SHORT
+        for lrlr_tf, lrlr_label in [(lrlr_1h, "1H"), (lrlr_4h, "4H")]:
+            if lrlr_tf.get("valid"):
+                lrlr_mid = lrlr_tf.get("mid")
+                lrlr_lower = lrlr_tf.get("lower")
+                if lrlr_mid and lrlr_mid < entry * 0.997:
+                    levels.append((f"LRLR {lrlr_label} Mid", round(lrlr_mid * 1.001, 8)))
+                if lrlr_lower and lrlr_lower < entry * 0.995:
+                    levels.append((f"LRLR {lrlr_label} Clear", round(lrlr_lower * 1.002, 8)))
 
         # Sort descending → cari TP1 paling dekat (harga tertinggi yg masih <= min_tp1)
         levels.sort(key=lambda x: x[1], reverse=True)
@@ -5095,6 +5204,15 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
+        # TP0: FVG mid-point sebagai konfirmasi level konservatif pertama
+        tp0 = None; tp0_basis = ""
+        for fvg_src, fvg_lbl in [(fvg1, "1H"), (fvg15, "15M")]:
+            bfvg = fvg_src.get("bullish_fvg") if fvg_src.get("fvg_type") == "BULLISH" else None
+            if bfvg:
+                mid = bfvg.get("mid")
+                if mid and mid > entry * 1.001 and mid < (tps["tp1"] or entry * 1.1):
+                    tp0 = round(mid, 8); tp0_basis = f"FVG {fvg_lbl} Mid"; break
+
         if entry_mode == "MOMENTUM_NOW":
             mom_str = " | ".join(mode_info["momentum_reasons"][:2])
             entry_instruction = f"🚀 MOMENTUM ENTRY — Trend bullish LTF aktif\n   {mom_str}"
@@ -5106,6 +5224,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         return {
             "direction": "LONG", "entry": entry, "sl": sl,
+            "tp0": tp0, "tp0_basis": tp0_basis,
             "tp1": tps["tp1"], "tp2": tps["tp2"],
             "tp1_r": tps["tp1_r"], "tp2_r": tps["tp2_r"],
             "tp1_basis": tps["tp1_basis"], "tp2_basis": tps["tp2_basis"],
@@ -5189,6 +5308,15 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
         rr  = tps["tp1_r"]
         entry_mode = mode_info["mode"]
 
+        # TP0: FVG mid-point sebagai konfirmasi level konservatif pertama (SHORT)
+        tp0 = None; tp0_basis = ""
+        for fvg_src, fvg_lbl in [(fvg1, "1H"), (fvg15, "15M")]:
+            bfvg = fvg_src.get("bearish_fvg") if fvg_src.get("fvg_type") == "BEARISH" else None
+            if bfvg:
+                mid = bfvg.get("mid")
+                if mid and mid < entry * 0.999 and mid > (tps["tp1"] or entry * 0.9):
+                    tp0 = round(mid, 8); tp0_basis = f"FVG {fvg_lbl} Mid"; break
+
         if entry_mode == "MOMENTUM_NOW":
             mom_str = " | ".join(mode_info["momentum_reasons"][:2])
             entry_instruction = f"🔻 MOMENTUM ENTRY — Trend bearish LTF aktif\n   {mom_str}"
@@ -5200,6 +5328,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
 
         return {
             "direction": "SHORT", "entry": entry, "sl": sl,
+            "tp0": tp0, "tp0_basis": tp0_basis,
             "tp1": tps["tp1"], "tp2": tps["tp2"],
             "tp1_r": tps["tp1_r"], "tp2_r": tps["tp2_r"],
             "tp1_basis": tps["tp1_basis"], "tp2_basis": tps["tp2_basis"],
@@ -6293,6 +6422,7 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "sweep": detect_liquidity_sweep(closed_candles, structure),
         "trendline_sup": detect_trendline(closed_candles, "lows"),
         "trendline_res": detect_trendline(closed_candles, "highs"),
+        "lrlr":          detect_linear_regression_channel(closed_candles),
         "money_flow": detect_money_flow(closed_candles),
         "ema9": calculate_ema(closed_candles, 9),
         "ema21": calculate_ema(closed_candles, 21),
