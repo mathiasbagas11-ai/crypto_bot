@@ -914,3 +914,103 @@ def parse_oneliner(args: str):
                 "note": parts[6] if len(parts) > 6 else ""}, ""
     except Exception as e:
         return None, f"❌ Format salah: {e}"
+
+
+# ── Screenshot import (vision AI → trade) ───────────────────────────
+
+def _num(v):
+    """Parse angka dari string/number, buang koma/persen/USDT/spasi."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", "").replace("%", "")
+    s = s.replace("USDT", "").replace("usdt", "").strip()
+    # ambil token angka pertama (boleh minus / desimal)
+    import re as _re
+    m = _re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group()) if m else None
+
+
+def build_trade_from_screenshot(raw: dict) -> tuple:
+    """
+    Ubah field mentah hasil baca AI vision dari screenshot order-details
+    jadi trade dict siap-preview untuk log_trade().
+
+    raw diharapkan punya (sebagian boleh kosong):
+      coin, direction, leverage, entry_price, exit_price,
+      realized_pnl, roi_pct
+
+    Margin dihitung dari |pnl / roi| kalau tidak diberikan langsung.
+    Return (trade_dict, error_str). Kalau error_str != "" → gagal.
+    """
+    if not isinstance(raw, dict):
+        return None, "Data screenshot tidak terbaca."
+
+    coin = str(raw.get("coin", "")).upper().replace("USDT", "").replace("/", "").strip()
+    if not coin:
+        return None, "Coin tidak terbaca dari screenshot."
+
+    d = str(raw.get("direction", "")).upper().strip()
+    if d in ("LONG", "L", "BUY", "CLOSE LONG"):
+        direction = "LONG"
+    elif d in ("SHORT", "S", "SELL", "CLOSE SHORT"):
+        direction = "SHORT"
+    else:
+        return None, f"Arah trade tidak jelas (terbaca: '{raw.get('direction','')}')."
+
+    entry = _num(raw.get("entry_price"))
+    if entry is None or entry <= 0:
+        return None, "Entry price tidak terbaca."
+
+    pnl = _num(raw.get("realized_pnl"))
+    if pnl is None:
+        return None, "Realized PnL tidak terbaca."
+
+    leverage = _num(raw.get("leverage"))
+    leverage = int(leverage) if leverage and leverage >= 1 else 1
+
+    roi = _num(raw.get("roi_pct"))
+    margin = _num(raw.get("margin"))
+    if (margin is None or margin <= 0) and roi not in (None, 0):
+        margin = abs(pnl / (roi / 100.0))
+    if margin is None or margin <= 0:
+        return None, "Margin tidak bisa dihitung (ROI/margin tidak terbaca)."
+    margin = round(margin, 2)
+
+    exit_price = _num(raw.get("exit_price"))
+    note_bits = ["dari screenshot"]
+    if exit_price:
+        note_bits.append(f"exit {exit_price:g}")
+    if roi is not None:
+        note_bits.append(f"ROI {roi:+.2f}%")
+    note = " | ".join(note_bits)
+
+    return {
+        "coin": coin, "direction": direction, "entry": entry,
+        "margin": margin, "leverage": leverage, "pnl": round(pnl, 4),
+        "roi": roi, "exit": exit_price, "note": note,
+    }, ""
+
+
+def format_shot_preview(t: dict) -> str:
+    """Preview hasil baca screenshot sebelum user konfirmasi simpan."""
+    ed = "🟢" if t["direction"] == "LONG" else "🔴"
+    s  = "+" if t["pnl"] >= 0 else ""
+    roi_line = f"  📊 ROI       : <b>{t['roi']:+.2f}%</b>\n" if t.get("roi") is not None else ""
+    exit_line = f"  🚪 Exit      : ${t['exit']:g}\n" if t.get("exit") else ""
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📸 <b>BACA SCREENSHOT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"  🪙 Coin      : <b>{t['coin']}USDT</b>\n"
+        f"  {ed} Arah     : <b>{t['direction']}</b>\n"
+        f"  💵 Entry     : ${t['entry']:g}\n"
+        f"{exit_line}"
+        f"  ⚡ Leverage  : {t['leverage']}x\n"
+        f"  💰 Margin    : ${t['margin']:,.2f} USDT  <i>(auto)</i>\n"
+        f"  {'📈' if t['pnl'] >= 0 else '📉'} PnL      : <b>{s}{t['pnl']:.2f} USDT</b>\n"
+        f"{roi_line}"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Ketik <b>ya</b> untuk simpan  •  ❌ <b>batal</b> untuk batal"
+    )
