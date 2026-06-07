@@ -617,12 +617,12 @@ def set_initial_balance(amount: float) -> str:
     except Exception: pass
     return f"✅ Saldo awal diset: <b>${amount:,.2f} USDT</b>"
 
-def _update_balance(pnl: float, note: str = ""):
+def _update_balance(pnl: float, note: str = "", _spreadsheet=None):
     s = _load_state()
     s["current_balance"] = round(s["current_balance"] + pnl, 2)
     s["total_trades"]    = s.get("total_trades", 0) + 1
     _save_state(s)
-    sheet = _get_sheet()
+    sheet = _spreadsheet or _get_sheet()
     if sheet:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
         ws.append_row([_now(), "PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note], value_input_option="RAW")
@@ -646,7 +646,7 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
             sheets_ok = True
         except Exception as e:
             log.error(f"Append error: {e}")
-    _update_balance(pnl_usdt, f"{coin} {direction} {result}")
+    _update_balance(pnl_usdt, f"{coin} {direction} {result}", _spreadsheet=sheet)
     result_dict = {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
                    "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
                    "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,

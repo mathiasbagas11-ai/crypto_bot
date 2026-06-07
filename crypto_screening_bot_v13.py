@@ -7169,6 +7169,8 @@ def handle_journal_wizard_message(text: str, chat_id: str):
         return False
     if not is_in_wizard(chat_id):
         return False
+    if is_wizard_expecting_image(chat_id):
+        send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     reply, done = wizard_process(chat_id, text=text)
     send_telegram(reply, chat_id, parse_mode="HTML")
     return True
@@ -7180,6 +7182,7 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
         return False
     if not is_wizard_expecting_image(chat_id):
         return False
+    send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     # Fetch file URL dari Telegram
     try:
         r = requests.get(
