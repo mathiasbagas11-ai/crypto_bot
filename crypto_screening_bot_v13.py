@@ -167,6 +167,7 @@ try:
         get_recent_trades, format_recent_trades,
         format_weekly_summary, set_initial_balance,
         get_current_balance,
+        build_trade_from_screenshot, format_shot_preview,
     )
     JOURNAL_MODULE = True
 except ImportError:
@@ -310,6 +311,7 @@ GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL            = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_VISION_MODEL     = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 GROQ_API_URL          = "https://api.groq.com/openai/v1/chat/completions"
 CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
@@ -947,6 +949,58 @@ def _groq_request(messages: list, max_tokens: int = 1800, temperature: float = 0
                 time.sleep(8)
 
     log.warning("Groq: max retries reached.")
+    return ""
+
+
+def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
+                         max_tokens: int = 700, temperature: float = 0.0) -> str:
+    """
+    Call Groq vision model (Llama 4 multimodal) dengan satu gambar inline (base64).
+    Dipakai untuk baca screenshot order-details → ekstrak field trade.
+    """
+    if not GROQ_API_KEY:
+        return ""
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url",
+             "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+        ],
+    }]
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       GROQ_VISION_MODEL,
+                    "messages":    messages,
+                    "max_tokens":  max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=40,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            elif r.status_code == 429:
+                wait = 12 * (2 ** attempt)
+                log.warning(f"Groq vision 429 (attempt {attempt+1}), retry in {wait}s...")
+                time.sleep(wait)
+            elif r.status_code in (503, 502):
+                time.sleep(8 * (attempt + 1))
+            else:
+                log.warning(f"Groq vision error {r.status_code}: {r.text[:200]}")
+                return ""
+        except Exception as e:
+            log.warning(f"Groq vision exception (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(6)
+    log.warning("Groq vision: max retries reached.")
     return ""
 
 
@@ -7169,6 +7223,8 @@ def handle_journal_wizard_message(text: str, chat_id: str):
         return False
     if not is_in_wizard(chat_id):
         return False
+    if is_wizard_expecting_image(chat_id):
+        send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     reply, done = wizard_process(chat_id, text=text)
     send_telegram(reply, chat_id, parse_mode="HTML")
     return True
@@ -7180,6 +7236,7 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
         return False
     if not is_wizard_expecting_image(chat_id):
         return False
+    send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     # Fetch file URL dari Telegram
     try:
         r = requests.get(
@@ -7196,6 +7253,142 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
     reply, done = wizard_process(chat_id, image_url=image_url)
     send_telegram(reply, chat_id, parse_mode="HTML")
     return True
+
+
+# ── Screenshot → trade (vision import) ────────
+
+_SHOT_PROMPT = (
+    "Kamu membaca screenshot detail order trading futures crypto (mis. Bitget/Binance). "
+    "Ekstrak data berikut dan balas HANYA JSON valid tanpa teks lain, tanpa markdown:\n"
+    '{"coin": "...", "direction": "LONG|SHORT", "leverage": <angka>, '
+    '"entry_price": <angka>, "exit_price": <angka>, "realized_pnl": <angka>, "roi_pct": <angka>}\n'
+    "Aturan:\n"
+    "- coin: simbol tanpa USDT (contoh HYPEUSDT -> HYPE).\n"
+    "- direction: posisi yang DITUTUP. 'Close short' -> SHORT, 'Close long' -> LONG.\n"
+    "- entry_price: angka di field 'Entry price'.\n"
+    "- exit_price: 'Avg. filled price' atau 'Filled price' atau 'Exit price'.\n"
+    "- realized_pnl: 'Realized PnL' dalam USDT (pertahankan tanda minus).\n"
+    "- roi_pct: 'Realized ROI' dalam persen (pertahankan tanda minus, tanpa simbol %).\n"
+    "- Kalau suatu field tidak ada, isi null. Jangan mengarang."
+)
+
+
+def _extract_shot_json(image_b64: str, mime: str) -> dict:
+    """Panggil Groq vision, parse JSON hasilnya jadi dict mentah."""
+    import json
+    raw = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime)
+    if not raw:
+        return {}
+    txt = raw.strip()
+    # buang code fence kalau model bandel
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:]
+    start, end = txt.find("{"), txt.rfind("}")
+    if start == -1 or end == -1:
+        log.warning(f"Vision shot: no JSON in response: {raw[:200]}")
+        return {}
+    try:
+        return json.loads(txt[start:end + 1])
+    except Exception as e:
+        log.warning(f"Vision shot JSON parse error: {e} | raw={raw[:200]}")
+        return {}
+
+
+def handle_logshot_command(chat_id: str):
+    """Handle /logshot — minta user kirim screenshot order details buat dicatat."""
+    if not JOURNAL_MODULE:
+        send_telegram("❌ Trade journal module tidak tersedia.", chat_id)
+        return
+    if not GROQ_API_KEY:
+        send_telegram("⚠️ Fitur baca screenshot butuh GROQ_API_KEY. Set dulu di .env.", chat_id)
+        return
+    _awaiting_tradeshot[chat_id] = True
+    send_telegram(
+        "📸 Kirim <b>screenshot order details</b> (Bitget/Binance/dll) yang ada "
+        "Entry, Exit, Realized PnL & ROI.\nGue baca otomatis terus konfirmasi sebelum disimpan.",
+        chat_id, parse_mode="HTML",
+    )
+
+
+def handle_trade_screenshot(file_id: str, chat_id: str):
+    """Download screenshot, baca via Groq vision, tampilkan preview untuk konfirmasi."""
+    if not JOURNAL_MODULE:
+        return False
+    _awaiting_tradeshot.pop(chat_id, None)
+    send_telegram("⏳ <i>Lagi baca screenshot...</i>", chat_id, parse_mode="HTML")
+    # Fetch file URL + bytes dari Telegram
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10,
+        )
+        file_path = r.json()["result"]["file_path"]
+        img = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
+            timeout=15,
+        )
+        img_bytes = img.content
+        mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
+    except Exception as e:
+        log.warning(f"Trade screenshot fetch error: {e}")
+        send_telegram("⚠️ Gagal ambil gambar dari Telegram. Coba kirim ulang.", chat_id)
+        return False
+
+    image_b64 = base64.b64encode(img_bytes).decode("ascii")
+    raw = _extract_shot_json(image_b64, mime)
+    if not raw:
+        send_telegram(
+            "⚠️ Nggak bisa baca data dari screenshot itu. Pastikan ini halaman "
+            "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade.",
+            chat_id, parse_mode="HTML",
+        )
+        return False
+
+    trade, err = build_trade_from_screenshot(raw)
+    if err:
+        send_telegram(
+            f"⚠️ {err}\nCoba kirim screenshot yang lebih jelas, atau /logtrade buat manual.",
+            chat_id, parse_mode="HTML",
+        )
+        return False
+
+    _pending_shot[chat_id] = trade
+    send_telegram(format_shot_preview(trade), chat_id, parse_mode="HTML")
+    return True
+
+
+def handle_shot_confirm(text: str, chat_id: str):
+    """Proses jawaban ya/batal untuk screenshot yang sudah dibaca."""
+    trade = _pending_shot.pop(chat_id, None)
+    if not trade:
+        return
+    ans = text.strip().lower()
+    if ans in ("batal", "skip", "no", "ga", "gak", "nggak", "cancel", "x"):
+        send_telegram("❌ Oke, nggak jadi disimpan.", chat_id)
+        return
+    pnl = float(trade["pnl"])
+    t = log_trade(
+        coin=trade["coin"], direction=trade["direction"],
+        entry_price=float(trade["entry"]), margin_usdt=float(trade["margin"]),
+        leverage=int(trade["leverage"]), pnl_usdt=pnl,
+        note=trade.get("note", ""),
+    )
+    msg = format_trade_logged(t)
+    if RISK_MODULE:
+        try:
+            record_trade_result(pnl)
+            new_cap = update_capital_after_trade(pnl)
+            result_emoji = "🟢" if pnl >= 0 else "🔴"
+            msg += (
+                f"\n\n{result_emoji} <b>Balance diperbarui</b>: "
+                f"<code>${new_cap:,.2f} USDT</code>  ({pnl:+.2f})\n"
+                f"Sinyal berikutnya akan pakai balance terbaru."
+            )
+        except Exception as e:
+            log.debug(f"Risk update after logshot error: {e}")
+    send_telegram(msg, chat_id, parse_mode="HTML")
 
 
 def _signal_chat_ai(prompt: str) -> str:
@@ -7395,6 +7588,7 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📝 `/logtrade` — Log trade baru (wizard step-by-step)\n"
         "   atau `/logtrade BTC LONG 65000 50 10 +25` (one-liner)\n"
+        "📸 `/logshot` — Kirim screenshot order details, AI baca otomatis\n"
         "📋 `/trades` — Lihat 5 trade terakhir\n"
         "📊 `/weeksummary` — Weekly summary + AI analysis\n"
         "💰 `/setbalance 500` — Set saldo awal\n"
@@ -7542,6 +7736,8 @@ def handle_btall_command(args: str, chat_id: str):
 
 last_update_id    = 0
 _awaiting_chart   = {}  # chat_id → True (user habis kirim /chart, tunggu foto)
+_awaiting_tradeshot = {}  # chat_id → True (user habis kirim /logshot, tunggu screenshot)
+_pending_shot     = {}  # chat_id → trade dict hasil baca screenshot, nunggu konfirmasi ya/batal
 
 def get_telegram_updates() -> list:
     global last_update_id
@@ -7605,6 +7801,8 @@ def process_update(update: dict):
         if file_id:
             if JOURNAL_MODULE and is_wizard_expecting_image(chat_id):
                 _thread(handle_journal_wizard_image, file_id, chat_id).start()
+            elif JOURNAL_MODULE and _awaiting_tradeshot.get(chat_id):
+                _thread(handle_trade_screenshot, file_id, chat_id).start()
             else:
                 _thread(handle_chart_command, chat_id, file_id).start()
         _awaiting_chart.pop(chat_id, None)
@@ -7687,6 +7885,9 @@ def process_update(update: dict):
     elif text_lower.startswith("/logtrade"):
         parts = text.split(maxsplit=1)
         _thread(handle_logtrade_command, parts[1] if len(parts)>1 else "", chat_id).start()
+
+    elif text_lower.startswith("/logshot"):
+        handle_logshot_command(chat_id)
 
     elif text_lower.startswith("/trades"):
         _thread(handle_trades_command, chat_id).start()
@@ -8034,6 +8235,10 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/help") or text_lower.startswith("/start"):
         handle_help_command(chat_id)
+
+    # Konfirmasi ya/batal untuk screenshot trade yang sudah dibaca (prioritas)
+    elif JOURNAL_MODULE and chat_id in _pending_shot:
+        _thread(handle_shot_confirm, text, chat_id).start()
 
     # v11: Journal wizard intercept (harus di atas free-form)
     elif JOURNAL_MODULE and is_in_wizard(chat_id):
