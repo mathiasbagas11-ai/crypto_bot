@@ -8108,7 +8108,6 @@ def _build_gated_signal_message(
 
     entry_mode = trade.get("entry_mode", "")
     tp1_r = trade.get("tp1_r", 0)
-    tp2_r = trade.get("tp2_r", 0)
     conf_emoji = "🔥" if confidence == "HIGH" else "✅" if confidence == "MEDIUM" else "🟡"
 
     def _f(v):
@@ -8117,173 +8116,120 @@ def _build_gated_signal_message(
         elif v >= 1:  return f"${v:.4f}"
         else:         return f"${v:.6f}"
 
-    def _pct(entry, target):
-        if not entry or not target: return ""
-        return f"({abs(target-entry)/entry*100:.1f}%)"
-
     if alert_type == "SETUP":
-        header_title = "🚦 <b>SIGNAL SETUP TERDETEKSI</b>"
-        header_sub   = "<i>Semua gate lolos — setup sedang forming</i>"
+        header_title = "🚦 <b>SETUP TERDETEKSI</b>"
     else:
-        header_title = "🚨 <b>ENTRY NOW — PRICE DI ZONA!</b>"
-        header_sub   = "<i>Price masuk confirmation zone — cek candle konfirmasi</i>"
+        header_title = "🚨 <b>ENTRY NOW — PRICE DI ZONA</b>"
+
+    is_long = "LONG" in direction or "PUMP" in direction
+    _prof   = trade.get("tp_profile", "")
+    rr_val  = trade.get("rr", tp1_r) or tp1_r or 0
+    rr_ok   = "✅" if (tp1_r or 0) >= 2.0 else "⚠️"
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{conf_emoji} {header_title}",
+        f"{conf_emoji} {header_title} — {sym}",
         f"🕐 {ts}",
-        f"{header_sub}",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"💎 <b>{sym}</b>  {dir_emoji} <b>{dir_label}</b>",
-        f"💰 Harga   : <code>{_f(price)}</code>",
-        f"🎯 Score   : <b>{master_score}/100</b> — Confidence: <b>{confidence}</b>",
+        f"{dir_emoji} <b>{dir_label}</b>  |  🎯 <b>{master_score}/100</b> ({confidence})",
+        f"💰 Harga {_f(price)}  |  📐 R:R {rr_val:.1f}:1 {rr_ok}"
+        + (f"  |  🎚️ {_prof}" if _prof else ""),
         "",
-        "─── TRADE PLAN ───",
     ]
 
+    # ── ACTION: apa yang harus dilakukan (angka entry/SL/TP ada di Market Update) ──
     if entry_mode == "SNIPER_ENTRY":
-        lines.append(f"🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
-        for ctx in trade.get("momentum_context", [])[:2]:
+        lines.append("🎯 <b>SNIPER ENTRY</b> — price di zone + candle confirmed")
+        for ctx in trade.get("momentum_context", [])[:1]:
             lines.append(f"   ↳ {ctx}")
-        lines.append(f"⚡ Entry  : <code>{_f(trade.get('entry', price))}</code> ← SEKARANG")
-        lines.append(f"   SL ketat: 1x ATR di bawah zone bottom")
     elif entry_mode == "MOMENTUM_NOW":
-        lines.append(f"🚀 <b>ENTRY NOW</b> — Momentum confirmed")
-        for ctx in trade.get("momentum_context", [])[:2]:
+        lines.append("🚀 <b>ENTRY NOW</b> — momentum confirmed")
+        for ctx in trade.get("momentum_context", [])[:1]:
             lines.append(f"   ↳ {ctx}")
-        lines.append(f"⚡ Entry  : <code>{_f(trade.get('entry', price))}</code> ← MARKET")
     else:
         cz = trade.get("confirmation_zone", {})
         if alert_type == "ENTRY_NOW":
-            lines.append(f"🎯 <b>PRICE DI ZONA!</b> {_fmt_zone(cz.get('bottom',0), cz.get('top',0))}")
-            lines.append(f"   Tunggu candle 15M close konfirmasi lalu entry")
+            lines.append("🎯 <b>PRICE DI ZONA</b> — tunggu candle 15M close konfirmasi")
         else:
-            lines.append(f"⏳ <b>TUNGGU RETEST</b> ke zona: <b>{_fmt_zone(cz.get('bottom',0), cz.get('top',0))}</b>")
-            lines.append(f"   Sumber zone: {cz.get('source','?')}")
-        lines.append(f"🎯 Entry  : <code>{_f(trade.get('entry', price))}</code> ← LIMIT")
-        # v14: tunjukkan candle pattern spesifik dari 15M kalau ada
-        # FIX: hanya pakai candle 15M sebagai konfirmasi kalau arahnya SEARAH dgn trade.
-        # Kalau setup SHORT tapi 15M malah bullish engulfing, itu BUKAN konfirmasi —
-        # tampilkan candle yang DIHARAPKAN di retest, bukan candle kontra yang misleading.
-        is_long  = "LONG" in direction or "PUMP" in direction
+            lines.append(f"⏳ <b>TUNGGU RETEST</b> — zona {cz.get('source', 'key level')}")
         want_dir = "BULLISH" if is_long else "BEARISH"
         cp15     = tf_15m.get("candle_patterns", {})
         if cp15.get("pattern") not in (None, "NONE") and cp15.get("direction") == want_dir:
-            lines.append(f"✅ Konfirmasi: {cp15['detail']} + vol ≥1.5x")
+            lines.append(f"   ✅ Konfirmasi: {cp15['detail']}")
         else:
             conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
-            lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
+            lines.append(f"   ⏳ Tunggu: {conf_word} + vol ≥1.5x")
 
-    lines.append(f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}")
+    # ── ANALISA: alasan inti saja (regime, candle kunci, money flow, OI, risiko) ──
+    analysis = []
 
-    # TP bertahap (ladder) — pilih sendiri seberapa agresif exit-nya.
-    _prof = trade.get("tp_profile", "")
-    _ladder = trade.get("tps") or []
-    if _ladder:
-        _n = len(_ladder)
-        for _rg in _ladder:
-            _lvl = _rg.get("level", 0)
-            _tag = " | close 50%" if _lvl == 1 else (" | runner" if _lvl == _n else "")
-            _emoji = "🟡" if _lvl == 1 else "🟢"
-            lines.append(
-                f"{_emoji} TP{_lvl}    : <code>{_f(_rg.get('price'))}</code>  "
-                f"{_rg.get('pct', 0):+.1f}%  ({_rg.get('r', 0)}R){_tag}"
-            )
-    else:
-        lines.append(f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%")
-        lines.append(f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner")
-
-    lines += [
-        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}"
-        + (f"  | 🎚️ {_prof}" if _prof else ""),
-        "",
-        "─── GATE SUMMARY ───",
-    ]
-
-    for r in gate_reasons:
-        lines.append(f"  ✅ {r}")
-
-    # ── v14: MARKET STRUCTURE SECTION ─────────────────────────
-    # Regime + Candle Pattern + Entry Zone Quality
-    _regime      = confluence.get("regime") or tf_4h.get("market_regime", {}).get("regime", "")
-    _cp15        = tf_15m.get("candle_patterns", {})
-    _cp1h        = tf_1h.get("candle_patterns", {})
-    _sb          = tf_1h.get("sudden_breakout", {}) or tf_4h.get("sudden_breakout", {})
-    _vc          = tf_1h.get("volume_coil", {})
-    _bb_sq       = tf_4h.get("bb_squeeze", {})
-    _ext         = confluence.get("entry_extended", False)
-    _near_zone   = confluence.get("nearest_zone_pct")
-    _adx         = tf_4h.get("market_regime", {}).get("adx", 0) or tf_4h.get("adx", 0)
-
+    _regime = confluence.get("regime") or tf_4h.get("market_regime", {}).get("regime", "")
+    _adx    = tf_4h.get("market_regime", {}).get("adx", 0) or tf_4h.get("adx", 0)
     _regime_emoji = {
         "BULLISH_TREND": "📈", "BEARISH_TREND": "📉",
         "BB_SQUEEZE": "🔵", "RANGING": "↔️",
         "BREAKOUT_UP": "🚀", "BREAKOUT_DOWN": "🔻",
         "VOLATILE": "⚡", "WEAK_TREND": "〰️",
-    }.get(_regime, "❓")
-
-    struct_lines = []
-
+    }.get(_regime, "")
     if _regime and _regime != "UNKNOWN":
-        adx_str = f" | ADX {_adx:.0f}" if _adx else ""
-        struct_lines.append(f"  {_regime_emoji} Regime   : <b>{_regime}</b>{adx_str}")
+        adx_str = f" (ADX {_adx:.0f})" if _adx else ""
+        analysis.append(f"  {_regime_emoji} Regime {_regime}{adx_str}")
 
-    # Candle pattern 15M
+    # Candle kunci 15M — driver timing utama
+    _cp15 = tf_15m.get("candle_patterns", {})
     if _cp15.get("pattern") not in (None, "NONE"):
-        pat_emoji = "🟢" if _cp15.get("direction") == "BULLISH" else "🔴" if _cp15.get("direction") == "BEARISH" else "⚪"
-        struct_lines.append(f"  {pat_emoji} 15M Candle: <b>{_cp15['pattern']}</b> — {_cp15['detail']}")
-    # Candle pattern 1H (secondary)
-    if _cp1h.get("pattern") not in (None, "NONE"):
-        pat_emoji1 = "🟢" if _cp1h.get("direction") == "BULLISH" else "🔴" if _cp1h.get("direction") == "BEARISH" else "⚪"
-        struct_lines.append(f"  {pat_emoji1} 1H Candle : {_cp1h['pattern']}")
+        pe = ("🟢" if _cp15.get("direction") == "BULLISH" else
+              "🔴" if _cp15.get("direction") == "BEARISH" else "⚪")
+        analysis.append(f"  {pe} 15M {_cp15['pattern']} — {_cp15['detail']}")
 
-    # BB Squeeze
-    if _bb_sq.get("squeeze"):
-        sq_bars = _bb_sq.get("squeeze_bars", 0)
-        struct_lines.append(f"  🔵 BB Squeeze: {sq_bars} bar — coiling sebelum breakout")
+    # Money flow — ringkas (maks 2 baris; konflik antar-TF kelihatan di sini)
+    for r in mf_reasons[:2]:
+        analysis.append(f"  {r}")
 
-    # Volume coil
-    if _vc.get("coiling") and _vc.get("spike_detected"):
-        struct_lines.append(f"  🌊 Vol Coil: spring release {_vc.get('vol_ratio',1):.1f}x — momentum akselerasi")
-    elif _vc.get("coiling"):
-        struct_lines.append(f"  🔍 Vol Coil: {_vc.get('compression_bars',0)} bar declining — akumulasi silent")
-
-    # Sudden breakout
-    if _sb.get("sudden_breakout"):
-        sb_dir = "🚀" if _sb.get("direction") == "UP" else "🔻"
-        struct_lines.append(f"  {sb_dir} Sudden Breakout: vol {_sb.get('vol_spike',1):.1f}x, +{_sb.get('range_break_pct',0):.1f}%")
-
-    # Entry zone quality
-    if _ext:
-        struct_lines.append(f"  ⚠️ Entry Extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
-    elif _near_zone is not None and _near_zone <= 1.0:
-        struct_lines.append(f"  🎯 Sniper Zone: {_near_zone:.1f}% dari key level — presisi tinggi")
-
-    if struct_lines:
-        lines.append("")
-        lines.append("─── MARKET STRUCTURE ───")
-        lines.extend(struct_lines)
-
-    # Money flow summary
-    if mf_reasons:
-        lines.append("")
-        lines.append("─── MONEY FLOW ───")
-        for r in mf_reasons[:3]:
-            lines.append(f"  {r}")
-
-    # OI context
-    fr  = oi_data.get("funding_rate")
+    # OI / funding / L/S — gabung 1 baris
+    fr   = oi_data.get("funding_rate")
     oi_c = oi_data.get("oi_change_pct")
     ls   = oi_data.get("ls_ratio")
-    if fr is not None or oi_c is not None:
-        lines.append("")
-        lines.append("─── MARKET CONTEXT ───")
-        if fr  is not None: lines.append(f"  Funding : {fr:+.3f}%")
-        if oi_c is not None: lines.append(f"  OI      : {oi_c:+.1f}%")
-        if ls   is not None: lines.append(f"  L/S     : {ls:.2f} ({oi_data.get('ls_bias','?')})")
+    oi_bits = []
+    if fr   is not None: oi_bits.append(f"Funding {fr:+.3f}%")
+    if oi_c is not None: oi_bits.append(f"OI {oi_c:+.1f}%")
+    if ls   is not None: oi_bits.append(f"L/S {ls:.2f}")
+    if oi_bits:
+        analysis.append("  💹 " + " | ".join(oi_bits))
 
-    # Market regime context (Fear&Greed + BTC Regime + Breadth)
+    # Risiko entry: warning kalau harga sudah jauh dari zone
+    _ext       = confluence.get("entry_extended", False)
+    _near_zone = confluence.get("nearest_zone_pct")
+    if _ext and _near_zone is not None:
+        analysis.append(f"  ⚠️ Entry extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
+
+    if analysis:
+        lines.append("")
+        lines.append("─── ANALISA ───")
+        lines.extend(analysis)
+
+    # Whale — 1 baris bias saja (align / berlawanan)
+    try:
+        import whale_tracker as _wt
+        _coin_ticker = symbol.replace("USDT", "").replace("UST", "")
+        wctx = _wt.get_whale_context_for_coin(_coin_ticker)
+        whale_bias = wctx.get("whale_bias", "NEUTRAL")
+        has_data = (
+            wctx.get("whale_long_vol", 0) + wctx.get("whale_short_vol", 0) > 0 or
+            wctx.get("wallet_long_count", 0) + wctx.get("wallet_short_count", 0) > 0
+        )
+        if has_data and whale_bias != "NEUTRAL":
+            against = (is_long and whale_bias == "BEARISH") or (not is_long and whale_bias == "BULLISH")
+            be  = "🟢" if whale_bias == "BULLISH" else "🔴"
+            tag = "⚠️ berlawanan" if against else "✅ align"
+            lines.append(f"  🐋 Whale {be} {whale_bias} {tag}")
+    except ImportError:
+        pass
+    except Exception as _e:
+        log.debug(f"Whale inject error: {_e}")
+
+    # Konteks market global (F&G + BTC regime + breadth) — 1 baris compact
     if MARKET_CONTEXT_MODULE:
         try:
             _ctx = get_market_context()
@@ -8292,49 +8238,7 @@ def _build_gated_signal_message(
         except Exception:
             pass
 
-    # ─── WHALE CONFLUENCE ───
-    try:
-        import whale_tracker as _wt
-        _coin_ticker = symbol.replace("USDT", "").replace("UST", "")
-        wctx      = _wt.get_whale_context_for_coin(_coin_ticker)
-        whale_bias = wctx.get("whale_bias", "NEUTRAL")
-
-        has_data = (
-            wctx.get("whale_long_vol", 0) + wctx.get("whale_short_vol", 0) > 0 or
-            wctx.get("wallet_long_count", 0) + wctx.get("wallet_short_count", 0) > 0
-        )
-
-        if has_data:
-            long_signal   = direction in ("LONG", "PUMP")
-            whale_aligns  = (long_signal and whale_bias == "BULLISH") or (not long_signal and whale_bias == "BEARISH")
-            whale_against = (long_signal and whale_bias == "BEARISH") or (not long_signal and whale_bias == "BULLISH")
-            bias_emoji    = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}.get(whale_bias, "⚪")
-
-            lines.append("")
-            lines.append("─── WHALE TRACKER ───")
-
-            if whale_aligns:
-                lines.append(f"  {bias_emoji} <b>{whale_bias}</b> ✅ — <i>align sama sinyal</i>")
-            elif whale_against:
-                lines.append(f"  {bias_emoji} <b>{whale_bias}</b> ⚠️ — <i>berlawanan, hati-hati</i>")
-            else:
-                lines.append(f"  {bias_emoji} <b>NEUTRAL</b>")
-
-            wl_vol = wctx.get("whale_long_vol", 0)
-            ws_vol = wctx.get("whale_short_vol", 0)
-            wl_cnt = wctx.get("wallet_long_count", 0)
-            ws_cnt = wctx.get("wallet_short_count", 0)
-            if wl_vol > 0 or ws_vol > 0:
-                lines.append(f"  Trades : 🟢 {_wt.fmt_usd(wl_vol)} buy  🔴 {_wt.fmt_usd(ws_vol)} sell")
-            if wl_cnt > 0 or ws_cnt > 0:
-                lines.append(f"  Wallets: {wl_cnt}L / {ws_cnt}S")
-
-    except ImportError:
-        pass
-    except Exception as _e:
-        log.debug(f"Whale inject error: {_e}")
-
-    # ─── PERSONAL TRADE PLAN (hanya muncul kalau user sudah /setbalance) ───
+    # Personal trade plan (hanya kalau user /setbalance) — position sizing/risk $
     if RISK_MODULE:
         try:
             entry_val = float(trade.get("entry") or price)
@@ -8354,6 +8258,7 @@ def _build_gated_signal_message(
             log.debug(f"Personal trade plan error: {_pe}")
 
     lines.append("")
+    lines.append("📊 <i>Entry / SL / TP lengkap → cek Market Update</i>")
     lines.append("<i>⚠️ Not financial advice. DYOR.</i>")
     return "\n".join(lines)
 
