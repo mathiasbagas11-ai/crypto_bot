@@ -184,6 +184,7 @@ def record_signal_outcome(
     pnl_pct: float,
     notes: str = "",
     indicators: dict = None,
+    reasons: list = None,
 ):
     """
     Catat hasil signal setelah posisi ditutup.
@@ -208,6 +209,7 @@ def record_signal_outcome(
         "hold_minutes": hold_minutes,
         "notes": notes,
         "indicators": indicators or {},
+        "reasons": (reasons or [])[:5],
     }
 
     data["performance"].append(perf_entry)
@@ -243,6 +245,7 @@ def _derive_lesson(perf: dict) -> Optional[dict]:
     """
     Derive lesson dari performance entry.
     Hanya generate kalau outcome jelas bagus atau jelas jelek.
+    Memakai reasons dari bot untuk lesson yang lebih spesifik dan actionable.
     """
     outcome      = perf.get("outcome", "")
     pnl          = perf.get("pnl_pct", 0)
@@ -253,99 +256,173 @@ def _derive_lesson(perf: dict) -> Optional[dict]:
     direction    = perf.get("direction", "")
     hold_min     = perf.get("hold_minutes", 0)
     indicators   = perf.get("indicators", {})
+    reasons      = perf.get("reasons", [])
+    entry_price  = perf.get("entry_price", 0)
+    exit_price   = perf.get("exit_price", 0)
 
-    # Kategorisasi
-    if outcome in ("TP1_HIT", "TP2_HIT") and pnl > 0:
+    # ── Validasi arah TP/SL sebelum kategorisasi ──────────────────────────────
+    # CONFIRMED signals kadang set TP di bawah entry untuk LONG (bug tracker).
+    # Kalau TP_HIT tapi pnl negatif → berarti tracking bug, bukan sinyal jelek.
+    # Skip lesson supaya tidak noise.
+    tp_direction_bug = (
+        outcome in ("TP1_HIT", "TP2_HIT", "TP_HIT")
+        and pnl < -0.1
+        and signal_type == "CONFIRMED"
+    )
+    if tp_direction_bug:
+        return None
+
+    # ── Kategorisasi ──────────────────────────────────────────────────────────
+    if outcome in ("TP1_HIT", "TP2_HIT", "TP_HIT") and pnl > 0:
         category = "good"
     elif outcome == "SL_HIT" or pnl < -3:
         category = "bad"
-    elif outcome == "SNAPSHOT_12H":
+    elif outcome in ("SNAPSHOT_12H", "SNAPSHOT"):
         # Unrealized snapshot: hanya meaningful kalau gerakannya signifikan
         if pnl > 2:
             category = "good"
         elif pnl < -2:
             category = "bad"
         else:
-            category = "neutral"   # masih terlalu kecil untuk disimpulkan
+            return None   # belum cukup gerak untuk disimpulkan
     elif outcome == "EXPIRED" and abs(pnl) < 1:
-        category = "neutral"
+        return None
+    elif outcome == "MANUAL_CLOSE" and pnl > 1.5:
+        category = "good"
+    elif outcome == "MANUAL_CLOSE" and pnl < -1.5:
+        category = "bad"
     elif pnl > 1:
         category = "good"
-    else:
+    elif pnl < -1:
         category = "poor"
+    else:
+        return None   # terlalu kecil, tidak informatif
 
-    if category == "neutral":
-        return None  # tidak ada yang menarik untuk dipelajari
+    # ── Build tags ────────────────────────────────────────────────────────────
+    tags = [signal_type.lower(), direction.lower()]
+    conf_clean = confluence.lower().replace("🔥 ", "").replace(" ", "_")
+    if conf_clean:
+        tags.append(conf_clean)
 
-    # Build rule text
-    rule = ""
-    tags = [signal_type.lower(), direction.lower(), confluence.lower()]
-
+    # ── Build context ─────────────────────────────────────────────────────────
     context_parts = [
         f"symbol={symbol}",
         f"type={signal_type}",
         f"score={score}",
         f"confluence={confluence}",
-        f"direction={direction}",
+        f"dir={direction}",
         f"hold={hold_min}m",
+        f"pnl={pnl:+.2f}%",
     ]
 
-    # Tambah indicator context kalau ada
     if indicators.get("funding_rate") is not None:
-        context_parts.append(f"funding={indicators['funding_rate']:.3f}%")
+        fr = indicators["funding_rate"]
+        context_parts.append(f"funding={fr:.3f}%")
         tags.append("funding")
+        if abs(fr) > 0.08:
+            tags.append("extreme_funding")
     if indicators.get("ls_ratio") is not None:
-        context_parts.append(f"ls_ratio={indicators['ls_ratio']:.2f}")
+        context_parts.append(f"ls={indicators['ls_ratio']:.2f}")
     if indicators.get("rsi_1h") is not None:
         context_parts.append(f"rsi1h={indicators['rsi_1h']:.0f}")
+    if indicators.get("rsi_4h") is not None:
+        context_parts.append(f"rsi4h={indicators['rsi_4h']:.0f}")
 
     context = ", ".join(context_parts)
 
+    # ── Ambil sinyal utama dari reasons bot ───────────────────────────────────
+    # Strip emoji untuk lesson text yang lebih clean
+    import re as _re
+    def _clean_reason(r: str) -> str:
+        r = _re.sub(r'[\U00010000-\U0010ffff]', '', r)   # strip emoji
+        r = _re.sub(r'[^\x00-\x7F]+', '', r)              # strip non-ascii
+        return r.strip(" —:-").strip()
+
+    clean_reasons = [_clean_reason(r) for r in (reasons or []) if r]
+    clean_reasons = [r for r in clean_reasons if len(r) > 5][:3]
+    reasons_str = " | ".join(clean_reasons) if clean_reasons else ""
+
+    # ── Build rule text ───────────────────────────────────────────────────────
+    rule = ""
     if category == "good":
-        if score >= 80:
-            rule = f"WORKED WELL: {context} → PnL +{pnl:.1f}% ({outcome}). Score 80+ di {confluence} confluence reliable."
-            tags.extend(["screening", "high_score"])
-        elif pnl > 3:
-            rule = f"WORKED: {context} → PnL +{pnl:.1f}% ({outcome}). Setup ini effective, replicate kalau kondisi sama."
-            tags.append("worked")
+        if pnl > 3:
+            verdict = f"WORKED ({pnl:+.1f}%)"
+            confidence = 0.88
+            tags.extend(["worked", "high_pnl"])
         else:
-            rule = f"SMALL WIN: {context} → PnL +{pnl:.1f}% ({outcome}). Cukup tapi bisa lebih baik."
+            verdict = f"WIN ({pnl:+.1f}%)"
+            confidence = 0.65
             tags.append("worked")
+
+        rule = f"{verdict} [{signal_type} {direction} {symbol}] score={score} {confluence}"
+        if reasons_str:
+            rule += f" — Signals: {reasons_str}"
+        rule += f". Replicate saat kondisi serupa. Hold={hold_min}m."
+
+        if score >= 80 and confluence in ("HIGH", "EXCELLENT"):
+            tags.append("high_score")
+            confidence = min(0.92, confidence + 0.05)
 
     elif category == "bad":
-        if confluence in ("POOR", "FAIR") and outcome == "SL_HIT":
-            rule = f"AVOID: {context} → SL hit, PnL {pnl:.1f}%. Confluence {confluence} terlalu rendah untuk entry. Skip signal dengan score < 50 atau confluence POOR."
-            tags.extend(["risk", "confluence"])
-        elif hold_min > 120 and outcome == "SL_HIT":
-            rule = f"FAILED SLOW: {context} → SL hit setelah {hold_min}m. Hold terlalu lama tanpa momentum. Pertimbangkan time-based exit kalau setup tidak bergerak dalam 2 jam."
-            tags.extend(["risk", "hold_time"])
+        if outcome == "SL_HIT" and hold_min > 120:
+            verdict = f"SL_HIT_SLOW ({pnl:.1f}%, hold={hold_min}m)"
+            tags.extend(["risk", "hold_time", "sl_hit"])
+            rule = (
+                f"FAILED_SLOW [{signal_type} {direction} {symbol}] score={score} {confluence} — "
+                f"SL kena setelah {hold_min}m tanpa momentum."
+            )
+            if reasons_str:
+                rule += f" Sinyal saat entry: {reasons_str}."
+            rule += " → Pertimbangkan time-exit jika tidak bergerak dalam 2h."
+            confidence = 0.85
+        elif confluence in ("POOR", "FAIR"):
+            verdict = f"AVOID ({pnl:.1f}%)"
+            tags.extend(["risk", "confluence", "sl_hit"])
+            rule = (
+                f"AVOID [{signal_type} {direction} {symbol}] confluence={confluence} score={score} → "
+                f"{outcome} PnL={pnl:.1f}%. Confluence terlalu rendah."
+            )
+            confidence = 0.82
+        elif abs(pnl) > 4:
+            verdict = f"BIG_LOSS ({pnl:.1f}%)"
+            tags.extend(["risk", "big_loss", "sl_hit"])
+            rule = (
+                f"BIG_LOSS [{signal_type} {direction} {symbol}] score={score} {confluence} → "
+                f"{outcome} PnL={pnl:.1f}%."
+            )
+            if reasons_str:
+                rule += f" Sinyal saat entry: {reasons_str}."
+            rule += " → Hindari kondisi serupa."
+            confidence = 0.88
         else:
-            rule = f"FAILED: {context} → {outcome}, PnL {pnl:.1f}%. Hindari kondisi serupa."
-            tags.append("failed")
+            verdict = f"FAILED ({pnl:.1f}%)"
+            tags.extend(["failed", "sl_hit"])
+            rule = (
+                f"FAILED [{signal_type} {direction} {symbol}] score={score} {confluence} → "
+                f"{outcome} PnL={pnl:.1f}%."
+            )
+            if reasons_str:
+                rule += f" Sinyal saat entry: {reasons_str}."
+            confidence = 0.72
 
-    elif category == "poor":
-        rule = f"WEAK: {context} → {outcome}, PnL {pnl:.1f}%. Setup ini tidak efisien, cari yang lebih kuat."
+    else:  # poor
+        verdict = f"WEAK ({pnl:+.1f}%)"
         tags.append("weak")
+        rule = (
+            f"WEAK [{signal_type} {direction} {symbol}] score={score} {confluence} → "
+            f"{outcome} PnL={pnl:.1f}%."
+        )
+        if reasons_str:
+            rule += f" Sinyal: {reasons_str}."
+        rule += " Setup tidak efisien."
+        confidence = 0.50
 
     if not rule:
         return None
 
-    # Confidence scoring (lebih tinggi = lebih pasti)
-    confidence = 0.35
-    if category == "good" and pnl > 3:
-        confidence = 0.85
-    elif category == "good":
-        confidence = 0.65
-    elif category == "bad" and outcome == "SL_HIT":
-        confidence = 0.88
-    elif category == "bad":
-        confidence = 0.70
-    elif category == "poor":
-        confidence = 0.50
-
     return {
         "id": int(time.time() * 1000) + 1,
-        "rule": rule,
+        "rule": rule[:MAX_MANUAL_LESSON_LEN],
         "tags": list(set(tags)),
         "outcome": category,
         "source_type": "performance",
@@ -355,6 +432,7 @@ def _derive_lesson(perf: dict) -> Optional[dict]:
         "signal_type": signal_type,
         "confluence_level": confluence,
         "hold_minutes": hold_min,
+        "reasons": clean_reasons,
         "pinned": False,
         "role": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1070,15 +1148,21 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
         if not outcomes:
             return "📊 Signal outcomes masih kosong."
 
-        # Group by strategy
+        # Group by signal_type (field di signal_outcomes.json adalah signal_type, bukan strategy)
         stats_by_strategy = {}
         for sig in outcomes:
-            if sig.get("status") not in ("TP_HIT", "SL_HIT") and \
-               not sig.get("status", "").startswith("EXPIRED"):
+            status = sig.get("status", "")
+            if status not in ("TP_HIT", "SL_HIT") and not status.startswith("EXPIRED"):
                 continue  # Skip unresolved
 
-            strategy = sig.get("strategy", "UNKNOWN")
+            # Pakai signal_type (field yang ada), fallback ke strategy untuk backward compat
+            strategy = sig.get("signal_type") or sig.get("strategy") or "UNKNOWN"
             pnl = sig.get("pnl_pct", 0)
+
+            # Win/loss berdasarkan outcome (TP_HIT = win, SL_HIT/EXPIRED_LOSS = loss),
+            # bukan dari pnl_pct yang kadang salah untuk CONFIRMED signals.
+            is_win  = status == "TP_HIT"
+            is_loss = status in ("SL_HIT", "EXPIRED_LOSS")
 
             if strategy not in stats_by_strategy:
                 stats_by_strategy[strategy] = {
@@ -1092,9 +1176,9 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
 
             stats_by_strategy[strategy]["trades"] += 1
             stats_by_strategy[strategy]["pnls"].append(pnl)
-            if pnl > 0:
+            if is_win:
                 stats_by_strategy[strategy]["wins"] += 1
-            elif pnl < 0:
+            elif is_loss:
                 stats_by_strategy[strategy]["losses"] += 1
 
         # Compute aggregates
