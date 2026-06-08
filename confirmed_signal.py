@@ -56,6 +56,13 @@ try:
 except ImportError:
     NEWS_GATE_MODULE = False
 
+# ── Social Gate (Reddit + HackerNews via last30days-skill) ──────────────────
+try:
+    from social_sentiment import get_social_gate
+    SOCIAL_GATE_MODULE = True
+except ImportError:
+    SOCIAL_GATE_MODULE = False
+
 # ── DeepSeek AI ─────────────────────────────
 try:
     from deepseek_ai import deepseek_signal_review
@@ -708,6 +715,31 @@ def generate_confirmed_signal(
                     return None
         except Exception as _nge:
             log.debug(f"News gate error {symbol}: {_nge}")
+
+    # 3f-2. SOCIAL GATE (Reddit + HackerNews sentiment — cached, no API key)
+    if SOCIAL_GATE_MODULE:
+        try:
+            soc_adj, soc_blocked, soc_reasons = get_social_gate(symbol, direction)
+            if soc_blocked:
+                log.info(f"  {symbol}: SOCIAL GATE HARD BLOCK — {soc_reasons}")
+                return None
+            if soc_adj != 0:
+                old_score = master["master_score"]
+                master["master_score"] = max(0, min(100, old_score + soc_adj))
+                if soc_adj > 0:
+                    master["confluence_reasons"] = master.get("confluence_reasons", [])
+                    master["confluence_reasons"].extend(soc_reasons[:2])
+                else:
+                    master["conflict_reasons"].extend(soc_reasons[:2])
+                log.info(
+                    f"  {symbol}: social gate adj {soc_adj:+d}pt "
+                    f"→ score {old_score}→{master['master_score']}"
+                )
+                if master["master_score"] < MASTER_SCORE_CONFIRMED and soc_adj < 0:
+                    log.info(f"  {symbol}: dropped below threshold after social gate, skip")
+                    return None
+        except Exception as _sge:
+            log.debug(f"Social gate error {symbol}: {_sge}")
 
     # 3b. AUTO MARKET CONTEXT VALIDATION (7-layer check)
     val_result = None

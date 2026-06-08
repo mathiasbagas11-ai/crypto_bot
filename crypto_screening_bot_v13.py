@@ -130,6 +130,19 @@ except ImportError:
     logging.getLogger("x_sent").warning("x_sentiment.py tidak ditemukan — fitur X/DCA dinonaktifkan")
     logging.getLogger("market_ctx").warning("market_context.py tidak ditemukan — market context dinonaktifkan")
 
+# ── Social Sentiment (Reddit + HackerNews via last30days-skill) ────────────
+try:
+    from social_sentiment import (
+        get_social_sentiment, format_social_sentiment_telegram,
+        run_social_scan, DEFAULT_SCAN_COINS,
+    )
+    SOCIAL_MODULE = True
+except ImportError:
+    SOCIAL_MODULE = False
+    logging.getLogger("social").warning("social_sentiment.py tidak tersedia")
+
+SOCIAL_SCAN_INTERVAL = int(os.getenv("SOCIAL_SCAN_INTERVAL", "30"))  # menit
+
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
                                    format_risk_status, set_capital, set_risk_pct,
@@ -328,6 +341,8 @@ DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
 SIGNAL_THREAD_ID        = os.getenv("SIGNAL_THREAD_ID", "")        or None
 MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
 TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
+NEWS_THREAD_ID          = os.getenv("NEWS_THREAD_ID", "")          or None  # news agent + social spikes
+WHALE_THREAD_ID         = os.getenv("WHALE_THREAD_ID", "")         or None  # whale tracker
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -5406,8 +5421,32 @@ def send_signal(message: str, parse_mode: str = None):
 
 
 def send_market_update(message: str, parse_mode: str = None):
-    """Kirim news/market update ke topic Market Update (MARKET_UPDATE_THREAD_ID)."""
+    """Kirim rangkuman sinyal entry ke topic Market Update (MARKET_UPDATE_THREAD_ID).
+
+    Isi: bias flip BTC, market pulse, scan summary, reversal brief.
+    Bukan untuk news atau whale — gunakan send_news_update / send_whale_report.
+    """
     return send_telegram(message, thread_id=MARKET_UPDATE_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_news_update(message: str, parse_mode: str = None):
+    """Kirim news & social alerts ke topic News (NEWS_THREAD_ID).
+
+    Isi: news agent alerts, social sentiment spikes (Reddit/HN).
+    Fallback ke Market Update kalau NEWS_THREAD_ID belum diset.
+    """
+    tid = NEWS_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
+
+
+def send_whale_report(message: str, parse_mode: str = None):
+    """Kirim whale movement alerts ke topic Whale Report (WHALE_THREAD_ID).
+
+    Isi: on-chain whale moves, large transfer alerts dari whale_tracker.py.
+    Fallback ke Market Update kalau WHALE_THREAD_ID belum diset.
+    """
+    tid = WHALE_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
 
 
 def send_trade_report(message: str, parse_mode: str = None):
@@ -6961,6 +7000,24 @@ def handle_xsentiment_command(coin: str, chat_id: str):
         send_telegram(f"❌ Error fetch X sentiment: {e}", chat_id)
 
 
+def handle_social_command(coin: str, chat_id: str):
+    """Handle /social <COIN> — Reddit + HackerNews sentiment via last30days-skill."""
+    if not SOCIAL_MODULE:
+        send_telegram("❌ social_sentiment.py tidak tersedia.", chat_id)
+        return
+    sym = coin.upper().strip()
+    if not sym:
+        send_telegram("❓ Format: <code>/social BTC</code> atau <code>/social SOLUSDT</code>", chat_id, parse_mode="HTML")
+        return
+    send_telegram(f"📡 Fetching social sentiment untuk <b>{sym}</b> dari Reddit + HackerNews... ⏳", chat_id, parse_mode="HTML")
+    try:
+        data = get_social_sentiment(sym, days=30)
+        msg = format_social_sentiment_telegram(data)
+        send_telegram(msg, chat_id, parse_mode="HTML")
+    except Exception as e:
+        send_telegram(f"❌ Error fetch social sentiment: {e}", chat_id)
+
+
 # ── v9: Risk handlers ────────────────────────
 
 def handle_risk_command(chat_id: str):
@@ -7369,7 +7426,7 @@ _KNOWN_COMMANDS = [
     "/btcompare", "/btstats", "/signalbt", "/balance", "/setstake", "/compound",
     "/liqstatus", "/marketstatus", "/signals", "/symbolmemory", "/symbolstats",
     "/blacklist", "/unblacklist", "/ask", "/scan", "/status", "/security",
-    "/why", "/style", "/help", "/start", "/done",
+    "/why", "/style", "/help", "/start", "/done", "/topicid",
 ]
 
 
@@ -7649,7 +7706,9 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💎 `/dca BTC` — DCA signal: KOL activity + narrative cycle + price context\n"
         "   → Early Narrative = 💎 ACCUMULATE | Top Signal = 🚨 AVOID\n"
-        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n\n"
+        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n"
+        "📡 `/social BTC` — Reddit + HackerNews sentiment (30 hari terakhir)\n"
+        "   → Auto-scan tiap 30m: cache dipakai signal gate + spike alert otomatis\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -7703,7 +7762,15 @@ def handle_help_command(chat_id: str):
         "🎚️ `/setrisk 2` — Set risk per trade (%)\n"
         "🛑 `/setdailyloss 5` — Set daily loss limit (%)\n"
         "📈 `/logpnl +50` — Catat PnL ke risk manager\n\n"
-        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n"
+        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 *TOPIC ROUTING (set di .env)*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "`SIGNAL_THREAD_ID` → 🎯 sinyal entry LONG/SHORT\n"
+        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse\n"
+        "`NEWS_THREAD_ID` → 📰 news agent + social sentiment spike\n"
+        "`WHALE_THREAD_ID` → 🐋 whale tracker on-chain alerts\n"
+        "`TRADE_REPORT_THREAD_ID` → 📋 trade journal & outcome\n"
         "⚠️ _Not financial advice. DYOR._"
     )
     send_telegram(msg, chat_id)
@@ -7711,6 +7778,26 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def run_social_scan_scheduled():
+    """Scheduled social sentiment scan — tiap SOCIAL_SCAN_INTERVAL menit.
+
+    Fetch Reddit + HackerNews untuk semua coin default, update
+    social_intelligence.json cache, dan kirim alert ke Market Update
+    channel kalau ada spike (engagement tinggi + sentiment kuat).
+    """
+    if not SOCIAL_MODULE:
+        return
+    try:
+        coins = DEFAULT_SCAN_COINS
+        run_social_scan(
+            coins=coins,
+            send_telegram_fn=send_news_update,
+            days=7,
+        )
+    except Exception as e:
+        log.warning(f"Social scan scheduled error: {e}")
 
 
 def run_btall_scheduled():
@@ -7946,6 +8033,11 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
         _thread(handle_xsentiment_command, coin, chat_id).start()
+
+    elif text_lower.startswith("/social"):
+        parts = text.split(maxsplit=1)
+        coin  = parts[1].strip() if len(parts) > 1 else ""
+        _thread(handle_social_command, coin, chat_id).start()
 
     # ── v9: Risk ──────────────────────────────
     elif text_lower.startswith("/risk"):
@@ -8321,6 +8413,25 @@ def process_update(update: dict):
 
     elif text_lower.startswith("/help") or text_lower.startswith("/start"):
         handle_help_command(chat_id)
+
+    elif text_lower.startswith("/topicid"):
+        # Balas dengan thread_id topic ini — berguna untuk setup .env
+        tid_display = topic_tid or "None (General / bukan topic)"
+        send_telegram(
+            f"📌 <b>Topic ID untuk topic ini:</b>\n"
+            f"<code>{tid_display}</code>\n\n"
+            f"Salin ke <code>.env</code>:\n"
+            f"<code>NEWS_THREAD_ID={tid_display}</code>\n"
+            f"atau\n"
+            f"<code>WHALE_THREAD_ID={tid_display}</code>\n\n"
+            f"<b>Topic IDs yang sudah diset:</b>\n"
+            f"SIGNAL_THREAD_ID        = <code>{SIGNAL_THREAD_ID or 'belum diset'}</code>\n"
+            f"MARKET_UPDATE_THREAD_ID = <code>{MARKET_UPDATE_THREAD_ID or 'belum diset'}</code>\n"
+            f"NEWS_THREAD_ID          = <code>{NEWS_THREAD_ID or 'belum diset'}</code>\n"
+            f"WHALE_THREAD_ID         = <code>{WHALE_THREAD_ID or 'belum diset'}</code>\n"
+            f"TRADE_REPORT_THREAD_ID  = <code>{TRADE_REPORT_THREAD_ID or 'belum diset'}</code>",
+            chat_id, parse_mode="HTML"
+        )
 
     # Konfirmasi ya/batal untuk screenshot trade yang sudah dibaca (prioritas)
     elif JOURNAL_MODULE and chat_id in _pending_shot:
@@ -10223,7 +10334,11 @@ if __name__ == "__main__":
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Modules: Regime {_regime_status} | Risk {_risk_status} | "
         f"News {_news_status} | Liq {_liq_status_str} | Memory {_mem_status}\n"
-        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n\n"
+        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n"
+        f"📡 Social scan: tiap {SOCIAL_SCAN_INTERVAL}m → topic News\n"
+        f"📰 News agent: tiap 60m → topic News\n"
+        f"🐋 Whale tracker → topic Whale Report\n"
+        f"🎯 Market Update: hanya rangkuman signal entry\n\n"
         "Ketik /help untuk list command lengkap."
     )
     try:
@@ -10241,7 +10356,7 @@ if __name__ == "__main__":
     # Whale Tracker (opsional)
     try:
         import whale_tracker
-        whale_tracker.init(telegram_fn=send_market_update)
+        whale_tracker.init(telegram_fn=send_whale_report)
         log.info("🐳 Whale Tracker: LargeTradeMonitor + WalletMonitor RUNNING")
     except ImportError:
         log.warning("⚠️ whale_tracker.py tidak ditemukan — whale tracking disabled")
@@ -10293,26 +10408,44 @@ if __name__ == "__main__":
     if TRACKER_MODULE:
         scheduler.add_job(take_lesson_snapshot, "interval", hours=12, id="lesson_snapshot_12h")
 
+    # Social Scan: Reddit + HackerNews sentiment tiap 30 menit
+    # Update social_intelligence.json cache — dipakai oleh social gate di confirmed_signal
+    # Kirim Telegram spike alert kalau ada coin dengan engagement tinggi + sentimen kuat
+    if SOCIAL_MODULE:
+        scheduler.add_job(
+            run_social_scan_scheduled,
+            "interval", minutes=SOCIAL_SCAN_INTERVAL,
+            id="social_scan",
+            jitter=60,
+        )
+        threading.Thread(
+            target=run_social_scan_scheduled,
+            daemon=True,
+            name="social_scan_startup",
+        ).start()
+        log.info(f"📡 Social Scan aktif: Reddit+HN tiap {SOCIAL_SCAN_INTERVAL}m (+ startup)")
+
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
-    # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
+    # Kirim Telegram alert otomatis (high-urgency events) ke topic News
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
         scheduler.add_job(
-            lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            lambda: run_news_fetch(send_telegram_fn=send_news_update),
             "interval", minutes=60, id="news_agent_hourly",
             jitter=120,   # ± 2 menit random offset agar tidak collision
         )
         # Jalankan sekali saat startup (background agar tidak delay bot)
         threading.Thread(
-            target=lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            target=lambda: run_news_fetch(send_telegram_fn=send_news_update),
             daemon=True, name="news_agent_startup",
         ).start()
-        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
+        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit → topic News)")
 
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"Reversal={REVERSAL_SCAN_INTERVAL if REVERSAL_SCAN_ENABLED else 'off'}m | "
         f"MarketPulse={MARKET_PULSE_INTERVAL if MARKET_PULSE_ENABLED else 'off'}m | "
+        f"Social={SOCIAL_SCAN_INTERVAL if SOCIAL_MODULE else 'off'}m | "
         f"News Agent=60m | "
         f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | "
         f"Daily-learning=23:00 UTC | Lesson-snapshot=tiap 12j"
