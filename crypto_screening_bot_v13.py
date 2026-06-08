@@ -7448,7 +7448,9 @@ def handle_logshot_command(chat_id: str):
     _awaiting_tradeshot[chat_id] = True
     send_telegram(
         "📸 Kirim <b>screenshot order details</b> (Bitget/Binance/dll) yang ada "
-        "Entry, Exit, Realized PnL & ROI.\nGue baca otomatis terus konfirmasi sebelum disimpan.",
+        "Entry, Exit, Realized PnL & ROI.\nGue baca otomatis terus konfirmasi sebelum disimpan.\n\n"
+        "💡 <b>Di grup:</b> kalau screenshot-nya nggak kebaca, <b>REPLY pesan ini</b> sambil "
+        "lampirin fotonya (atau kirim sebagai foto, bukan file).",
         chat_id, parse_mode="HTML",
     )
 
