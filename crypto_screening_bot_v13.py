@@ -8328,6 +8328,25 @@ def process_update(update: dict):
     elif text_lower.startswith("/help") or text_lower.startswith("/start"):
         handle_help_command(chat_id)
 
+    elif text_lower.startswith("/topicid"):
+        # Balas dengan thread_id topic ini — berguna untuk setup .env
+        tid_display = topic_tid or "None (General / bukan topic)"
+        send_telegram(
+            f"📌 <b>Topic ID untuk topic ini:</b>\n"
+            f"<code>{tid_display}</code>\n\n"
+            f"Salin ke <code>.env</code>:\n"
+            f"<code>NEWS_THREAD_ID={tid_display}</code>\n"
+            f"atau\n"
+            f"<code>WHALE_THREAD_ID={tid_display}</code>\n\n"
+            f"<b>Topic IDs yang sudah diset:</b>\n"
+            f"SIGNAL_THREAD_ID        = <code>{SIGNAL_THREAD_ID or 'belum diset'}</code>\n"
+            f"MARKET_UPDATE_THREAD_ID = <code>{MARKET_UPDATE_THREAD_ID or 'belum diset'}</code>\n"
+            f"NEWS_THREAD_ID          = <code>{NEWS_THREAD_ID or 'belum diset'}</code>\n"
+            f"WHALE_THREAD_ID         = <code>{WHALE_THREAD_ID or 'belum diset'}</code>\n"
+            f"TRADE_REPORT_THREAD_ID  = <code>{TRADE_REPORT_THREAD_ID or 'belum diset'}</code>",
+            chat_id, parse_mode="HTML"
+        )
+
     # Konfirmasi ya/batal untuk screenshot trade yang sudah dibaca (prioritas)
     elif JOURNAL_MODULE and chat_id in _pending_shot:
         _thread(handle_shot_confirm, text, chat_id).start()
