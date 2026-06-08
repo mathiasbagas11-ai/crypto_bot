@@ -656,6 +656,12 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
         push_trade(result_dict)
     except Exception as e:
         log.warning(f"supabase push_trade error: {e}")
+    # Auto-lesson ke learning engine tiap trade (best-effort, jangan ganggu flow)
+    try:
+        import learning_engine
+        learning_engine.record_trade_journal_lesson(result_dict)
+    except Exception as e:
+        log.warning(f"auto-lesson dari trade gagal: {e}")
     return result_dict
 
 def format_trade_logged(t: dict) -> str:

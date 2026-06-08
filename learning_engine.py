@@ -468,6 +468,63 @@ def add_manual_lesson(rule: str, tags: list = None, pinned: bool = False, role: 
     return lesson
 
 
+def record_trade_journal_lesson(trade: dict) -> dict:
+    """
+    Auto-derive lesson dari trade yang baru masuk journal.
+    Dipanggil oleh trade_journal.log_trade() tiap ada trade dicatat, supaya
+    hasil trade ASLI ikut ngefeed konteks sinyal (bukan cuma sinyal bot sendiri).
+
+    `trade` = result_dict dari log_trade (coin, direction, result, pnl_usdt,
+    pnl_pct, note, ...). Best-effort: error tidak boleh ganggu pencatatan trade.
+    """
+    try:
+        coin      = str(trade.get("coin", "")).upper().replace("USDT", "")
+        direction = str(trade.get("direction", "")).upper()
+        result    = str(trade.get("result", "")).upper()
+        if not coin or direction not in ("LONG", "SHORT"):
+            return {}
+
+        pnl_usdt = float(trade.get("pnl_usdt", 0) or 0)
+        pnl_pct  = float(trade.get("pnl_pct", 0) or 0)
+        note     = (trade.get("note") or "").strip()
+
+        sign = "+" if pnl_usdt >= 0 else ""
+        head = f"{result} {coin} {direction} {sign}{pnl_pct:.1f}% ({sign}{pnl_usdt:.2f}U)"
+        if result == "WIN":
+            guide, outcome = "Setup ini cuan — catat kondisi entry buat replikasi.", "good"
+        elif result == "LOSS":
+            guide, outcome = "Setup ini rugi — tinjau ulang sebelum entry mirip lagi.", "bad"
+        else:
+            guide, outcome = "Breakeven — evaluasi apakah entry layak diulang.", "neutral"
+
+        rule = head
+        if note:
+            rule += f" | catatan: {note}"
+        rule += f" → {guide}"
+
+        data = _load_lessons()
+        lesson = {
+            "id": int(time.time() * 1000),
+            "rule": rule[:MAX_MANUAL_LESSON_LEN],
+            "tags": ["trade_journal", coin, direction, result.lower()],
+            "outcome": outcome,
+            "source_type": "trade_journal",
+            "confidence": 0.6,
+            "pinned": False,
+            "role": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "meta": {"coin": coin, "direction": direction,
+                     "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": round(pnl_pct, 2)},
+        }
+        data["lessons"].append(lesson)
+        _save_lessons(data)
+        log.info(f"📒 Trade-journal lesson: {rule[:70]}")
+        return lesson
+    except Exception as e:
+        log.warning(f"record_trade_journal_lesson error: {e}")
+        return {}
+
+
 def pin_lesson(lesson_id: int) -> bool:
     data = _load_lessons()
     for l in data["lessons"]:
