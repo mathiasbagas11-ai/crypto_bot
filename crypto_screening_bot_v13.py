@@ -339,6 +339,8 @@ DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
 SIGNAL_THREAD_ID        = os.getenv("SIGNAL_THREAD_ID", "")        or None
 MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
 TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
+NEWS_THREAD_ID          = os.getenv("NEWS_THREAD_ID", "")          or None  # news agent + social spikes
+WHALE_THREAD_ID         = os.getenv("WHALE_THREAD_ID", "")         or None  # whale tracker
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -5408,8 +5410,32 @@ def send_signal(message: str, parse_mode: str = None):
 
 
 def send_market_update(message: str, parse_mode: str = None):
-    """Kirim news/market update ke topic Market Update (MARKET_UPDATE_THREAD_ID)."""
+    """Kirim rangkuman sinyal entry ke topic Market Update (MARKET_UPDATE_THREAD_ID).
+
+    Isi: bias flip BTC, market pulse, scan summary, reversal brief.
+    Bukan untuk news atau whale — gunakan send_news_update / send_whale_report.
+    """
     return send_telegram(message, thread_id=MARKET_UPDATE_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_news_update(message: str, parse_mode: str = None):
+    """Kirim news & social alerts ke topic News (NEWS_THREAD_ID).
+
+    Isi: news agent alerts, social sentiment spikes (Reddit/HN).
+    Fallback ke Market Update kalau NEWS_THREAD_ID belum diset.
+    """
+    tid = NEWS_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
+
+
+def send_whale_report(message: str, parse_mode: str = None):
+    """Kirim whale movement alerts ke topic Whale Report (WHALE_THREAD_ID).
+
+    Isi: on-chain whale moves, large transfer alerts dari whale_tracker.py.
+    Fallback ke Market Update kalau WHALE_THREAD_ID belum diset.
+    """
+    tid = WHALE_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
 
 
 def send_trade_report(message: str, parse_mode: str = None):
@@ -7650,7 +7676,15 @@ def handle_help_command(chat_id: str):
         "🎚️ `/setrisk 2` — Set risk per trade (%)\n"
         "🛑 `/setdailyloss 5` — Set daily loss limit (%)\n"
         "📈 `/logpnl +50` — Catat PnL ke risk manager\n\n"
-        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n"
+        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 *TOPIC ROUTING (set di .env)*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "`SIGNAL_THREAD_ID` → 🎯 sinyal entry LONG/SHORT\n"
+        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse\n"
+        "`NEWS_THREAD_ID` → 📰 news agent + social sentiment spike\n"
+        "`WHALE_THREAD_ID` → 🐋 whale tracker on-chain alerts\n"
+        "`TRADE_REPORT_THREAD_ID` → 📋 trade journal & outcome\n"
         "⚠️ _Not financial advice. DYOR._"
     )
     send_telegram(msg, chat_id)
@@ -7673,7 +7707,7 @@ def run_social_scan_scheduled():
         coins = DEFAULT_SCAN_COINS
         run_social_scan(
             coins=coins,
-            send_telegram_fn=send_market_update,
+            send_telegram_fn=send_news_update,
             days=7,
         )
     except Exception as e:
@@ -10184,7 +10218,11 @@ if __name__ == "__main__":
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Modules: Regime {_regime_status} | Risk {_risk_status} | "
         f"News {_news_status} | Liq {_liq_status_str} | Memory {_mem_status}\n"
-        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n\n"
+        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n"
+        f"📡 Social scan: tiap {SOCIAL_SCAN_INTERVAL}m → topic News\n"
+        f"📰 News agent: tiap 60m → topic News\n"
+        f"🐋 Whale tracker → topic Whale Report\n"
+        f"🎯 Market Update: hanya rangkuman signal entry\n\n"
         "Ketik /help untuk list command lengkap."
     )
     try:
@@ -10202,7 +10240,7 @@ if __name__ == "__main__":
     # Whale Tracker (opsional)
     try:
         import whale_tracker
-        whale_tracker.init(telegram_fn=send_market_update)
+        whale_tracker.init(telegram_fn=send_whale_report)
         log.info("🐳 Whale Tracker: LargeTradeMonitor + WalletMonitor RUNNING")
     except ImportError:
         log.warning("⚠️ whale_tracker.py tidak ditemukan — whale tracking disabled")
@@ -10272,19 +10310,19 @@ if __name__ == "__main__":
         log.info(f"📡 Social Scan aktif: Reddit+HN tiap {SOCIAL_SCAN_INTERVAL}m (+ startup)")
 
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
-    # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
+    # Kirim Telegram alert otomatis (high-urgency events) ke topic News
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
         scheduler.add_job(
-            lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            lambda: run_news_fetch(send_telegram_fn=send_news_update),
             "interval", minutes=60, id="news_agent_hourly",
             jitter=120,   # ± 2 menit random offset agar tidak collision
         )
         # Jalankan sekali saat startup (background agar tidak delay bot)
         threading.Thread(
-            target=lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            target=lambda: run_news_fetch(send_telegram_fn=send_news_update),
             daemon=True, name="news_agent_startup",
         ).start()
-        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
+        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit → topic News)")
 
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
