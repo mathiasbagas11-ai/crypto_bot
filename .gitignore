@@ -16,3 +16,6 @@ coverage.xml
 signal_chat_map.json
 signal_chat_convos.json
 trading_style.json
+
+# Social sentiment runtime cache (auto-generated, overwritten every 30m)
+social_intelligence.json
