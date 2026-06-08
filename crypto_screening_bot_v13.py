@@ -7456,11 +7456,23 @@ def handle_logshot_command(chat_id: str):
 
 
 def handle_trade_screenshot(file_id: str, chat_id: str):
-    """Download screenshot, baca via Groq vision, tampilkan preview untuk konfirmasi."""
+    """Jalur eksplisit (/logshot): baca screenshot order-details, tampilkan preview."""
     if not JOURNAL_MODULE:
         return False
     _awaiting_tradeshot.pop(chat_id, None)
     send_telegram("⏳ <i>Lagi baca screenshot...</i>", chat_id, parse_mode="HTML")
+    return _read_trade_screenshot(file_id, chat_id, quiet=False)
+
+
+def _read_trade_screenshot(file_id: str, chat_id: str, quiet: bool = False) -> bool:
+    """
+    Download screenshot, baca via Groq vision, kalau valid → set _pending_shot +
+    kirim preview konfirmasi (return True). Kalau bukan order-details → return False.
+    quiet=True: jangan kirim pesan error (dipakai auto-detect biar bisa fallback
+    ke analisa chart tanpa nyampah pesan).
+    """
+    if not JOURNAL_MODULE:
+        return False
     # Fetch file URL + bytes dari Telegram
     try:
         r = requests.get(
@@ -7476,32 +7488,46 @@ def handle_trade_screenshot(file_id: str, chat_id: str):
         mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
     except Exception as e:
         log.warning(f"Trade screenshot fetch error: {e}")
-        send_telegram("⚠️ Gagal ambil gambar dari Telegram. Coba kirim ulang.", chat_id)
+        if not quiet:
+            send_telegram("⚠️ Gagal ambil gambar dari Telegram. Coba kirim ulang.", chat_id)
         return False
 
     image_b64, mime = _prepare_image_for_vision(img_bytes, mime)
     raw, verr = _extract_shot_json(image_b64, mime)
     if not raw:
-        detail = f"\n\n🔧 <i>Detail: {verr}</i>" if verr else ""
-        send_telegram(
-            "⚠️ Nggak bisa baca data dari screenshot itu. Pastikan ini halaman "
-            "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade."
-            + detail,
-            chat_id, parse_mode="HTML",
-        )
+        if not quiet:
+            detail = f"\n\n🔧 <i>Detail: {verr}</i>" if verr else ""
+            send_telegram(
+                "⚠️ Nggak bisa baca data dari screenshot itu. Pastikan ini halaman "
+                "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade."
+                + detail,
+                chat_id, parse_mode="HTML",
+            )
         return False
 
     trade, err = build_trade_from_screenshot(raw)
     if err:
-        send_telegram(
-            f"⚠️ {err}\nCoba kirim screenshot yang lebih jelas, atau /logtrade buat manual.",
-            chat_id, parse_mode="HTML",
-        )
+        if not quiet:
+            send_telegram(
+                f"⚠️ {err}\nCoba kirim screenshot yang lebih jelas, atau /logtrade buat manual.",
+                chat_id, parse_mode="HTML",
+            )
         return False
 
     _pending_shot[chat_id] = trade
     send_telegram(format_shot_preview(trade), chat_id, parse_mode="HTML")
     return True
+
+
+def _handle_photo_auto(chat_id: str, file_id: str):
+    """
+    Foto tanpa konteks eksplisit (bukan /logshot, bukan /chart): coba baca dulu
+    sebagai screenshot order-details (auto-log trade); kalau bukan → analisa chart.
+    Bikin logshot 'just work' walau user lupa ketik /logshot.
+    """
+    if JOURNAL_MODULE and _read_trade_screenshot(file_id, chat_id, quiet=True):
+        return
+    handle_chart_command(chat_id, file_id)
 
 
 def handle_shot_confirm(text: str, chat_id: str):
@@ -7977,16 +8003,19 @@ def process_update(update: dict):
     # ── Handle gambar (Photo compressed ATAU File/Document) ──────────
     if photos or doc_is_image:
         file_id = photos[-1].get("file_id") if photos else document.get("file_id")
+        wants_chart = bool(_awaiting_chart.pop(chat_id, None))  # user ketik /chart?
         if file_id:
             if JOURNAL_MODULE and is_wizard_expecting_image(chat_id):
                 _thread(handle_journal_wizard_image, file_id, chat_id).start()
             elif JOURNAL_MODULE and _awaiting_tradeshot.get(chat_id):
                 _thread(handle_trade_screenshot, file_id, chat_id).start()
-            else:
+            elif wants_chart:
                 _thread(handle_chart_command, chat_id, file_id).start()
+            else:
+                # Tanpa konteks eksplisit → auto: coba baca trade dulu, fallback chart
+                _thread(_handle_photo_auto, chat_id, file_id).start()
         else:
             log.warning(f"[{chat_id}] gambar diterima tapi file_id kosong")
-        _awaiting_chart.pop(chat_id, None)
         return
 
     if not text:
