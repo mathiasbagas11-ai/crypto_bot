@@ -2593,6 +2593,173 @@ def detect_impulse_retracement(candles: list) -> dict:
     }
 
 
+def detect_price_channel(candles: list) -> dict:
+    """
+    Deteksi ascending/descending parallel price channel dari swing highs + lows.
+
+    Berbeda dari LRLR (semua close → satu garis mean) dan trendline (satu arah):
+    - Channel = DUA garis parallel: support (swing lows) + resistance (swing highs)
+    - Valid hanya jika kedua garis memiliki slope serupa (parallel) dan arah sama
+
+    Use case:
+      BULLISH channel: setiap pullback ke support = swing LONG entry
+        TP1 = midline channel, TP2 = channel resistance
+      BEARISH channel: setiap rally ke resistance = swing SHORT entry
+        TP1 = midline channel, TP2 = channel support
+
+    Return:
+      channel_type   : BULLISH | BEARISH | NONE
+      support_now    : level garis support channel saat ini
+      resistance_now : level garis resistance channel saat ini
+      midline_now    : (support + resistance) / 2
+      width_pct      : lebar channel dalam % dari harga
+      slope_pct      : kemiringan rata-rata per candle dalam %
+      price_position : AT_SUPPORT | INSIDE | AT_RESISTANCE | ABOVE | BELOW
+      swing_entry    : zona entry ideal (near support for LONG, near resistance for SHORT)
+      swing_tp1      : target TP1 (midline)
+      swing_tp2      : target TP2 (resistance/support)
+      swing_sl       : stop loss (di luar channel, satu ATR-width buffer)
+      touches_sup    : jumlah candle yang menyentuh support channel
+      touches_res    : jumlah candle yang menyentuh resistance channel
+      is_valid       : True jika touches >= 2 di kedua sisi DAN slopes parallel
+    """
+    empty = {
+        "channel_type": "NONE", "support_now": None, "resistance_now": None,
+        "midline_now": None, "width_pct": 0.0, "slope_pct": 0.0,
+        "price_position": "NONE", "swing_entry": None,
+        "swing_tp1": None, "swing_tp2": None, "swing_sl": None,
+        "touches_sup": 0, "touches_res": 0, "is_valid": False,
+    }
+    if not candles or len(candles) < 20:
+        return empty
+
+    lb = 3  # lookaround untuk pivot detection
+    n  = len(candles)
+
+    pivot_highs, pivot_lows = [], []
+    for i in range(lb, n - lb):
+        if candles[i]["high"] == max(c["high"] for c in candles[i - lb: i + lb + 1]):
+            pivot_highs.append((i, candles[i]["high"]))
+        if candles[i]["low"] == min(c["low"] for c in candles[i - lb: i + lb + 1]):
+            pivot_lows.append((i, candles[i]["low"]))
+
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return empty
+
+    # Pakai 4 swing point terbaru masing-masing untuk fit yang lebih stabil
+    ph = pivot_highs[-4:]
+    pl = pivot_lows[-4:]
+
+    def _linreg(pts):
+        xs = np.array([p[0] for p in pts], dtype=float)
+        ys = np.array([p[1] for p in pts], dtype=float)
+        xm, ym = xs.mean(), ys.mean()
+        denom = np.sum((xs - xm) ** 2)
+        if denom == 0:
+            return None, None
+        slope = np.sum((xs - xm) * (ys - ym)) / denom
+        intercept = ym - slope * xm
+        return slope, intercept
+
+    slope_h, int_h = _linreg(ph)
+    slope_l, int_l = _linreg(pl)
+    if slope_h is None or slope_l is None:
+        return empty
+
+    # Level pada candle terakhir
+    current_idx   = n - 1
+    res_now  = slope_h * current_idx + int_h
+    sup_now  = slope_l * current_idx + int_l
+    mid_now  = (res_now + sup_now) / 2
+    price    = float(candles[-1]["close"])
+
+    if sup_now <= 0 or res_now <= sup_now:
+        return empty
+
+    # Validasi parallelism: selisih slope relatif < 60%
+    avg_slope = (abs(slope_h) + abs(slope_l)) / 2
+    slope_diff = abs(slope_h - slope_l)
+    if avg_slope > 0 and slope_diff / avg_slope > 0.60:
+        return empty  # tidak cukup parallel
+
+    # Validasi arah: keduanya harus searah
+    if slope_h > 0 and slope_l > 0:
+        channel_type = "BULLISH"
+    elif slope_h < 0 and slope_l < 0:
+        channel_type = "BEARISH"
+    else:
+        return empty  # satu naik satu turun = bukan channel
+
+    # Slope rata-rata dalam % per candle
+    ref_price = price if price > 0 else mid_now
+    slope_avg_pct = ((slope_h + slope_l) / 2 / ref_price) * 100
+
+    # Hitung touches
+    tol = 0.004  # 0.4% tolerance
+    touches_sup = touches_res = 0
+    for i, c in enumerate(candles):
+        lvl_h = slope_h * i + int_h
+        lvl_l = slope_l * i + int_l
+        if abs(c["low"]  - lvl_l) / lvl_l < tol: touches_sup += 1
+        if abs(c["high"] - lvl_h) / lvl_h < tol: touches_res += 1
+
+    is_valid = touches_sup >= 2 and touches_res >= 2
+
+    # Price position relatif channel
+    near_tol = 0.008  # 0.8% = "near" support/resistance
+    if price < sup_now * (1 - near_tol):
+        price_pos = "BELOW"
+    elif price <= sup_now * (1 + near_tol):
+        price_pos = "AT_SUPPORT"
+    elif price >= res_now * (1 - near_tol):
+        price_pos = "AT_RESISTANCE"
+    elif price > res_now * (1 + near_tol):
+        price_pos = "ABOVE"
+    else:
+        price_pos = "INSIDE"
+
+    # Channel width
+    width_pct = (res_now - sup_now) / sup_now * 100
+
+    # Trade levels berdasarkan channel
+    # SL buffer = 0.3 × channel width di luar garis support/resistance
+    sl_buf  = (res_now - sup_now) * 0.3
+    tp2_buf = (res_now - sup_now) * 0.05  # 5% channel width buffer (kecil)
+    if channel_type == "BULLISH":
+        swing_entry = round(sup_now * 1.001, 8)           # just above support
+        swing_tp1   = round(mid_now, 8)                   # midline
+        swing_tp2   = round(res_now - tp2_buf, 8)         # just below resistance
+        swing_sl    = round(sup_now - sl_buf, 8)          # below support
+        # Guard: pastikan tp2 > tp1 > entry
+        if swing_tp2 <= swing_tp1:
+            swing_tp2 = round(res_now * 0.9995, 8)
+    else:  # BEARISH
+        swing_entry = round(res_now * 0.999, 8)           # just below resistance
+        swing_tp1   = round(mid_now, 8)                   # midline
+        swing_tp2   = round(sup_now + tp2_buf, 8)         # just above support
+        swing_sl    = round(res_now + sl_buf, 8)          # above resistance
+        # Guard: pastikan tp2 < tp1 < entry
+        if swing_tp2 >= swing_tp1:
+            swing_tp2 = round(sup_now * 1.0005, 8)
+
+    return {
+        "channel_type":  channel_type,
+        "support_now":   round(sup_now, 8),
+        "resistance_now": round(res_now, 8),
+        "midline_now":   round(mid_now, 8),
+        "width_pct":     round(width_pct, 2),
+        "slope_pct":     round(slope_avg_pct, 4),
+        "price_position": price_pos,
+        "swing_entry":   swing_entry,
+        "swing_tp1":     swing_tp1,
+        "swing_tp2":     swing_tp2,
+        "swing_sl":      swing_sl,
+        "touches_sup":   touches_sup,
+        "touches_res":   touches_res,
+        "is_valid":      is_valid,
+    }
+
+
 def calculate_entry_zone(ob: dict, fvg: dict, sweep: dict, price: float, direction: str) -> dict:
     """
     Hitung entry zone sebagai RANGE (bukan single price).
@@ -3030,6 +3197,49 @@ def detect_swing_setup(symbol: str, tf_4h: dict, tf_1h: dict, tf_15m: dict,
         score += 5
         result["reasons"].append(f"📊 OI Change: {oi_chg:+.1f}% — conviction tinggi")
 
+    # ── 7. PRICE CHANNEL (Bullish/Bearish Ascending Channel) ──────
+    ch_4h = tf_4h.get("price_channel", {})
+    ch_1h = tf_1h.get("price_channel", {})
+    # Prioritas 4H channel untuk swing — lebih reliable
+    best_ch = ch_4h if ch_4h.get("is_valid") else ch_1h
+    ch_tf_label = "4H" if ch_4h.get("is_valid") else "1H"
+
+    if best_ch.get("is_valid"):
+        ctype = best_ch["channel_type"]
+        cpos  = best_ch["price_position"]
+        cslope = best_ch.get("slope_pct", 0)
+        cwidth = best_ch.get("width_pct", 0)
+
+        # Channel arah align dengan bias sinyal
+        if (direction == "LONG" and ctype == "BULLISH") or \
+           (direction == "SHORT" and ctype == "BEARISH"):
+            score += 20
+            result["reasons"].append(
+                f"📐 {ch_tf_label} {ctype} Channel valid "
+                f"(slope {cslope:+.3f}%/candle, width {cwidth:.1f}%)"
+            )
+
+            # Price di support (BULLISH) atau resistance (BEARISH) = entry ideal
+            if (direction == "LONG" and cpos == "AT_SUPPORT") or \
+               (direction == "SHORT" and cpos == "AT_RESISTANCE"):
+                score += 15
+                result["reasons"].append(
+                    f"🎯 Price AT channel {'support' if direction == 'LONG' else 'resistance'} "
+                    f"({ch_tf_label}) — SWING ENTRY IDEAL"
+                )
+            elif cpos == "INSIDE":
+                score += 5
+                result["reasons"].append(f"  Price inside {ch_tf_label} channel — tunggu pullback ke support")
+
+        elif (direction == "LONG" and ctype == "BEARISH") or \
+             (direction == "SHORT" and ctype == "BULLISH"):
+            score -= 10
+            result["reasons"].append(
+                f"⚠️ {ch_tf_label} {ctype} Channel — melawan arah sinyal (-10pt)"
+            )
+
+        result["price_channel"] = best_ch
+
     # ── ENTRY ZONE & TRADE PLAN ───────────────────
     fvg_for_zone = fvg_1h
     entry_zone   = calculate_entry_zone(ob_1h, fvg_for_zone, result["sweep"], price, direction)
@@ -3044,14 +3254,34 @@ def detect_swing_setup(symbol: str, tf_4h: dict, tf_1h: dict, tf_15m: dict,
             sl_dist = price * SWING_SL_PCT
         sl_dist = max(sl_dist, price * 0.008)  # floor: 0.8% to avoid tiny SL
 
-        if direction == "LONG":
-            tp = round(price * (1 + SWING_TP_PCT), 8)
-            sl = round(price - sl_dist, 8)
-        elif direction == "SHORT":
-            tp = round(price * (1 - SWING_TP_PCT), 8)
-            sl = round(price + sl_dist, 8)
+        # Gunakan channel TP/SL jika channel valid dan aligned
+        ch = result.get("price_channel", {})
+        use_channel_levels = (
+            ch.get("is_valid") and
+            ((direction == "LONG"  and ch["channel_type"] == "BULLISH") or
+             (direction == "SHORT" and ch["channel_type"] == "BEARISH"))
+        )
+
+        if use_channel_levels:
+            tp    = ch["swing_tp2"]   # channel resistance/support = full target
+            tp1   = ch["swing_tp1"]   # midline = conservative exit
+            sl    = ch["swing_sl"]    # di luar channel
+            result["swing_tp1"] = tp1
+            result["channel_tp_used"] = True
+            def _fp(v):
+                return f"${v:,.2f}" if v and v >= 1 else f"${v:.6f}" if v else "N/A"
+            result["reasons"].append(
+                f"  TP via channel: mid={_fp(tp1)} | full={_fp(tp)} | SL={_fp(sl)}"
+            )
         else:
-            tp = sl = None
+            if direction == "LONG":
+                tp = round(price * (1 + SWING_TP_PCT), 8)
+                sl = round(price - sl_dist, 8)
+            elif direction == "SHORT":
+                tp = round(price * (1 - SWING_TP_PCT), 8)
+                sl = round(price + sl_dist, 8)
+            else:
+                tp = sl = None
 
         rr = 0
         if tp and sl and price != sl:
@@ -3183,6 +3413,7 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "trendline_res":    detect_trendline(closed_candles, "highs"),
         "lrlr":             detect_linear_regression_channel(closed_candles),
         "impulse_retrace":  detect_impulse_retracement(closed_candles),
+        "price_channel":    detect_price_channel(closed_candles),
         "money_flow":     detect_money_flow(closed_candles),     # v13: CVD+MFI+VWAP
         "ema9":           calculate_ema(closed_candles, 9),
         "ema21":          calculate_ema(closed_candles, 21),
@@ -6580,6 +6811,7 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "trendline_res":   detect_trendline(closed_candles, "highs"),
         "lrlr":            detect_linear_regression_channel(closed_candles),
         "impulse_retrace": detect_impulse_retracement(closed_candles),
+        "price_channel":   detect_price_channel(closed_candles),
         "money_flow": detect_money_flow(closed_candles),
         "ema9": calculate_ema(closed_candles, 9),
         "ema21": calculate_ema(closed_candles, 21),

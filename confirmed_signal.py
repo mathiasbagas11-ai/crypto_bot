@@ -1108,6 +1108,38 @@ def format_confirmed_signal_message(signal: dict) -> str:
     if retrace_lines:
         lines += ["", "─────── IMPULSE RETRACE ZONE (HTF) ───────"]
         lines.extend(retrace_lines)
+
+    # Price Channel info (dari swing score data jika ada)
+    _swing_data = signal.get("component_scores", {}).get("swing", {})
+    _ch_sig = None
+    for _tf_key in ("tf_4h", "tf_1h"):
+        _tf_d = signal.get(_tf_key, {})
+        _ch = _tf_d.get("price_channel", {}) if _tf_d else {}
+        if _ch.get("is_valid"):
+            _ch_sig = (_ch, "4H" if _tf_key == "tf_4h" else "1H")
+            break
+    if _ch_sig:
+        _ch, _ch_label = _ch_sig
+        _ctype   = _ch["channel_type"]
+        _cicon   = "📈" if _ctype == "BULLISH" else "📉"
+        _cpos    = _ch.get("price_position", "INSIDE")
+        _cpos_icon = "🎯" if _cpos in ("AT_SUPPORT", "AT_RESISTANCE") else "  "
+        lines += [
+            "",
+            f"─────── {_cicon} PRICE CHANNEL {_ch_label} ───────",
+            f"  {_cicon} {_ctype} channel | slope {_ch['slope_pct']:+.3f}%/candle | "
+            f"width {_ch['width_pct']:.1f}%",
+            f"  Sup: {_f(_ch['support_now'])}  Mid: {_f(_ch['midline_now'])}  "
+            f"Res: {_f(_ch['resistance_now'])}",
+            f"  {_cpos_icon} Posisi harga: {_cpos}",
+        ]
+        if _cpos in ("AT_SUPPORT", "AT_RESISTANCE"):
+            _dir_match = (_ctype == "BULLISH" and direc == "LONG") or \
+                         (_ctype == "BEARISH" and direc == "SHORT")
+            if _dir_match:
+                lines.append(f"  ✅ SWING ENTRY IDEAL — harga di batas channel {'bawah' if direc == 'LONG' else 'atas'}")
+                lines.append(f"     TP1 midline: {_f(_ch['swing_tp1'])} | TP2 full: {_f(_ch['swing_tp2'])}")
+
     lines += [
         "",
         "─────── SIGNAL BREAKDOWN ───────",
