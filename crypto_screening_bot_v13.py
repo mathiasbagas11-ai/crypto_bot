@@ -132,11 +132,16 @@ except ImportError:
 
 # ── Social Sentiment (Reddit + HackerNews via last30days-skill) ────────────
 try:
-    from social_sentiment import get_social_sentiment, format_social_sentiment_telegram
+    from social_sentiment import (
+        get_social_sentiment, format_social_sentiment_telegram,
+        run_social_scan, DEFAULT_SCAN_COINS,
+    )
     SOCIAL_MODULE = True
 except ImportError:
     SOCIAL_MODULE = False
     logging.getLogger("social").warning("social_sentiment.py tidak tersedia")
+
+SOCIAL_SCAN_INTERVAL = int(os.getenv("SOCIAL_SCAN_INTERVAL", "30"))  # menit
 
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
@@ -7590,7 +7595,8 @@ def handle_help_command(chat_id: str):
         "💎 `/dca BTC` — DCA signal: KOL activity + narrative cycle + price context\n"
         "   → Early Narrative = 💎 ACCUMULATE | Top Signal = 🚨 AVOID\n"
         "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n"
-        "📡 `/social BTC` — Reddit + HackerNews sentiment (30 hari terakhir)\n\n"
+        "📡 `/social BTC` — Reddit + HackerNews sentiment (30 hari terakhir)\n"
+        "   → Auto-scan tiap 30m: cache dipakai signal gate + spike alert otomatis\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -7652,6 +7658,26 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def run_social_scan_scheduled():
+    """Scheduled social sentiment scan — tiap SOCIAL_SCAN_INTERVAL menit.
+
+    Fetch Reddit + HackerNews untuk semua coin default, update
+    social_intelligence.json cache, dan kirim alert ke Market Update
+    channel kalau ada spike (engagement tinggi + sentiment kuat).
+    """
+    if not SOCIAL_MODULE:
+        return
+    try:
+        coins = DEFAULT_SCAN_COINS
+        run_social_scan(
+            coins=coins,
+            send_telegram_fn=send_market_update,
+            days=7,
+        )
+    except Exception as e:
+        log.warning(f"Social scan scheduled error: {e}")
 
 
 def run_btall_scheduled():
@@ -10228,6 +10254,23 @@ if __name__ == "__main__":
     if TRACKER_MODULE:
         scheduler.add_job(take_lesson_snapshot, "interval", hours=12, id="lesson_snapshot_12h")
 
+    # Social Scan: Reddit + HackerNews sentiment tiap 30 menit
+    # Update social_intelligence.json cache — dipakai oleh social gate di confirmed_signal
+    # Kirim Telegram spike alert kalau ada coin dengan engagement tinggi + sentimen kuat
+    if SOCIAL_MODULE:
+        scheduler.add_job(
+            run_social_scan_scheduled,
+            "interval", minutes=SOCIAL_SCAN_INTERVAL,
+            id="social_scan",
+            jitter=60,
+        )
+        threading.Thread(
+            target=run_social_scan_scheduled,
+            daemon=True,
+            name="social_scan_startup",
+        ).start()
+        log.info(f"📡 Social Scan aktif: Reddit+HN tiap {SOCIAL_SCAN_INTERVAL}m (+ startup)")
+
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
     # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
@@ -10248,6 +10291,7 @@ if __name__ == "__main__":
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"Reversal={REVERSAL_SCAN_INTERVAL if REVERSAL_SCAN_ENABLED else 'off'}m | "
         f"MarketPulse={MARKET_PULSE_INTERVAL if MARKET_PULSE_ENABLED else 'off'}m | "
+        f"Social={SOCIAL_SCAN_INTERVAL if SOCIAL_MODULE else 'off'}m | "
         f"News Agent=60m | "
         f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | "
         f"Daily-learning=23:00 UTC | Lesson-snapshot=tiap 12j"
