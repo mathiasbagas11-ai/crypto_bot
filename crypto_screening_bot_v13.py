@@ -2482,6 +2482,117 @@ def detect_linear_regression_channel(candles: list, period: int = 50) -> dict:
     }
 
 
+def detect_impulse_retracement(candles: list) -> dict:
+    """
+    Deteksi impulse move terbaru dan hitung Fibonacci retracement zone.
+
+    Dipakai untuk HTF (4H/1D): identifikasi "80% retracement zone" —
+    level dimana seller besar re-entry setelah bearish impulse, atau
+    dimana buyer exhausted setelah bullish impulse.
+
+    Konsep: ICT Optimal Trade Entry (OTE) / 80% retracement
+      Bearish impulse H→L: retrace ke atas 78–80% = zona supply (SHORT entry / LONG TP cap)
+      Bullish impulse L→H: retrace ke bawah 78–80% = zona demand (LONG entry / SHORT TP cap)
+
+    Return:
+      impulse_dir         : BEARISH | BULLISH | NONE
+      origin              : harga awal impulse (pivot extreme sebelum move)
+      end_price           : harga akhir impulse (pivot extreme setelah move)
+      range_pts           : besar move dalam poin
+      strength_pct        : besar move dalam %
+      retrace_50          : 50% level
+      retrace_62          : 61.8% (Fibonacci golden ratio)
+      retrace_80          : 80% (ICT OTE — batas atas zona)
+      zone_top            : batas atas zona retrace (80%)
+      zone_bottom         : batas bawah zona retrace (78%)
+      is_active           : True jika price belum masuk zona (retrace belum selesai)
+      current_retrace_pct : % retrace yang sudah terjadi saat ini
+    """
+    empty = {
+        "impulse_dir": "NONE", "origin": None, "end_price": None,
+        "range_pts": 0.0, "strength_pct": 0.0,
+        "retrace_50": None, "retrace_62": None, "retrace_80": None,
+        "zone_top": None, "zone_bottom": None,
+        "is_active": False, "current_retrace_pct": 0.0,
+    }
+    if not candles or len(candles) < 15:
+        return empty
+
+    subset = candles[-40:]
+    lb = 3
+
+    pivot_highs, pivot_lows = [], []
+    for i in range(lb, len(subset) - lb):
+        if subset[i]["high"] == max(c["high"] for c in subset[i - lb: i + lb + 1]):
+            pivot_highs.append((i, subset[i]["high"]))
+        if subset[i]["low"] == min(c["low"] for c in subset[i - lb: i + lb + 1]):
+            pivot_lows.append((i, subset[i]["low"]))
+
+    if not pivot_highs or not pivot_lows:
+        return empty
+
+    all_pivots = [(i, p, "H") for i, p in pivot_highs] + \
+                 [(i, p, "L") for i, p in pivot_lows]
+    all_pivots.sort(key=lambda x: x[0])
+
+    if len(all_pivots) < 2:
+        return empty
+
+    p1_idx, p1_price, p1_type = all_pivots[-2]
+    p2_idx, p2_price, p2_type = all_pivots[-1]
+    current_price = float(candles[-1]["close"])
+
+    if p1_type == "H" and p2_type == "L":
+        # Bearish impulse: H → L, retrace ke atas
+        origin, end_price = p1_price, p2_price
+        rng = origin - end_price
+        impulse_dir = "BEARISH"
+        retrace_50  = end_price + 0.500 * rng
+        retrace_62  = end_price + 0.618 * rng
+        retrace_80  = end_price + 0.800 * rng
+        zone_bottom = end_price + 0.780 * rng
+        zone_top    = end_price + 0.800 * rng
+        current_retrace_pct = min(100.0, (current_price - end_price) / rng * 100) \
+                              if current_price > end_price and rng > 0 else 0.0
+        is_active = current_price < zone_bottom
+
+    elif p1_type == "L" and p2_type == "H":
+        # Bullish impulse: L → H, retrace ke bawah
+        origin, end_price = p1_price, p2_price
+        rng = end_price - origin
+        impulse_dir = "BULLISH"
+        retrace_50  = end_price - 0.500 * rng
+        retrace_62  = end_price - 0.618 * rng
+        retrace_80  = end_price - 0.800 * rng
+        zone_top    = end_price - 0.780 * rng
+        zone_bottom = end_price - 0.800 * rng
+        current_retrace_pct = min(100.0, (end_price - current_price) / rng * 100) \
+                              if current_price < end_price and rng > 0 else 0.0
+        is_active = current_price > zone_top
+
+    else:
+        return empty
+
+    strength_pct = (rng / origin * 100) if origin > 0 else 0.0
+    if strength_pct < 0.8:  # filter noise: impulse harus >= 0.8% dari harga
+        return empty
+
+    return {
+        "impulse_dir":          impulse_dir,
+        "origin":               round(origin, 8),
+        "end_price":            round(end_price, 8),
+        "range_pts":            round(rng, 4),
+        "strength_pct":         round(strength_pct, 2),
+        "retrace_50":           round(retrace_50, 8),
+        "retrace_62":           round(retrace_62, 8),
+        "retrace_80":           round(retrace_80, 8),
+        "zone_top":             round(zone_top, 8),
+        "zone_bottom":          round(zone_bottom, 8),
+        "is_active":            is_active,
+        "current_retrace_pct":  round(current_retrace_pct, 1),
+    }
+
+
 def calculate_entry_zone(ob: dict, fvg: dict, sweep: dict, price: float, direction: str) -> dict:
     """
     Hitung entry zone sebagai RANGE (bukan single price).
@@ -3068,9 +3179,10 @@ def analyze_timeframe(symbol: str, interval: str) -> dict:
         "atr":            calculate_atr(closed_candles),
         "liquidity":      detect_equal_highs_lows(closed_candles),
         "sweep":          detect_liquidity_sweep(closed_candles, structure),
-        "trendline_sup":  detect_trendline(closed_candles, "lows"),
-        "trendline_res":  detect_trendline(closed_candles, "highs"),
-        "lrlr":           detect_linear_regression_channel(closed_candles),
+        "trendline_sup":    detect_trendline(closed_candles, "lows"),
+        "trendline_res":    detect_trendline(closed_candles, "highs"),
+        "lrlr":             detect_linear_regression_channel(closed_candles),
+        "impulse_retrace":  detect_impulse_retracement(closed_candles),
         "money_flow":     detect_money_flow(closed_candles),     # v13: CVD+MFI+VWAP
         "ema9":           calculate_ema(closed_candles, 9),
         "ema21":          calculate_ema(closed_candles, 21),
@@ -4831,6 +4943,23 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
                 if lrlr_upper and lrlr_upper > entry * 1.005:
                     levels.append((f"LRLR {lrlr_label} Clear", round(lrlr_upper * 0.998, 8)))
 
+        # Impulse Retracement: 50% dan 62% sebagai TP kandidat LONG
+        # 80% zone = resistance kuat, dipakai sebagai TP2 max cap bukan target
+        for ir_tf, ir_label in [(tf_1h.get("impulse_retrace", {}), "1H"),
+                                 (tf_4h.get("impulse_retrace", {}), "4H")]:
+            if ir_tf.get("impulse_dir") == "BEARISH":
+                # Bearish impulse → retrace UP, 50% dan 62% valid TP LONG
+                r50 = ir_tf.get("retrace_50")
+                r62 = ir_tf.get("retrace_62")
+                r80 = ir_tf.get("retrace_80")
+                if r50 and r50 > entry * 1.003:
+                    levels.append((f"Retrace {ir_label} 50%", round(r50 * 0.999, 8)))
+                if r62 and r62 > entry * 1.003:
+                    levels.append((f"Retrace {ir_label} 62%", round(r62 * 0.999, 8)))
+                if r80 and r80 > entry * 1.005:
+                    # 80% = zona supply / TP2 max — lebih konservatif (0.995 buffer)
+                    levels.append((f"Retrace {ir_label} 80%", round(r80 * 0.995, 8)))
+
         levels.sort(key=lambda x: x[1])
 
         for basis, lvl in levels:
@@ -4856,6 +4985,21 @@ def calculate_tp1_tp2(entry: float, sl: float, direction: str,
         if liq_1h.get("nearest_eql") and liq_1h["nearest_eql"]["distance_pct"] > 0.5:
             eql_p = entry * (1 - liq_1h["nearest_eql"]["distance_pct"] / 100)
             levels.append(("EQL", round(eql_p * 1.003, 8)))
+
+        # Impulse Retracement: 50% dan 62% sebagai TP kandidat SHORT
+        for ir_tf, ir_label in [(tf_1h.get("impulse_retrace", {}), "1H"),
+                                 (tf_4h.get("impulse_retrace", {}), "4H")]:
+            if ir_tf.get("impulse_dir") == "BULLISH":
+                # Bullish impulse → retrace DOWN, 50% dan 62% valid TP SHORT
+                r50 = ir_tf.get("retrace_50")
+                r62 = ir_tf.get("retrace_62")
+                r80 = ir_tf.get("retrace_80")
+                if r50 and r50 < entry * 0.997:
+                    levels.append((f"Retrace {ir_label} 50%", round(r50 * 1.001, 8)))
+                if r62 and r62 < entry * 0.997:
+                    levels.append((f"Retrace {ir_label} 62%", round(r62 * 1.001, 8)))
+                if r80 and r80 < entry * 0.995:
+                    levels.append((f"Retrace {ir_label} 80%", round(r80 * 1.005, 8)))
 
         # LRLR: tambahkan mid & lower sebagai target SHORT
         for lrlr_tf, lrlr_label in [(lrlr_1h, "1H"), (lrlr_4h, "4H")]:
@@ -5213,6 +5357,11 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
                 if mid and mid > entry * 1.001 and mid < (tps["tp1"] or entry * 1.1):
                     tp0 = round(mid, 8); tp0_basis = f"FVG {fvg_lbl} Mid"; break
 
+        # Impulse retrace info untuk ditampilkan di formatter
+        ir_4h = tf_4h.get("impulse_retrace", {})
+        ir_1h = tf_1h.get("impulse_retrace", {})
+        retrace_info = ir_4h if ir_4h.get("impulse_dir") != "NONE" else ir_1h
+
         if entry_mode == "MOMENTUM_NOW":
             mom_str = " | ".join(mode_info["momentum_reasons"][:2])
             entry_instruction = f"🚀 MOMENTUM ENTRY — Trend bullish LTF aktif\n   {mom_str}"
@@ -5237,6 +5386,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
+            "retrace_info": retrace_info,
         }
 
     elif direction == "DUMP":
@@ -5317,6 +5467,11 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
                 if mid and mid < entry * 0.999 and mid > (tps["tp1"] or entry * 0.9):
                     tp0 = round(mid, 8); tp0_basis = f"FVG {fvg_lbl} Mid"; break
 
+        # Impulse retrace info untuk ditampilkan di formatter
+        ir_4h = tf_4h.get("impulse_retrace", {})
+        ir_1h = tf_1h.get("impulse_retrace", {})
+        retrace_info = ir_4h if ir_4h.get("impulse_dir") != "NONE" else ir_1h
+
         if entry_mode == "MOMENTUM_NOW":
             mom_str = " | ".join(mode_info["momentum_reasons"][:2])
             entry_instruction = f"🔻 MOMENTUM ENTRY — Trend bearish LTF aktif\n   {mom_str}"
@@ -5341,6 +5496,7 @@ def calculate_trade_plan(price: float, direction: str, atr: float = 0,
             "confirmation_zone": confirmation_zone,
             "momentum_context": mode_info.get("momentum_reasons", []),
             "entry_instruction": entry_instruction,
+            "retrace_info": retrace_info,
         }
 
     return {
@@ -6420,9 +6576,10 @@ def analyze_timeframe_exc(symbol: str, interval: str, exchange: str = "binance_f
         "atr": calculate_atr(closed_candles),
         "liquidity": detect_equal_highs_lows(closed_candles),
         "sweep": detect_liquidity_sweep(closed_candles, structure),
-        "trendline_sup": detect_trendline(closed_candles, "lows"),
-        "trendline_res": detect_trendline(closed_candles, "highs"),
-        "lrlr":          detect_linear_regression_channel(closed_candles),
+        "trendline_sup":   detect_trendline(closed_candles, "lows"),
+        "trendline_res":   detect_trendline(closed_candles, "highs"),
+        "lrlr":            detect_linear_regression_channel(closed_candles),
+        "impulse_retrace": detect_impulse_retracement(closed_candles),
         "money_flow": detect_money_flow(closed_candles),
         "ema9": calculate_ema(closed_candles, 9),
         "ema21": calculate_ema(closed_candles, 21),

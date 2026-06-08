@@ -1055,6 +1055,32 @@ def format_confirmed_signal_message(signal: dict) -> str:
                 f"Upper {_f(_lr['upper'])} | Pos: {_pos}{_clr_str}"
             )
 
+    # Impulse Retracement zone info
+    retrace_info = trade.get("retrace_info", {})
+    retrace_lines = []
+    if retrace_info and retrace_info.get("impulse_dir", "NONE") != "NONE":
+        _ir = retrace_info
+        _idir = _ir["impulse_dir"]
+        _idir_icon = "📉" if _idir == "BEARISH" else "📈"
+        _pct_done = _ir.get("current_retrace_pct", 0)
+        _r50  = _ir.get("retrace_50")
+        _r62  = _ir.get("retrace_62")
+        _r80  = _ir.get("retrace_80")
+        _ztop = _ir.get("zone_top")
+        _zbot = _ir.get("zone_bottom")
+        _active = _ir.get("is_active", False)
+        _str_pct = _ir.get("strength_pct", 0)
+        _status = "⏳ Belum tercapai" if _active else f"✅ Retrace {_pct_done:.0f}% tercapai"
+        retrace_lines += [
+            f"  {_idir_icon} Impulse {_idir} ({_str_pct:.1f}%) | Retrace: {_pct_done:.0f}%",
+            f"  50%: {_f(_r50)}  |  62%: {_f(_r62)}  |  80%: {_f(_r80)}",
+            f"  Zona 80%: {_f(_zbot)} – {_f(_ztop)}  [{_status}]",
+        ]
+        if _idir == "BEARISH" and direc == "LONG":
+            retrace_lines.append(f"  ⚠️ HTF LONG: TP max direkomendasikan di bawah zona 80% ({_f(_r80)})")
+        elif _idir == "BULLISH" and direc == "SHORT":
+            retrace_lines.append(f"  ⚠️ HTF SHORT: TP max direkomendasikan di atas zona 80% ({_f(_r80)})")
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{conf_emoji} *CONFIRMED ENTRY SIGNAL*",
@@ -1077,8 +1103,11 @@ def format_confirmed_signal_message(signal: dict) -> str:
         f"📐 R:R    : *{rr:.1f}:1*  {'✅' if rr >= 2.0 else '⚠️ < 2R'}",
     ]
     if lrlr_lines:
-        lines += ["", "─────── LINEAR REG CHANNEL ───────"]
+        lines += ["", "─────── LINEAR REG CHANNEL (LTF) ───────"]
         lines.extend(lrlr_lines)
+    if retrace_lines:
+        lines += ["", "─────── IMPULSE RETRACE ZONE (HTF) ───────"]
+        lines.extend(retrace_lines)
     lines += [
         "",
         "─────── SIGNAL BREAKDOWN ───────",
