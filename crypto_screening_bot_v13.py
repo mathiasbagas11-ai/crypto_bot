@@ -7296,6 +7296,26 @@ def _extract_shot_json(image_b64: str, mime: str) -> dict:
         return {}
 
 
+# Daftar command yang dikenal — dipakai untuk saran "maksud kamu ...?"
+# saat user salah ketik command (mis. /logshoot → /logshot).
+_KNOWN_COMMANDS = [
+    "/logshot", "/logtrade", "/logpnl", "/logoutcome", "/trades", "/trade",
+    "/close", "/weeksummary", "/refreshdashboard", "/setbalance", "/lessons",
+    "/decisions", "/evolve", "/addlesson", "/backtest", "/btall", "/btresult",
+    "/btcompare", "/btstats", "/signalbt", "/balance", "/setstake", "/compound",
+    "/liqstatus", "/marketstatus", "/signals", "/symbolmemory", "/symbolstats",
+    "/blacklist", "/unblacklist", "/ask", "/scan", "/status", "/security",
+    "/why", "/style", "/help", "/start", "/done",
+]
+
+
+def _suggest_command(cmd: str):
+    """Cari command terdekat dari typo (mis. /logshoot → /logshot). None kalau tidak ada."""
+    import difflib
+    m = difflib.get_close_matches(cmd.lower(), _KNOWN_COMMANDS, n=1, cutoff=0.6)
+    return m[0] if m else None
+
+
 def handle_logshot_command(chat_id: str):
     """Handle /logshot — minta user kirim screenshot order details buat dicatat."""
     if not JOURNAL_MODULE:
@@ -7886,7 +7906,7 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         _thread(handle_logtrade_command, parts[1] if len(parts)>1 else "", chat_id).start()
 
-    elif text_lower.startswith("/logshot"):
+    elif text_lower.startswith("/logshot") or text_lower.startswith("/logshoot"):
         handle_logshot_command(chat_id)
 
     elif text_lower.startswith("/trades"):
@@ -8267,6 +8287,17 @@ def process_update(update: dict):
     # Direct coin name → analyze
     elif len(text.split()) == 1 and text.upper().replace("USDT", "") in TICKER_TO_BINANCE:
         _thread(handle_analyze_command, text.strip(), chat_id).start()
+
+    # Command tak dikenal (diawali "/") → jangan lempar ke AI, kasih saran command terdekat
+    elif text_lower.startswith("/"):
+        cmd = text_lower.split()[0]
+        suggestion = _suggest_command(cmd)
+        hint = f"\n\n💡 Maksud kamu <code>{suggestion}</code>?" if suggestion else ""
+        send_telegram(
+            f"❓ Command <code>{cmd}</code> tidak dikenal.{hint}\n\n"
+            "Ketik /help buat lihat daftar command.",
+            chat_id,
+        )
 
     # v15: Lanjutan diskusi aktif (tanpa reply, dalam window) → diskusi
     elif SIGNAL_CHAT_MODULE and signal_chat.is_discussion_active(chat_id):
