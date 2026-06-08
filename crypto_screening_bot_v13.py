@@ -130,6 +130,14 @@ except ImportError:
     logging.getLogger("x_sent").warning("x_sentiment.py tidak ditemukan — fitur X/DCA dinonaktifkan")
     logging.getLogger("market_ctx").warning("market_context.py tidak ditemukan — market context dinonaktifkan")
 
+# ── Social Sentiment (Reddit + HackerNews via last30days-skill) ────────────
+try:
+    from social_sentiment import get_social_sentiment, format_social_sentiment_telegram
+    SOCIAL_MODULE = True
+except ImportError:
+    SOCIAL_MODULE = False
+    logging.getLogger("social").warning("social_sentiment.py tidak tersedia")
+
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
                                    format_risk_status, set_capital, set_risk_pct,
@@ -6950,6 +6958,24 @@ def handle_xsentiment_command(coin: str, chat_id: str):
         send_telegram(f"❌ Error fetch X sentiment: {e}", chat_id)
 
 
+def handle_social_command(coin: str, chat_id: str):
+    """Handle /social <COIN> — Reddit + HackerNews sentiment via last30days-skill."""
+    if not SOCIAL_MODULE:
+        send_telegram("❌ social_sentiment.py tidak tersedia.", chat_id)
+        return
+    sym = coin.upper().strip()
+    if not sym:
+        send_telegram("❓ Format: <code>/social BTC</code> atau <code>/social SOLUSDT</code>", chat_id, parse_mode="HTML")
+        return
+    send_telegram(f"📡 Fetching social sentiment untuk <b>{sym}</b> dari Reddit + HackerNews... ⏳", chat_id, parse_mode="HTML")
+    try:
+        data = get_social_sentiment(sym, days=30)
+        msg = format_social_sentiment_telegram(data)
+        send_telegram(msg, chat_id, parse_mode="HTML")
+    except Exception as e:
+        send_telegram(f"❌ Error fetch social sentiment: {e}", chat_id)
+
+
 # ── v9: Risk handlers ────────────────────────
 
 def handle_risk_command(chat_id: str):
@@ -7563,7 +7589,8 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💎 `/dca BTC` — DCA signal: KOL activity + narrative cycle + price context\n"
         "   → Early Narrative = 💎 ACCUMULATE | Top Signal = 🚨 AVOID\n"
-        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n\n"
+        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n"
+        "📡 `/social BTC` — Reddit + HackerNews sentiment (30 hari terakhir)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -7860,6 +7887,11 @@ def process_update(update: dict):
         parts = text.split(maxsplit=1)
         coin  = parts[1].strip() if len(parts) > 1 else ""
         _thread(handle_xsentiment_command, coin, chat_id).start()
+
+    elif text_lower.startswith("/social"):
+        parts = text.split(maxsplit=1)
+        coin  = parts[1].strip() if len(parts) > 1 else ""
+        _thread(handle_social_command, coin, chat_id).start()
 
     # ── v9: Risk ──────────────────────────────
     elif text_lower.startswith("/risk"):
