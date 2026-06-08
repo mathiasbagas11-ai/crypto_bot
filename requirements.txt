@@ -5,6 +5,7 @@ numpy
 matplotlib
 pandas
 mplfinance
+Pillow
 cryptography
 gspread
 google-auth

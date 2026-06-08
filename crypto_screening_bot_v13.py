@@ -312,6 +312,8 @@ ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL            = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_VISION_MODEL     = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# Model vision cadangan kalau model utama error (mis. di-decommission Groq).
+GROQ_VISION_MODEL_FB  = os.getenv("GROQ_VISION_MODEL_FALLBACK", "meta-llama/llama-4-maverick-17b-128e-instruct")
 GROQ_API_URL          = "https://api.groq.com/openai/v1/chat/completions"
 CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
@@ -953,14 +955,18 @@ def _groq_request(messages: list, max_tokens: int = 1800, temperature: float = 0
 
 
 def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
-                         max_tokens: int = 700, temperature: float = 0.0) -> str:
+                         max_tokens: int = 700, temperature: float = 0.0,
+                         model: str = None) -> tuple:
     """
     Call Groq vision model (Llama 4 multimodal) dengan satu gambar inline (base64).
     Dipakai untuk baca screenshot order-details → ekstrak field trade.
+
+    Return (content, error). Kalau sukses → (text, ""). Kalau gagal → ("", alasan).
     """
     if not GROQ_API_KEY:
-        return ""
+        return "", "GROQ_API_KEY belum diset"
 
+    model = model or GROQ_VISION_MODEL
     messages = [{
         "role": "user",
         "content": [
@@ -969,6 +975,7 @@ def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
              "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
         ],
     }]
+    last_err = "unknown"
     for attempt in range(3):
         try:
             r = requests.post(
@@ -978,7 +985,7 @@ def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
                     "Content-Type":  "application/json",
                 },
                 json={
-                    "model":       GROQ_VISION_MODEL,
+                    "model":       model,
                     "messages":    messages,
                     "max_tokens":  max_tokens,
                     "temperature": temperature,
@@ -986,22 +993,26 @@ def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
                 timeout=40,
             )
             if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"].strip()
+                return r.json()["choices"][0]["message"]["content"].strip(), ""
             elif r.status_code == 429:
+                last_err = "rate limit (429)"
                 wait = 12 * (2 ** attempt)
                 log.warning(f"Groq vision 429 (attempt {attempt+1}), retry in {wait}s...")
                 time.sleep(wait)
             elif r.status_code in (503, 502):
+                last_err = f"server {r.status_code}"
                 time.sleep(8 * (attempt + 1))
             else:
-                log.warning(f"Groq vision error {r.status_code}: {r.text[:200]}")
-                return ""
+                body = r.text[:160].replace("\n", " ")
+                log.warning(f"Groq vision error {r.status_code} (model={model}): {body}")
+                return "", f"API {r.status_code}: {body}"
         except Exception as e:
+            last_err = str(e)
             log.warning(f"Groq vision exception (attempt {attempt+1}): {e}")
             if attempt < 2:
                 time.sleep(6)
-    log.warning("Groq vision: max retries reached.")
-    return ""
+    log.warning(f"Groq vision: max retries reached (model={model}).")
+    return "", last_err
 
 
 def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
@@ -7273,12 +7284,65 @@ _SHOT_PROMPT = (
 )
 
 
-def _extract_shot_json(image_b64: str, mime: str) -> dict:
-    """Panggil Groq vision, parse JSON hasilnya jadi dict mentah."""
+# Limit aman di bawah batas base64 Groq (4 MB). Gambar lebih besar dari ini
+# bikin request vision ditolak — penyebab umum "screenshot gagal dibaca".
+_VISION_MAX_B64_BYTES = 3_500_000
+
+
+def _prepare_image_for_vision(img_bytes: bytes, mime: str) -> tuple:
+    """
+    Kecilkan/re-compress gambar yang kelewat besar supaya muat di limit base64 Groq.
+    Aman kalau Pillow tidak terpasang — kembalikan gambar apa adanya.
+    Return (image_b64, mime).
+    """
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    if len(b64) <= _VISION_MAX_B64_BYTES:
+        return b64, mime
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(img_bytes))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        long_edge = max(im.size)
+        last_b64 = b64
+        # Turunkan dimensi & kualitas bertahap; berhenti begitu muat.
+        for max_edge, quality in ((2048, 85), (1600, 80), (1280, 75), (1024, 70)):
+            work = im
+            if long_edge > max_edge:
+                scale = max_edge / long_edge
+                work = im.resize((max(1, int(im.width * scale)),
+                                  max(1, int(im.height * scale))))
+            buf = io.BytesIO()
+            work.save(buf, format="JPEG", quality=quality)
+            last_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            if len(last_b64) <= _VISION_MAX_B64_BYTES:
+                log.info(f"Vision image dikecilkan: {len(b64)}→{len(last_b64)} "
+                         f"b64 bytes (max_edge={max_edge}, q={quality})")
+                return last_b64, "image/jpeg"
+        return last_b64, "image/jpeg"  # tetap kirim yang terkecil
+    except Exception as e:
+        log.warning(f"Image downscale gagal ({e}), kirim apa adanya")
+        return b64, mime
+
+
+def _extract_shot_json(image_b64: str, mime: str) -> tuple:
+    """
+    Panggil Groq vision, parse JSON hasilnya jadi dict mentah.
+    Return (data_dict, error_str). Sukses → (dict, ""). Gagal → ({}, alasan).
+    Kalau model utama error, otomatis coba model cadangan.
+    """
     import json
-    raw = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime)
+    raw, err = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime)
+    if not raw and GROQ_VISION_MODEL_FB and GROQ_VISION_MODEL_FB != GROQ_VISION_MODEL:
+        log.warning(f"Vision model utama gagal ({err}); coba fallback {GROQ_VISION_MODEL_FB}")
+        raw, err2 = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime,
+                                         model=GROQ_VISION_MODEL_FB)
+        if not raw:
+            return {}, f"{err} (fallback: {err2})"
     if not raw:
-        return {}
+        return {}, err or "respons vision kosong"
+
     txt = raw.strip()
     # buang code fence kalau model bandel
     if txt.startswith("```"):
@@ -7288,12 +7352,12 @@ def _extract_shot_json(image_b64: str, mime: str) -> dict:
     start, end = txt.find("{"), txt.rfind("}")
     if start == -1 or end == -1:
         log.warning(f"Vision shot: no JSON in response: {raw[:200]}")
-        return {}
+        return {}, "vision tidak mengembalikan data terstruktur"
     try:
-        return json.loads(txt[start:end + 1])
+        return json.loads(txt[start:end + 1]), ""
     except Exception as e:
         log.warning(f"Vision shot JSON parse error: {e} | raw={raw[:200]}")
-        return {}
+        return {}, "format data dari vision tidak valid"
 
 
 # Daftar command yang dikenal — dipakai untuk saran "maksud kamu ...?"
@@ -7356,12 +7420,14 @@ def handle_trade_screenshot(file_id: str, chat_id: str):
         send_telegram("⚠️ Gagal ambil gambar dari Telegram. Coba kirim ulang.", chat_id)
         return False
 
-    image_b64 = base64.b64encode(img_bytes).decode("ascii")
-    raw = _extract_shot_json(image_b64, mime)
+    image_b64, mime = _prepare_image_for_vision(img_bytes, mime)
+    raw, verr = _extract_shot_json(image_b64, mime)
     if not raw:
+        detail = f"\n\n🔧 <i>Detail: {verr}</i>" if verr else ""
         send_telegram(
             "⚠️ Nggak bisa baca data dari screenshot itu. Pastikan ini halaman "
-            "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade.",
+            "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade."
+            + detail,
             chat_id, parse_mode="HTML",
         )
         return False
