@@ -7941,6 +7941,10 @@ def process_update(update: dict):
     chat_id   = str(message.get("chat", {}).get("id", ""))
     text      = message.get("text", "").strip()
     photos    = message.get("photo", [])
+    # Gambar bisa dikirim sebagai "Photo" (compressed) ATAU "File/Document"
+    # (uncompressed). Telegram taruh di field berbeda — tangani keduanya.
+    document  = message.get("document", {}) or {}
+    doc_is_image = str(document.get("mime_type", "")).startswith("image/")
     # Extract topic thread_id (Telegram Topics / forum supergroup)
     raw_tid   = message.get("message_thread_id")
     topic_tid = str(raw_tid) if raw_tid else None
@@ -7953,7 +7957,8 @@ def process_update(update: dict):
         return  # silent drop — unauthorized user tidak dapat response apapun
     # ─────────────────────────────────────────
 
-    log.info(f"📩 [{chat_id}] tid={topic_tid} text='{text[:60]}' photos={len(photos)}")
+    log.info(f"📩 [{chat_id}] tid={topic_tid} text='{text[:60]}' "
+             f"photos={len(photos)} doc={document.get('mime_type') if document else '-'}")
 
     # Inject topic_tid into this thread so inline send_telegram calls in
     # process_update itself also reply to the correct topic.
@@ -7967,10 +7972,9 @@ def process_update(update: dict):
             fn(*args)
         return threading.Thread(target=_run, daemon=True)
 
-    # ── Handle foto chart ────────────────────────
-    if photos:
-        photo   = photos[-1]
-        file_id = photo.get("file_id")
+    # ── Handle gambar (Photo compressed ATAU File/Document) ──────────
+    if photos or doc_is_image:
+        file_id = photos[-1].get("file_id") if photos else document.get("file_id")
         if file_id:
             if JOURNAL_MODULE and is_wizard_expecting_image(chat_id):
                 _thread(handle_journal_wizard_image, file_id, chat_id).start()
@@ -7978,6 +7982,8 @@ def process_update(update: dict):
                 _thread(handle_trade_screenshot, file_id, chat_id).start()
             else:
                 _thread(handle_chart_command, chat_id, file_id).start()
+        else:
+            log.warning(f"[{chat_id}] gambar diterima tapi file_id kosong")
         _awaiting_chart.pop(chat_id, None)
         return
 
@@ -8501,7 +8507,12 @@ def polling_loop():
         try:
             updates = get_telegram_updates()
             for update in updates:
-                process_update(update)
+                # Isolasi per-update: satu update error tidak boleh nge-skip
+                # update lain di batch, dan errornya harus kelihatan (traceback).
+                try:
+                    process_update(update)
+                except Exception as e:
+                    log.error(f"process_update error: {e}", exc_info=True)
         except Exception as e:
             log.warning(f"Polling loop error: {e}")
             time.sleep(5)
