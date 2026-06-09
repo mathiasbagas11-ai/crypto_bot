@@ -3596,6 +3596,15 @@ def scan_prepump_candidates(symbols: list = None) -> list:
             "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
             "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
         ]
+        # v13: perluas universe ke koin yang lagi punya sinyal aktif/pending,
+        # biar alt di luar major (mis. yang baru dapat SETUP) ikut dipantau pump.
+        if TRACKER_MODULE:
+            try:
+                for s in get_active_pending_symbols():
+                    if s not in symbols:
+                        symbols.append(s)
+            except Exception as e:
+                log.debug(f"prepump universe extend error: {e}")
 
     candidates = []
     log.info(f"🔍 Pre-pump scan: {len(symbols)} symbols...")
