@@ -99,6 +99,56 @@ def test_short_take_profit(patched):
 
 # ── resolution feeds the learning loop ───────────────────────────
 
+def test_retest_activation_notifies_and_stays_active(patched):
+    # RETEST_WAIT: saat harga menyentuh entry, kirim notif "TRADE AKTIF" dan
+    # signal tetap ACTIVE (belum TP/SL) selama masih dalam timeout.
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(hours=1)
+    patched["signal"] = _sig(created, entry_mode="RETEST_WAIT")
+    # candle menyentuh entry (low 99<=100) tapi belum TP/SL
+    patched["candles"] = [_candle(now - timedelta(minutes=30), high=104, low=99)]
+
+    sent = []
+    resolved = st.check_pending_signals(send_telegram_fn=lambda m: sent.append(m))
+    assert resolved == []                       # belum terminal
+    assert any("TRADE AKTIF" in m for m in sent)
+
+
+def test_retest_never_touched_invalidates(patched):
+    # RETEST_WAIT: entry tak pernah tersentuh sampai timeout → INVALIDATED,
+    # bukan loss. Notif "SETUP INVALID" dikirim.
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(hours=30)         # lewat timeout 24h
+    patched["signal"] = _sig(created, entry_mode="RETEST_WAIT")
+    # harga selalu di atas entry (low 101 > entry 100) → tak pernah retest
+    patched["candles"] = [_candle(now - timedelta(hours=29), high=106, low=101)]
+
+    # _process_resolved_signals di-mock di fixture → kirim notif manual lewat path terminal
+    resolved = st.check_pending_signals()
+    assert len(resolved) == 1
+    assert resolved[0]["status"] == "INVALIDATED"
+    assert resolved[0]["pnl_pct"] == 0.0
+
+
+def test_tp_ladder_partial_hit_stays_active(patched):
+    # Ladder TP1/TP2/TP3: hanya TP1 kena → notif TP1, posisi tetap ACTIVE
+    # (runner lanjut), belum terminal.
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(hours=1)
+    ladder = st._normalize_ladder(
+        [{"level": 1, "price": 110.0}, {"level": 2, "price": 120.0},
+         {"level": 3, "price": 130.0}], 110.0, 95.0, 100.0, "LONG")
+    patched["signal"] = _sig(created, entry_mode="MOMENTUM_NOW",
+                             activated=True, tp_ladder=ladder, tps_hit=[])
+    # candle kena TP1 (high 112) saja
+    patched["candles"] = [_candle(now - timedelta(minutes=30), high=112, low=100)]
+
+    sent = []
+    resolved = st.check_pending_signals(send_telegram_fn=lambda m: sent.append(m))
+    assert resolved == []                       # belum semua rung → masih ACTIVE
+    assert any("TP1 KENA" in m for m in sent)
+
+
 def test_resolution_feeds_symbol_memory_and_learning(monkeypatch):
     # Regression: dulu signal_tracker hanya feed learning_engine; symbol_memory
     # write path tidak pernah dipanggil (dead). Sekarang keduanya harus terisi.

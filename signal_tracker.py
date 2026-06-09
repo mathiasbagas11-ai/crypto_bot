@@ -100,6 +100,37 @@ def _save_outcomes(data: list):
 # RECORD PENDING SIGNAL
 # ─────────────────────────────────────────────
 
+def _normalize_ladder(tps: list, tp: float, sl: float, entry: float, direction: str) -> list:
+    """
+    Normalisasi TP ladder ke list [{level, price}] urut dari TP terdekat ke entry.
+    - `tps`: ladder dari trade plan (list dict berisi 'level'+'price'), boleh None.
+    - Fallback: kalau ladder kosong → pakai single TP [{level:1, price:tp}].
+    Buang rung yang arah harganya salah (TP harus di sisi profit dari entry).
+    """
+    is_long = direction == "LONG"
+    rungs = []
+    if tps:
+        for r in tps:
+            try:
+                p = float(r.get("price"))
+                lvl = int(r.get("level", 0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if not p or not lvl:
+                continue
+            if (is_long and p > entry) or ((not is_long) and p < entry):
+                rungs.append({"level": lvl, "price": p})
+    if not rungs and tp:
+        if (is_long and tp > entry) or ((not is_long) and tp < entry):
+            rungs.append({"level": 1, "price": float(tp)})
+    # Urut: LONG dari harga terendah (TP1) ke tertinggi; SHORT sebaliknya.
+    rungs.sort(key=lambda r: r["price"], reverse=not is_long)
+    # Re-number level 1..n sesuai urutan jarak (jaga konsistensi notif)
+    for i, r in enumerate(rungs, start=1):
+        r["level"] = i
+    return rungs
+
+
 def record_pending_signal(
     symbol: str,
     signal_type: str,   # SCREENER | PREPUMP | PREDUMP | SCALP | SWING | CONFIRMED
@@ -111,11 +142,21 @@ def record_pending_signal(
     confluence_level: str = "",
     reasons: list = None,
     strategy: str = "CONFIRMED",  # Strategi yang generate: scalp, prepump, predump, swing, atau CONFIRMED
+    entry_mode: str = "",         # MOMENTUM_NOW | RETEST_WAIT (kalau kosong → diperlakukan retest)
+    tps: list = None,             # TP ladder dari trade plan: [{level, price, r, pct}, ...]
 ):
     """
     Catat sinyal yang baru dikirim bot ke pending_signals.json.
     Dipanggil otomatis setiap kali bot kirim signal ke Telegram.
+
+    Lifecycle: PENDING → (entry tersentuh) ACTIVE → TP1/TP2/.. / SL / INVALIDATED.
+    - MOMENTUM_NOW: dianggap langsung aktif saat sinyal dikirim.
+    - RETEST_WAIT (default): aktif hanya setelah harga menyentuh zona entry.
+      Kalau entry tak pernah tersentuh sampai timeout → INVALIDATED (setup batal).
     """
+    ladder = _normalize_ladder(tps, tp, sl, entry_price, direction)
+    is_momentum = (entry_mode or "").upper() == "MOMENTUM_NOW"
+    now_iso = datetime.now(timezone.utc).isoformat()
     entry = {
         "id":               f"{symbol}_{int(time.time()*1000)}",
         "symbol":           symbol,
@@ -128,16 +169,22 @@ def record_pending_signal(
         "score":            score,
         "confluence_level": confluence_level,
         "reasons":          (reasons or [])[:3],
-        "created_at":       datetime.now(timezone.utc).isoformat(),
+        "created_at":       now_iso,
         "status":           "PENDING",
         "timeout_hours":    SIGNAL_TIMEOUT_HOURS.get(signal_type, 24),
+        # ── Lifecycle fields ──
+        "entry_mode":       (entry_mode or "").upper(),
+        "tp_ladder":        ladder,             # [{level, price}]
+        "activated":        is_momentum,        # MOMENTUM_NOW → aktif seketika
+        "activated_at":     now_iso if is_momentum else None,
+        "tps_hit":          [],                 # level TP yang sudah kena + di-notif
     }
     pending = _load_pending()
     # Hindari duplikat symbol+direction dalam 30 menit
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     existing = [p for p in pending
                 if p["symbol"] == symbol and p["direction"] == direction
-                and p["created_at"] > cutoff and p["status"] == "PENDING"]
+                and p["created_at"] > cutoff and p["status"] in ("PENDING", "ACTIVE")]
     if existing:
         log.debug(f"Duplikat signal {symbol} {direction} dalam 30m, skip")
         return
@@ -182,13 +229,102 @@ def _get_price_history(symbol: str, hours_back: int = 24) -> list:
 # Dipanggil di setiap run_scan()
 # ─────────────────────────────────────────────
 
+def _evaluate_signal(sig: dict, future_candles: list, created_at, now) -> dict:
+    """
+    Replay candle sejak sinyal dibuat → hitung state lifecycle terkini.
+
+    Return dict:
+      activated, activated_time, tps_hit (list level), tps_meta {level: (price, time)},
+      terminal (None|SL_HIT|TP_HIT|INVALIDATED|EXPIRED_WIN|EXPIRED_LOSS|EXPIRED),
+      exit_price, exit_time
+    """
+    direction = sig["direction"]
+    entry     = sig["entry_price"]
+    sl        = sig["sl"]
+    is_long   = direction == "LONG"
+    momentum  = sig.get("entry_mode", "") == "MOMENTUM_NOW"
+    ladder    = sig.get("tp_ladder") or _normalize_ladder(None, sig.get("tp"), sl, entry, direction)
+
+    activated      = bool(sig.get("activated")) or momentum
+    activated_time = created_at if activated else None
+    tps_hit        = []
+    tps_meta       = {}
+    eff_sl         = sl                # geser ke BE setelah TP1
+    terminal       = None
+    exit_price     = None
+    exit_time      = None
+    first_lvl      = ladder[0]["level"] if ladder else None
+
+    for c in future_candles:
+        c_time = datetime.fromtimestamp(c["time"] / 1000, tz=timezone.utc)
+
+        # ── Aktivasi: harga menyentuh zona entry ──
+        if not activated:
+            touched = (is_long and c["low"] <= entry) or ((not is_long) and c["high"] >= entry)
+            if touched:
+                activated = True
+                activated_time = c_time
+            else:
+                continue  # belum aktif → TP/SL belum relevan
+
+        # ── SL dulu (konservatif) ──
+        sl_hit = (is_long and c["low"] <= eff_sl) or ((not is_long) and c["high"] >= eff_sl)
+        if sl_hit:
+            terminal, exit_price, exit_time = "SL_HIT", eff_sl, c_time
+            break
+
+        # ── TP ladder (bisa kena beberapa rung dalam 1 candle) ──
+        for rung in ladder:
+            lvl, tp_price = rung["level"], rung["price"]
+            if lvl in tps_hit:
+                continue
+            hit = (is_long and c["high"] >= tp_price) or ((not is_long) and c["low"] <= tp_price)
+            if hit:
+                tps_hit.append(lvl)
+                tps_meta[lvl] = (tp_price, c_time)
+                if lvl == first_lvl:
+                    eff_sl = entry  # TP1 kena → SL ke breakeven
+
+        if ladder and len(tps_hit) >= len(ladder):
+            terminal, exit_price, exit_time = "TP_HIT", ladder[-1]["price"], c_time
+            break
+
+    # ── Belum terminal: cek timeout ──
+    if terminal is None:
+        age_hours = (now - created_at).total_seconds() / 3600
+        timeout_h = sig.get("timeout_hours", 24)
+        if age_hours >= timeout_h:
+            if not activated:
+                # Entry tak pernah tersentuh → setup batal
+                terminal, exit_price, exit_time = "INVALIDATED", entry, now
+            else:
+                curr = _get_current_price(sig["symbol"])
+                if curr:
+                    pnl = (curr - entry) / entry * 100 if is_long else (entry - curr) / entry * 100
+                    terminal   = "EXPIRED_WIN" if pnl > 0 else "EXPIRED_LOSS"
+                    exit_price = curr
+                else:
+                    terminal, exit_price = "EXPIRED", entry
+                exit_time = now
+
+    return {
+        "activated": activated,
+        "activated_time": activated_time,
+        "tps_hit": tps_hit,
+        "tps_meta": tps_meta,
+        "terminal": terminal,
+        "exit_price": exit_price,
+        "exit_time": exit_time,
+    }
+
+
 def check_pending_signals(send_telegram_fn=None) -> list:
     """
-    Cek semua pending signals — apakah sudah TP, SL, atau expired.
-    Return list of resolved signals (bisa kosong).
+    Cek semua pending/active signals — deteksi transisi lifecycle:
+      PENDING → ACTIVE (entry tersentuh) → TP1/TP2/.. → SL / TP final / INVALIDATED.
 
-    Dipanggil di awal setiap run_scan().
-    Kalau ada yang resolve → trigger learning + optional auto-backtest.
+    Tiap transisi baru dikirim notif ke Market Update. Return list resolved
+    (terminal) signals. Dipanggil di awal setiap run_scan().
     """
     pending   = _load_pending()
     outcomes  = _load_outcomes()
@@ -198,12 +334,11 @@ def check_pending_signals(send_telegram_fn=None) -> list:
     now = datetime.now(timezone.utc)
 
     for sig in pending:
-        if sig["status"] != "PENDING":
+        if sig.get("status") not in ("PENDING", "ACTIVE"):
             continue
 
         # Guard: timestamp naive/legacy/korup tidak boleh meledakkan seluruh
-        # loop (dulu TypeError "naive vs aware" / ValueError → semua pending
-        # berhenti diproses). Normalisasi ke UTC; kalau gagal, biarkan pending.
+        # loop. Normalisasi ke UTC; kalau gagal, biarkan pending.
         try:
             created_at = datetime.fromisoformat(sig["created_at"])
             if created_at.tzinfo is None:
@@ -212,82 +347,80 @@ def check_pending_signals(send_telegram_fn=None) -> list:
             log.warning(f"signal_tracker: created_at invalid {sig.get('symbol','?')}: {e} — skip")
             still_pending.append(sig)
             continue
-        age_hours  = (now - created_at).total_seconds() / 3600
-        timeout_h  = sig.get("timeout_hours", 24)
+        age_hours = (now - created_at).total_seconds() / 3600
 
         symbol    = sig["symbol"]
         direction = sig["direction"]
         entry     = sig["entry_price"]
-        tp        = sig["tp"]
-        sl        = sig["sl"]
+
+        # Backfill lifecycle fields utk sinyal lama (sebelum upgrade)
+        if "tp_ladder" not in sig:
+            sig["tp_ladder"] = _normalize_ladder(None, sig.get("tp"), sig.get("sl"), entry, direction)
+        sig.setdefault("entry_mode", "")
+        sig.setdefault("activated", False)
+        sig.setdefault("tps_hit", [])
 
         # Fetch candles dari waktu signal dibuat
         candles = _get_price_history(symbol, hours_back=max(age_hours + 1, 4))
-
-        # Filter candles setelah signal dibuat
         created_ts = int(created_at.timestamp() * 1000)
         future_candles = [c for c in candles if c["time"] > created_ts]
 
-        outcome       = None
-        exit_price    = None
-        exit_time     = None
+        st = _evaluate_signal(sig, future_candles, created_at, now)
 
-        # Iterate candle-by-candle (conservative: SL dulu)
-        for c in future_candles:
-            c_time = datetime.fromtimestamp(c["time"] / 1000, tz=timezone.utc)
-            if direction == "LONG":
-                if c["low"] <= sl:
-                    outcome, exit_price, exit_time = "SL_HIT", sl, c_time; break
-                if c["high"] >= tp:
-                    outcome, exit_price, exit_time = "TP_HIT", tp, c_time; break
-            else:  # SHORT
-                if c["high"] >= sl:
-                    outcome, exit_price, exit_time = "SL_HIT", sl, c_time; break
-                if c["low"] <= tp:
-                    outcome, exit_price, exit_time = "TP_HIT", tp, c_time; break
+        prev_activated = bool(sig.get("activated"))
+        prev_tps       = set(sig.get("tps_hit", []))
 
-        # Kalau belum hit, cek timeout
-        if outcome is None:
-            if age_hours >= timeout_h:
-                # Expired: cek current price untuk final PnL
-                curr_price = _get_current_price(symbol)
-                if curr_price:
-                    if direction == "LONG":
-                        pnl_pct = (curr_price - entry) / entry * 100
-                    else:
-                        pnl_pct = (entry - curr_price) / entry * 100
-                    outcome    = "EXPIRED_WIN" if pnl_pct > 0 else "EXPIRED_LOSS"
-                    exit_price = curr_price
-                else:
-                    outcome    = "EXPIRED"
-                    exit_price = entry
-                exit_time = now
-            else:
-                # Masih dalam timeout → tetap pending
-                still_pending.append(sig)
-                continue
+        # ── Notif: trade baru AKTIF (entry tersentuh) ──
+        if st["activated"] and not prev_activated:
+            sig["activated"]    = True
+            sig["activated_at"] = st["activated_time"].isoformat() if st["activated_time"] else now.isoformat()
+            _send_transition_notification(sig, "ACTIVATED",
+                                          {"price": entry}, send_telegram_fn)
 
-        # ── Resolved! ───────────────────────────
+        # ── Notif: TP rung baru kena (yang BUKAN penutup terminal) ──
+        new_tps = [lvl for lvl in st["tps_hit"] if lvl not in prev_tps]
+        ladder_n = len(sig.get("tp_ladder") or [])
+        for lvl in new_tps:
+            is_final = (st["terminal"] == "TP_HIT" and lvl == ladder_n)
+            if is_final:
+                continue  # penutup → dihandle outcome notif
+            price_t = st["tps_meta"].get(lvl, (None, None))[0]
+            _send_transition_notification(sig, "TP_HIT",
+                                          {"level": lvl, "price": price_t}, send_telegram_fn)
+        sig["tps_hit"] = st["tps_hit"]
+
+        terminal = st["terminal"]
+        if terminal is None:
+            # Belum selesai → update status & simpan
+            sig["status"] = "ACTIVE" if st["activated"] else "PENDING"
+            still_pending.append(sig)
+            continue
+
+        # ── Resolved (terminal) ──────────────────
+        exit_price = st["exit_price"]
+        exit_time  = st["exit_time"]
         hold_hours = (exit_time - created_at).total_seconds() / 3600 if exit_time else 0
         if exit_price and entry > 0:
-            if direction == "LONG":
-                pnl_pct = (exit_price - entry) / entry * 100
-            else:
-                pnl_pct = (entry - exit_price) / entry * 100
+            pnl_pct = (exit_price - entry) / entry * 100 if direction == "LONG" \
+                      else (entry - exit_price) / entry * 100
         else:
+            pnl_pct = 0.0
+        # INVALIDATED = entry tak pernah diisi → bukan profit/loss riil
+        if terminal == "INVALIDATED":
             pnl_pct = 0.0
 
         result = {**sig,
-            "status":      outcome,
+            "status":      terminal,
             "exit_price":  exit_price,
             "exit_time":   exit_time.isoformat() if exit_time else None,
             "pnl_pct":     round(pnl_pct, 3),
             "hold_hours":  round(hold_hours, 2),
+            "tps_hit":     st["tps_hit"],
             "resolved_at": now.isoformat(),
         }
         outcomes.append(result)
         resolved.append(result)
-        log.info(f"✅ Signal resolved: {symbol} {direction} → {outcome} | PnL: {pnl_pct:+.2f}%")
+        log.info(f"✅ Signal resolved: {symbol} {direction} → {terminal} | PnL: {pnl_pct:+.2f}%")
 
     _save_pending(still_pending)
     _save_outcomes(outcomes)
@@ -332,6 +465,13 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
         conf_level = sig.get("confluence_level", "")
         pnl        = sig.get("pnl_pct", 0)
         hold_h     = sig.get("hold_hours", 0)
+
+        # INVALIDATED = entry tak pernah diisi → bukan trade riil.
+        # Jangan cemari learning/symbol-memory; cukup kirim notif setup batal.
+        if outcome == "INVALIDATED":
+            if send_telegram_fn:
+                _send_outcome_notification(sig, send_telegram_fn)
+            continue
 
         # Map outcome ke learning engine format
         le_outcome = {
@@ -392,8 +532,72 @@ def _process_resolved_signals(resolved: list, send_telegram_fn=None):
     _check_autobacktest_trigger(resolved, send_telegram_fn)
 
 
+def _fmt_price(p) -> str:
+    """Format harga adaptif: koin murah butuh lebih banyak desimal."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return "?"
+    if p == 0:
+        return "0"
+    ap = abs(p)
+    if ap >= 100:   return f"{p:,.2f}"
+    if ap >= 1:     return f"{p:.4f}"
+    if ap >= 0.01:  return f"{p:.5f}"
+    return f"{p:.8f}"
+
+
+def _send_transition_notification(sig: dict, event: str, info: dict, send_telegram_fn):
+    """
+    Notif transisi lifecycle (BUKAN penutup) ke Market Update:
+      ACTIVATED  → trade baru aktif (entry/limit tersentuh)
+      TP_HIT     → TP rung ke-N kena (sebagian, posisi lanjut ke rung berikutnya)
+    """
+    if not send_telegram_fn:
+        return
+    symbol    = sig["symbol"].replace("USDT", "")
+    direction = sig["direction"]
+    dir_emoji = "🟢" if direction == "LONG" else "🔴"
+    sig_type  = sig.get("signal_type", "")
+    score     = sig.get("score", 0)
+    entry     = sig.get("entry_price", 0)
+
+    if event == "ACTIVATED":
+        msg = (
+            f"🟢 <b>TRADE AKTIF — {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{dir_emoji} {direction} | {sig_type} | Score: {score}\n"
+            f"Entry tersentuh @ <code>${_fmt_price(info.get('price', entry))}</code>\n"
+            f"🎯 SL : <code>${_fmt_price(sig.get('sl'))}</code>\n"
+            f"<i>Posisi sekarang aktif. Pantau TP / SL.</i>"
+        )
+    elif event == "TP_HIT":
+        lvl   = info.get("level")
+        price = info.get("price")
+        if entry and price:
+            pnl = (price - entry) / entry * 100 if direction == "LONG" \
+                  else (entry - price) / entry * 100
+        else:
+            pnl = 0.0
+        msg = (
+            f"✅ <b>TP{lvl} KENA — {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{dir_emoji} {direction} | {sig_type}\n"
+            f"TP{lvl} @ <code>${_fmt_price(price)}</code>  🟢 <b>+{pnl:.2f}%</b>\n"
+            + ("<i>SL digeser ke breakeven. Sisanya jalan ke TP berikutnya.</i>"
+               if lvl == 1 else "<i>Posisi sebagian diamankan. Runner lanjut.</i>")
+        )
+    else:
+        return
+
+    try:
+        send_telegram_fn(msg)
+    except Exception as e:
+        log.warning(f"Transition notif send error: {e}")
+
+
 def _send_outcome_notification(sig: dict, send_telegram_fn):
-    """Kirim notif ke topic Market Update saat signal resolve (TP/SL/Expired)."""
+    """Kirim notif ke topic Market Update saat signal resolve (TP/SL/Invalid/Expired)."""
     outcome   = sig["status"]
     symbol    = sig["symbol"].replace("USDT", "")
     direction = sig["direction"]
@@ -401,13 +605,37 @@ def _send_outcome_notification(sig: dict, send_telegram_fn):
     hold_h    = sig.get("hold_hours", 0)
     sig_type  = sig["signal_type"]
     score     = sig.get("score", 0)
+    n_tps     = len(sig.get("tps_hit", []) or [])
+
+    # INVALIDATED: entry tidak pernah tersentuh → setup batal (bukan loss).
+    if outcome == "INVALIDATED":
+        dir_emoji = "🟢" if direction == "LONG" else "🔴"
+        msg = (
+            f"🚫 <b>SETUP INVALID — {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{dir_emoji} {direction} | {sig_type} | Score: {score}\n"
+            f"Entry <code>${_fmt_price(sig.get('entry_price'))}</code> tidak pernah tersentuh "
+            f"dalam {sig.get('timeout_hours', 24)}h.\n"
+            f"<i>Setup dibatalkan — jangan entry lagi di zona ini.</i>"
+        )
+        try:
+            send_telegram_fn(msg)
+        except Exception as e:
+            log.warning(f"Notif send error: {e}")
+        return
 
     if outcome == "TP_HIT":
-        header  = f"✅ <b>TP HIT — {symbol}</b>"
+        tp_tag  = f" (TP1→TP{n_tps})" if n_tps > 1 else ""
+        header  = f"✅ <b>TP HIT{tp_tag} — {symbol}</b>"
         pnl_str = f"🟢 <b>+{pnl:.2f}%</b>"
     elif outcome == "SL_HIT":
-        header  = f"❌ <b>SL HIT — {symbol}</b>"
-        pnl_str = f"🔴 <b>{pnl:.2f}%</b>"
+        # SL setelah TP1 = breakeven (SL sudah digeser ke entry)
+        if n_tps >= 1:
+            header  = f"🛡️ <b>BREAKEVEN (SL@BE setelah TP{n_tps}) — {symbol}</b>"
+            pnl_str = f"⚪ <b>{pnl:+.2f}%</b>"
+        else:
+            header  = f"❌ <b>SL HIT — {symbol}</b>"
+            pnl_str = f"🔴 <b>{pnl:.2f}%</b>"
     elif outcome == "EXPIRED_WIN":
         header  = f"⏱️ <b>EXPIRED (profit) — {symbol}</b>"
         pnl_str = f"🟡 <b>+{pnl:.2f}%</b>"
@@ -422,12 +650,12 @@ def _send_outcome_notification(sig: dict, send_telegram_fn):
         f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{dir_emoji} {direction} | {sig_type} | Score: {score}\n"
-        f"Entry  : <code>${sig['entry_price']:.4f}</code>\n"
-        f"Exit   : <code>${sig.get('exit_price', 0):.4f}</code>\n"
+        f"Entry  : <code>${_fmt_price(sig['entry_price'])}</code>\n"
+        f"Exit   : <code>${_fmt_price(sig.get('exit_price', 0))}</code>\n"
         f"PnL    : {pnl_str}\n"
         f"Hold   : {hold_h:.1f}h\n"
     )
-    if outcome == "SL_HIT":
+    if outcome == "SL_HIT" and n_tps == 0:
         msg += "\n<i>🔄 Mini-backtest akan berjalan jika diperlukan.</i>"
 
     try:
@@ -459,7 +687,8 @@ def _check_autobacktest_trigger(resolved: list, send_telegram_fn=None):
         by_strategy.setdefault(s, []).append(o)
 
     for strategy, history in by_strategy.items():
-        # Ambil 10 terbaru
+        # Ambil 10 terbaru (INVALIDATED = setup batal, bukan trade riil → diabaikan)
+        history = [o for o in history if o.get("status") != "INVALIDATED"]
         recent = sorted(history, key=lambda x: x.get("created_at", ""))[-10:]
         if len(recent) < 3:
             continue
@@ -719,6 +948,11 @@ def get_tracker_stats() -> dict:
         st  = o.get("status", "")
         pnl = o.get("pnl_pct", 0)
 
+        # INVALIDATED = setup batal (entry tak pernah diisi) → bukan trade riil,
+        # jangan dihitung di win-rate/statistik.
+        if st == "INVALIDATED":
+            continue
+
         by_type.setdefault(s, {"tp": 0, "sl": 0, "exp": 0, "pnl": []})
         by_symbol.setdefault(sym, {"tp": 0, "sl": 0, "exp": 0, "pnl": [], "recent": []})
 
@@ -769,6 +1003,24 @@ def get_coin_signal_stats(symbol: str) -> Optional[dict]:
     """Return live signal win rate stats for a specific coin from signal_outcomes.json."""
     stats = get_tracker_stats()
     return stats.get("by_symbol", {}).get(symbol.upper())
+
+
+def get_active_pending_symbols() -> list:
+    """
+    Daftar symbol (BinanceUSDT) yang sedang punya sinyal aktif/pending.
+    Dipakai utk memperluas universe scan (mis. pre-dump) ke koin yang lagi
+    dipantau, bukan cuma major hardcoded.
+    """
+    out = []
+    try:
+        for p in _load_pending():
+            if p.get("status") in ("PENDING", "ACTIVE"):
+                sym = (p.get("symbol") or "").upper()
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception as e:
+        log.warning(f"get_active_pending_symbols error: {e}")
+    return out
 
 
 def format_tracker_summary() -> str:
@@ -950,19 +1202,22 @@ def on_scan_start(send_telegram_fn=None) -> list:
 def on_signal_sent(symbol: str, signal_type: str, direction: str,
                    entry_price: float, tp: float, sl: float,
                    score: int, confluence_level: str = "", reasons: list = None,
-                   strategy: str = "CONFIRMED"):
+                   strategy: str = "CONFIRMED", entry_mode: str = "", tps: list = None):
     """
     Dipanggil setelah bot kirim signal ke Telegram.
     Record signal ke pending list.
 
     Args:
-        strategy: Strategy yang generate sinyal (scalp, prepump, predump, swing, atau CONFIRMED)
+        strategy:   Strategy yang generate sinyal (scalp, prepump, predump, swing, CONFIRMED)
+        entry_mode: MOMENTUM_NOW | RETEST_WAIT — menentukan kapan trade dianggap aktif
+        tps:        TP ladder dari trade plan [{level, price, ...}] utk tracking TP1/TP2/TP3
     """
     try:
         record_pending_signal(
             symbol=symbol, signal_type=signal_type, direction=direction,
             entry_price=entry_price, tp=tp, sl=sl, score=score,
-            confluence_level=confluence_level, reasons=reasons, strategy=strategy
+            confluence_level=confluence_level, reasons=reasons, strategy=strategy,
+            entry_mode=entry_mode, tps=tps,
         )
     except Exception as e:
         log.warning(f"on_signal_sent error: {e}")
