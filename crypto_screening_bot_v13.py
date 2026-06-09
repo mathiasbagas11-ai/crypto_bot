@@ -207,6 +207,7 @@ try:
     from signal_tracker import (
         on_scan_start, on_signal_sent,
         format_tracker_summary, take_lesson_snapshot,
+        get_active_pending_symbols,
     )
     TRACKER_MODULE = True
 except ImportError:
@@ -4046,6 +4047,15 @@ def scan_predump_candidates(symbols: list = None) -> list:
             "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
             "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
         ]
+        # v13: perluas universe ke koin yang lagi punya sinyal aktif/pending,
+        # biar alt di luar major (mis. yang baru dapat SETUP) ikut dipantau dump.
+        if TRACKER_MODULE:
+            try:
+                for s in get_active_pending_symbols():
+                    if s not in symbols:
+                        symbols.append(s)
+            except Exception as e:
+                log.debug(f"predump universe extend error: {e}")
 
     candidates = []
     log.info(f"🔍 Pre-dump scan: {len(symbols)} symbols...")
@@ -9356,6 +9366,8 @@ def run_gated_scan():
                             score           = raw_master,
                             confluence_level= conf_level,
                             reasons         = gate_reasons[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ GATED_SIGNAL sanity fail {analysis_sym}: dir={_bt_dir} entry={_entry_val} tp={_tp_val}")
@@ -9653,6 +9665,8 @@ def run_scan(manual: bool = False, chat_id: str = None):
                     score           = score,
                     confluence_level= conf_level,
                     reasons         = conf.get("reasons", [])[:3],
+                    entry_mode      = trade.get("entry_mode", ""),
+                    tps             = trade.get("tps"),
                 )
             except Exception as e:
                 log.debug(f"Signal tracker record error {coin_data.get('symbol','')}: {e}")
@@ -9724,6 +9738,8 @@ def run_prepump_auto():
                             score           = c["total_score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ PREPUMP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -9787,6 +9803,8 @@ def run_predump_auto():
                             score           = c["total_score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ PREDUMP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -9848,6 +9866,8 @@ def run_scalp_auto():
                             score           = c["score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ SCALP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -10091,6 +10111,7 @@ def run_reversal_auto():
                         entry_price=entry_val, tp=float(tp), sl=float(sl),
                         score=c.get("score", 0), confluence_level=c.get("label", ""),
                         reasons=c.get("reasons", [])[:3], strategy="REVERSAL",
+                        entry_mode=trade.get("entry_mode", ""), tps=trade.get("tps"),
                     )
                 else:
                     log.warning(f"⚠️ REVERSAL sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
