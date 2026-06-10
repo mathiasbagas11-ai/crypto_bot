@@ -958,8 +958,22 @@ def _save_confirmed_signal(signal: dict):
     try:
         history = []
         if os.path.exists(CONFIRMED_SIGNAL_FILE):
-            with open(CONFIRMED_SIGNAL_FILE) as f:
-                history = json.load(f)
+            try:
+                with open(CONFIRMED_SIGNAL_FILE) as f:
+                    history = json.load(f)
+                if not isinstance(history, list):
+                    raise ValueError("history bukan list")
+            except Exception as e:
+                # ANTI DEATH-SPIRAL: kalau file corrupt, JANGAN gagal & berhenti
+                # nyimpen selamanya. Backup file rusak lalu mulai dari kosong,
+                # supaya recording sinyal tetap jalan.
+                bak = f"{CONFIRMED_SIGNAL_FILE}.corrupt-{int(time.time())}"
+                try:
+                    os.replace(CONFIRMED_SIGNAL_FILE, bak)
+                    log.warning(f"⚠️ {CONFIRMED_SIGNAL_FILE} corrupt ({e}) — di-backup ke {bak}, mulai history baru")
+                except Exception:
+                    log.warning(f"⚠️ {CONFIRMED_SIGNAL_FILE} corrupt ({e}) — reset history")
+                history = []
         # Hapus data besar sebelum save
         to_save = {k: v for k, v in signal.items() if k not in ("tf_4h", "tf_1h", "tf_15m")}
         history.append(to_save)
