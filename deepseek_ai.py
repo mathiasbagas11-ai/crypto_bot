@@ -232,8 +232,38 @@ def deepseek_signal_review(
         f"Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})\n"
         f"News: {news_block if news_block else 'tidak ada'}"
     )
+    # ── AUTO-FEED DATA OUTCOME MASA LALU ──────────────────────────
+    # Pastikan SETIAP sinyal (jalur apapun) kebawa pelajaran + win-rate
+    # per-coin dari sinyal yang sudah closed. Kalau caller belum kasih
+    # learning_context, ambil sendiri di sini supaya debat tidak "buta".
+    if learning_context is None:
+        try:
+            from learning_engine import build_ai_context_block
+            learning_context = build_ai_context_block("SCREENER") or None
+        except Exception:
+            learning_context = None
+
     if learning_context:
         context_text += f"\nPelajaran dari sinyal lalu:\n{learning_context}"
+
+    # Win-rate & lessons spesifik coin ini dari signal yang sudah closed.
+    try:
+        from symbol_memory import get_symbol_memory
+        _mem = get_symbol_memory(symbol)
+        if _mem and _mem.get("total_trades", 0) > 0:
+            _mem_line = (
+                f"Histori {coin}: {_mem.get('total_trades',0)} trade, "
+                f"WR {_mem.get('win_rate',0):.0f}%, SL-rate {_mem.get('sl_rate',0):.0f}%, "
+                f"avg PnL {_mem.get('avg_pnl',0):+.1f}%, best signal: {_mem.get('best_signal_type','?')}"
+            )
+            if _mem.get("blacklisted"):
+                _mem_line += " | ⚠️ COIN INI LAGI DI-BLACKLIST (banyak SL beruntun)"
+            _mem_lessons = _mem.get("lessons", [])
+            if _mem_lessons:
+                _mem_line += "\n" + "\n".join(f"  - {l}" for l in _mem_lessons[:3])
+            context_text += f"\nHistori coin (dari sinyal closed):\n{_mem_line}"
+    except Exception:
+        pass
 
     # ── TWO-AI DEBATE (Bull vs Bear) — validasi sinyal dari dua sisi ──
     # Setiap sinyal divalidasi lewat debat DeepSeek↔Groq sebelum lolos.
