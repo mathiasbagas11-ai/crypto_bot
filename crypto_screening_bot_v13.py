@@ -7851,7 +7851,7 @@ def handle_status_command(chat_id: str):
         f"Scan interval   : {SCAN_INTERVAL_MINUTES} menit (gated — hanya kirim kalau signal lolos 4 gate)\n"
         f"Top coins       : {TOP_COINS_COUNT}\n"
         f"Pre-pump/dump   : tiap {PREPUMP_SCAN_INTERVAL} menit\n"
-        f"Server time     : {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}\n\n"
+        f"Server time     : {datetime.now(_WIB).strftime('%d %b %Y %H:%M WIB')}\n\n"
         "📌 *Quick Commands:*\n"
         "`/analyze BTC` | `/chart` | `/scalp` | `/prepump` | `/predump`\n"
         "`/logtrade` | `/trades` | `/weeksummary` | `/setbalance`\n"
