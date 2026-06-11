@@ -16,14 +16,20 @@ Binance API:
   GET /api/v3/ticker/24hr?symbol=XXXUSDT → real-time 24h ticker
 """
 
+import json
 import logging
 import math
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 log = logging.getLogger("market_radar")
+
+# Cache file untuk hot sectors — dipakai AI debate sebagai konteks 24h.
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "hot_sectors_cache.json")
 
 # ── Module-level constants ──────────────────────────────────────────────────
 
@@ -334,3 +340,89 @@ def fetch_hot_sectors(top_n: int = 5) -> list[dict]:
         enriched.append({**sec, "coins": coins_list})
 
     return enriched
+
+
+# ── Sector cache (shared dengan ai_debate.py) ───────────────────────────────
+
+def save_sectors_cache(sectors: list[dict], now_utc: datetime | None = None) -> None:
+    """Persist hot sectors ke JSON (atomic write) untuk dipakai AI debate.
+
+    Disimpan dengan timestamp UTC supaya konsumen bisa cek umur data.
+    """
+    if not sectors:
+        return
+    now_utc = now_utc or datetime.now(timezone.utc)
+    payload = {
+        "updated_utc": now_utc.isoformat(),
+        "sectors": sectors,
+    }
+    try:
+        tmp = _CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, _CACHE_FILE)
+    except Exception as e:
+        log.warning(f"save_sectors_cache error: {e}")
+
+
+def load_sectors_cache(max_age_hours: float = 48.0) -> dict | None:
+    """Load cached hot sectors. Return None kalau tidak ada / kedaluwarsa.
+
+    Return dict: {"updated_utc": str, "age_hours": float, "sectors": list}
+    """
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    except Exception as e:
+        log.warning(f"load_sectors_cache error: {e}")
+        return None
+
+    updated = payload.get("updated_utc", "")
+    age_hours = 999.0
+    try:
+        dt = datetime.fromisoformat(updated)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+    except Exception:
+        pass
+
+    if age_hours > max_age_hours:
+        return None
+    return {
+        "updated_utc": updated,
+        "age_hours": age_hours,
+        "sectors": payload.get("sectors", []),
+    }
+
+
+def build_sector_brief_for_ai(max_sectors: int = 4, max_age_hours: float = 48.0) -> str:
+    """Ringkasan teks hot sectors 24h untuk konteks AI debate.
+
+    Return "" kalau cache kosong/kedaluwarsa.
+    Contoh:
+      "AI Agents 🔥 +8.2% (top: TAO +12%, FET +9%) · DePIN 🟢 +3.1% ..."
+    """
+    cache = load_sectors_cache(max_age_hours=max_age_hours)
+    if not cache or not cache.get("sectors"):
+        return ""
+
+    lines = []
+    for sec in cache["sectors"][:max_sectors]:
+        name = sec.get("name") or sec.get("id", "?")
+        chg  = sec.get("chg24h", 0.0)
+        heat = "🔥" if chg >= 5 else ("🟢" if chg > 0 else "🔴")
+        coins = sec.get("coins", [])[:3]
+        coin_str = ", ".join(
+            f"{c.get('symbol','?').upper()} {c.get('pct',0):+.0f}%" for c in coins
+        )
+        line = f"{name} {heat} {chg:+.1f}%"
+        if coin_str:
+            line += f" (top: {coin_str})"
+        lines.append(line)
+
+    age = cache.get("age_hours", 0)
+    header = f"Sektor terpanas 24h (data {age:.0f}j lalu):"
+    return header + "\n" + "\n".join(f"  • {l}" for l in lines)

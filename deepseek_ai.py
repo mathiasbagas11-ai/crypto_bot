@@ -221,6 +221,51 @@ def deepseek_signal_review(
     tp1_r = round((tp1 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
     tp2_r = round((tp2 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
 
+    # Blok konteks teknikal+news ringkas — dipakai juga oleh AI debate.
+    context_text = (
+        f"Alasan: {reasons_str}\n"
+        f"Structure: 4H {s4.get('trend','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
+        f"1H {s1.get('trend','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
+        f"15M {s15.get('trend','?')}\n"
+        f"Candle: 1H {cp1.get('pattern','NONE')} | 15M {cp15.get('pattern','NONE')}\n"
+        f"OB: 4H={len(ob4)} 1H={len(ob1)} | FVG 4H={len(fvg4)}\n"
+        f"Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})\n"
+        f"News: {news_block if news_block else 'tidak ada'}"
+    )
+    if learning_context:
+        context_text += f"\nPelajaran dari sinyal lalu:\n{learning_context}"
+
+    # ── TWO-AI DEBATE (Bull vs Bear) — validasi sinyal dari dua sisi ──
+    # Setiap sinyal divalidasi lewat debat DeepSeek↔Groq sebelum lolos.
+    # Kalau debat tidak tersedia, fallback ke single-AI review di bawah.
+    try:
+        import ai_debate
+        if ai_debate.is_available():
+            sector_brief = ""
+            try:
+                import market_radar
+                sector_brief = market_radar.build_sector_brief_for_ai()
+            except Exception:
+                sector_brief = ""
+
+            debate = ai_debate.run_signal_debate(
+                context_text = context_text,
+                coin         = coin,
+                direction    = direction,
+                master_score = master_score,
+                entry        = entry, tp1 = tp1, tp2 = tp2, sl = sl,
+                is_long      = is_long,
+                signal_type  = signal_type,
+                sector_brief = sector_brief,
+            )
+            if debate:
+                return _finalize_review(
+                    debate, entry, tp1, tp2, sl, is_long, symbol,
+                    debate_mode=True,
+                )
+    except Exception as _dbt_e:
+        log.warning(f"AI debate gagal ({symbol}), fallback single-AI: {_dbt_e}")
+
     user_msg = f"""Review sinyal {signal_type} — {coin} {direction} (score {master_score}/100)
 
 Entry: {entry} | TP1: {tp1} ({tp1_r}R) | TP2: {tp2} ({tp2_r}R) | SL: {sl}
@@ -562,6 +607,75 @@ def deepseek_macro_analysis(news_context: dict = None) -> str:
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+
+def _finalize_review(raw: dict, entry: float, tp1: float, tp2: float, sl: float,
+                     is_long: bool, symbol: str, debate_mode: bool = False) -> dict:
+    """Terapkan clamp harga + sanity arah ke hasil AI (debate atau single).
+
+    Memastikan AI tidak menggeser level di luar MAX_PRICE_ADJUST_PCT dan
+    TP/SL tetap di sisi yang benar. Mengembalikan dict siap-pakai dengan
+    shape kompatibel deepseek_signal_review (plus field debat bila ada).
+    """
+    adj_entry = _safe_float(raw.get("entry"), entry)
+    adj_tp1   = _safe_float(raw.get("tp1"),   tp1)
+    adj_tp2   = _safe_float(raw.get("tp2"),   tp2)
+    adj_sl    = _safe_float(raw.get("sl"),     sl)
+
+    try:
+        score_adj = int(raw.get("score_adj", 0) or 0)
+    except (TypeError, ValueError):
+        score_adj = 0
+    score_adj = max(-MAX_SCORE_ADJUST, min(MAX_SCORE_ADJUST, score_adj))
+
+    verdict = str(raw.get("ai_verdict", "CONFIRM")).upper()
+    if verdict not in ("CONFIRM", "CAUTION", "SKIP"):
+        verdict = "CONFIRM"
+
+    # Clamp harga dalam batas aman
+    adj_entry = _clamp_price(adj_entry, entry, MAX_PRICE_ADJUST_PCT)
+    adj_tp1   = _clamp_price(adj_tp1,   tp1,   MAX_PRICE_ADJUST_PCT)
+    adj_tp2   = _clamp_price(adj_tp2,   tp2,   MAX_PRICE_ADJUST_PCT)
+    adj_sl    = _clamp_price(adj_sl,    sl,     MAX_PRICE_ADJUST_PCT)
+
+    # Sanity arah
+    if is_long:
+        if adj_tp1 <= adj_entry: adj_tp1 = tp1
+        if adj_tp2 <= adj_tp1:   adj_tp2 = tp2
+        if adj_sl  >= adj_entry: adj_sl  = sl
+    else:
+        if adj_tp1 >= adj_entry: adj_tp1 = tp1
+        if adj_tp2 >= adj_tp1:   adj_tp2 = tp2
+        if adj_sl  <= adj_entry: adj_sl  = sl
+
+    was_adjusted = (
+        abs(adj_entry - entry) > 0.0001 or abs(adj_tp1 - tp1) > 0.0001 or
+        abs(adj_tp2 - tp2) > 0.0001 or abs(adj_sl - sl) > 0.0001
+    )
+
+    result = {
+        "entry":        adj_entry,
+        "tp1":          adj_tp1,
+        "tp2":          adj_tp2,
+        "sl":           adj_sl,
+        "score_adj":    score_adj,
+        "insight":      str(raw.get("insight", "")).strip(),
+        "was_adjusted": was_adjusted,
+        "ai_verdict":   verdict,
+        "error":        "",
+    }
+    if debate_mode:
+        result["used_debate"]   = True
+        result["debate_winner"] = raw.get("debate_winner", "MIXED")
+        result["debate_bull"]   = raw.get("debate_bull", "")
+        result["debate_bear"]   = raw.get("debate_bear", "")
+        result["bear_engine"]   = raw.get("bear_engine", "")
+
+    log.info(
+        f"AI review {symbol}: mode={'DEBATE' if debate_mode else 'SINGLE'} "
+        f"verdict={verdict} adj={was_adjusted} score_adj={score_adj:+d}"
+    )
+    return result
+
 
 def _passthrough(trade: dict, reason: str) -> dict:
     """Return sinyal tanpa perubahan kalau AI tidak tersedia."""

@@ -9503,15 +9503,20 @@ def run_gated_scan():
                 tf_4h=tf_4h, tf_1h=tf_1h, tf_15m=tf_15m,
             )
 
-            # Append DeepSeek insight ke pesan
+            # Append AI insight ke pesan (debate dua-AI atau single)
             if ai_review and ai_review.get("insight"):
                 _verdict_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️", "SKIP": "🚫"}.get(
                     ai_review.get("ai_verdict", "CONFIRM"), "🤖")
-                msg += (
-                    f"\n\n─── 🤖 DeepSeek AI ───\n"
-                    f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>\n"
-                    f"{_sanitize_ai_output(ai_review['insight'])}"
-                )
+                if ai_review.get("used_debate"):
+                    _bear_eng = ai_review.get("bear_engine", "Groq")
+                    _winner   = ai_review.get("debate_winner", "MIXED")
+                    _header = (f"─── 🥊 AI DEBATE (DeepSeek 🐂 vs {_bear_eng} 🐻) ───\n"
+                               f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>"
+                               f"  ·  pemenang: <b>{_winner}</b>\n")
+                else:
+                    _header = (f"─── 🤖 DeepSeek AI ───\n"
+                               f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>\n")
+                msg += f"\n\n{_header}{_sanitize_ai_output(ai_review['insight'])}"
                 if ai_review.get("was_adjusted"):
                     msg += "\n🔧 <i>Level harga disesuaikan oleh AI</i>"
             elif GROQ_API_KEY and not DEEPSEEK_MODULE:
@@ -10759,6 +10764,11 @@ def run_market_radar():
         log.warning("Market Radar: tidak ada data sektor")
         return
     now = datetime.now(timezone.utc)
+    # Simpan ke cache supaya AI debate bisa pakai konteks sektor 24h.
+    try:
+        mradar.save_sectors_cache(sectors, now_utc=now)
+    except Exception as _e:
+        log.warning(f"save_sectors_cache gagal: {_e}")
     msg = mradar.build_radar_message(sectors, now_utc=now)
     send_radar_update(msg, parse_mode="HTML")
     log.info(f"📡 Market Radar terkirim: {len(sectors)} sektor")
@@ -10890,13 +10900,14 @@ if __name__ == "__main__":
         log.info("🌏 Session Report majors aktif: tutup sesi 07:00/15:00/21:00 UTC "
                  "(14:00/22:00/04:00 WIB) + shift check tiap 15m → topic Majors")
 
-    # Market Radar — hot sector/narrative detection tiap 30 menit
+    # Market Radar — hot sector/narrative detection tiap 24 jam.
+    # Data sektor di-cache & dipakai AI debate sebagai konteks naratif 24h.
     if RADAR_MODULE:
-        scheduler.add_job(run_market_radar, "interval", minutes=30,
-                          id="market_radar", jitter=60)
+        scheduler.add_job(run_market_radar, "interval", hours=24,
+                          id="market_radar", jitter=120)
         threading.Thread(target=run_market_radar, daemon=True,
                          name="market_radar_startup").start()
-        log.info("📡 Market Radar aktif: hot sector tiap 30m → topic Radar")
+        log.info("📡 Market Radar aktif: hot sector tiap 24j → topic Radar + cache AI debate")
 
     # Risk daily reset jam 00:00 UTC
     if RISK_MODULE:
