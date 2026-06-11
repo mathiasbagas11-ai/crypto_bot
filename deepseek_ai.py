@@ -265,6 +265,15 @@ def deepseek_signal_review(
     except Exception:
         pass
 
+    # Valuasi on-chain / fundamental — dimensi non-teknikal untuk debat.
+    try:
+        from onchain_valuation import build_valuation_brief_for_ai
+        _val_brief = build_valuation_brief_for_ai(symbol, direction)
+        if _val_brief:
+            context_text += f"\n{_val_brief}"
+    except Exception:
+        pass
+
     # ── TWO-AI DEBATE (Bull vs Bear) — validasi sinyal dari dua sisi ──
     # Setiap sinyal divalidasi lewat debat DeepSeek↔Groq sebelum lolos.
     # Kalau debat tidak tersedia, fallback ke single-AI review di bawah.
@@ -509,6 +518,14 @@ def deepseek_analyze_coin(
             + "\n".join(f"- {l}" for l in lessons[:3])
         )
 
+    # Valuasi on-chain / fundamental (keyless)
+    val_block = ""
+    try:
+        from onchain_valuation import build_valuation_brief_for_ai
+        val_block = build_valuation_brief_for_ai(symbol, conf_dir)
+    except Exception:
+        val_block = ""
+
     user_msg = f"""Data trading untuk {coin} (harga sekarang: {price}).
 
 CONFLUENCE: {conf_dir} | {conf_level} | Score {conf_score}/100
@@ -523,6 +540,8 @@ Liq: {liq}
 Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
 
 NEWS: {news_block}
+
+FUNDAMENTAL: {val_block if val_block else "Tidak ada data valuasi."}
 
 HISTORI: {mem_block if mem_block else "Belum ada histori."}
 
