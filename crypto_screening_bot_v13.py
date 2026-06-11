@@ -5445,20 +5445,20 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
 # ─────────────────────────────────────────────
 
 def send_signal(message: str, parse_mode: str = None):
-    """Kirim sinyal ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau thread belum diset.
+    """Kirim sinyal DETAIL ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau belum diset.
 
-    Topic ini KHUSUS eksekusi entry: ENTRY_NOW (retest kena) + heartbeat.
-    Deteksi sinyal baru → send_new_signal.
+    Isi: SETUP TERDETEKSI (gated) + prepump/predump/scalp/reversal detail +
+    ENTRY_NOW (retest kena) + heartbeat. Recap ringkas → send_new_signal.
     """
     return send_telegram(message, thread_id=SIGNAL_THREAD_ID, parse_mode=parse_mode)
 
 
 def send_new_signal(message: str, parse_mode: str = None):
-    """Kirim DETEKSI sinyal baru ke topic Sinyal Baru (NEW_SIGNAL_THREAD_ID).
+    """Kirim RECAP ringkas sinyal baru ke topic Sinyal Baru (NEW_SIGNAL_THREAD_ID).
 
-    Isi: SETUP TERDETEKSI (gated), prepump, predump, scalp, reversal — semua
-    saat pertama terdeteksi. Terpisah dari topic Signal (eksekusi entry) dan
-    Market Update. Fallback ke SIGNAL_THREAD_ID kalau belum diset.
+    Isi: recap "📡 SINYAL BARU" (entry/TP ladder/SL at-a-glance) + reversal brief.
+    Detail lengkap tetap di topic Signal (send_signal); lifecycle (entry/TP/SL/
+    invalid) + bias flip di Market Update. Fallback ke SIGNAL_THREAD_ID kalau belum diset.
     """
     tid = NEW_SIGNAL_THREAD_ID or SIGNAL_THREAD_ID
     return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
@@ -7847,10 +7847,10 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📌 *TOPIC ROUTING (set di .env)*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "`SIGNAL_THREAD_ID` → 🎯 entry execution (ENTRY_NOW retest) + heartbeat\n"
-        "`NEW_SIGNAL_THREAD_ID` → 🆕 deteksi sinyal baru (setup/prepump/predump/scalp/reversal)\n"
+        "`SIGNAL_THREAD_ID` → 🎯 setup detail (gated/prepump/predump/scalp/reversal) + ENTRY_NOW + heartbeat\n"
+        "`NEW_SIGNAL_THREAD_ID` → 🆕 recap ringkas '📡 SINYAL BARU' (entry/TP/SL at-a-glance)\n"
         "`MAJORS_THREAD_ID` → 🌏 update BTC/ETH/SOL per sesi + shift alert\n"
-        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse, lifecycle TP/SL\n"
+        "`MARKET_UPDATE_THREAD_ID` → 📊 bias flip, masuk area entry, lifecycle TP/SL/invalid, market pulse\n"
         "`NEWS_THREAD_ID` → 📰 news agent + social sentiment spike\n"
         "`WHALE_THREAD_ID` → 🐋 whale tracker on-chain alerts\n"
         "`TRADE_REPORT_THREAD_ID` → 📋 trade journal & outcome\n"
@@ -9356,7 +9356,7 @@ def run_gated_scan():
                 continue
             _scan_sent_syms.add(analysis_sym)
 
-            send_new_signal(msg)
+            send_signal(msg)
             _gate_mark_sent(analysis_sym, state, direction=_signal_direction)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
@@ -9396,9 +9396,9 @@ def run_gated_scan():
                     f"📌 {_mu_action}\n"
                     f"⚠️ <i>Not financial advice. DYOR.</i>"
                 )
-                send_market_update(_mu_msg)
+                send_new_signal(_mu_msg)
             except Exception as _mu_e:
-                log.debug(f"Market update notif error {analysis_sym}: {_mu_e}")
+                log.debug(f"New-signal recap notif error {analysis_sym}: {_mu_e}")
 
             # Track ke signal tracker
             if TRACKER_MODULE:
@@ -9769,7 +9769,7 @@ def run_prepump_auto():
             log.info("Pre-pump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_prepump_message(hot)
-        send_new_signal(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal prepump ke signal tracker ──
         if TRACKER_MODULE:
@@ -9834,7 +9834,7 @@ def run_predump_auto():
             log.info("Pre-dump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_predump_message(hot)
-        send_new_signal(msg)
+        send_signal(msg)
 
         # ── v12: Track sinyal predump ke signal tracker ──
         if TRACKER_MODULE:
@@ -9893,7 +9893,7 @@ def run_scalp_auto():
 
     if hot:
         msg = build_scalp_message(hot)
-        send_new_signal(msg)
+        send_signal(msg)
 
         # Track sinyal scalp ke signal tracker
         if TRACKER_MODULE:
@@ -10135,11 +10135,11 @@ def run_reversal_auto():
         return
     final.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Kirim DETAIL ke topic Sinyal Baru + SINGKAT ke Market Update thread
-    send_new_signal(build_reversal_message(final))
+    # Kirim DETAIL ke topic Signal entry + RECAP SINGKAT ke topic Sinyal Baru
+    send_signal(build_reversal_message(final))
     brief = build_reversal_mu_brief(final)
     if brief:
-        send_market_update(brief)
+        send_new_signal(brief)
 
     # Update state
     for c in final:
