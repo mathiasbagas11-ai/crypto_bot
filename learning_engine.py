@@ -278,12 +278,13 @@ def _derive_lesson(perf: dict) -> Optional[dict]:
     elif outcome == "SL_HIT" or pnl < -3:
         category = "bad"
     elif outcome in ("SNAPSHOT_12H", "SNAPSHOT"):
+        # Unrealized snapshot: hanya meaningful kalau gerakannya signifikan
         if pnl > 2:
             category = "good"
         elif pnl < -2:
             category = "bad"
         else:
-            return None   # belum cukup gerak
+            return None   # belum cukup gerak untuk disimpulkan
     elif outcome == "EXPIRED" and abs(pnl) < 1:
         return None
     elif outcome == "MANUAL_CLOSE" and pnl > 1.5:
@@ -465,6 +466,63 @@ def add_manual_lesson(rule: str, tags: list = None, pinned: bool = False, role: 
     _save_lessons(data)
     log.info(f"📌 Manual lesson added: {rule[:60]}...")
     return lesson
+
+
+def record_trade_journal_lesson(trade: dict) -> dict:
+    """
+    Auto-derive lesson dari trade yang baru masuk journal.
+    Dipanggil oleh trade_journal.log_trade() tiap ada trade dicatat, supaya
+    hasil trade ASLI ikut ngefeed konteks sinyal (bukan cuma sinyal bot sendiri).
+
+    `trade` = result_dict dari log_trade (coin, direction, result, pnl_usdt,
+    pnl_pct, note, ...). Best-effort: error tidak boleh ganggu pencatatan trade.
+    """
+    try:
+        coin      = str(trade.get("coin", "")).upper().replace("USDT", "")
+        direction = str(trade.get("direction", "")).upper()
+        result    = str(trade.get("result", "")).upper()
+        if not coin or direction not in ("LONG", "SHORT"):
+            return {}
+
+        pnl_usdt = float(trade.get("pnl_usdt", 0) or 0)
+        pnl_pct  = float(trade.get("pnl_pct", 0) or 0)
+        note     = (trade.get("note") or "").strip()
+
+        sign = "+" if pnl_usdt >= 0 else ""
+        head = f"{result} {coin} {direction} {sign}{pnl_pct:.1f}% ({sign}{pnl_usdt:.2f}U)"
+        if result == "WIN":
+            guide, outcome = "Setup ini cuan — catat kondisi entry buat replikasi.", "good"
+        elif result == "LOSS":
+            guide, outcome = "Setup ini rugi — tinjau ulang sebelum entry mirip lagi.", "bad"
+        else:
+            guide, outcome = "Breakeven — evaluasi apakah entry layak diulang.", "neutral"
+
+        rule = head
+        if note:
+            rule += f" | catatan: {note}"
+        rule += f" → {guide}"
+
+        data = _load_lessons()
+        lesson = {
+            "id": int(time.time() * 1000),
+            "rule": rule[:MAX_MANUAL_LESSON_LEN],
+            "tags": ["trade_journal", coin, direction, result.lower()],
+            "outcome": outcome,
+            "source_type": "trade_journal",
+            "confidence": 0.6,
+            "pinned": False,
+            "role": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "meta": {"coin": coin, "direction": direction,
+                     "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": round(pnl_pct, 2)},
+        }
+        data["lessons"].append(lesson)
+        _save_lessons(data)
+        log.info(f"📒 Trade-journal lesson: {rule[:70]}")
+        return lesson
+    except Exception as e:
+        log.warning(f"record_trade_journal_lesson error: {e}")
+        return {}
 
 
 def pin_lesson(lesson_id: int) -> bool:
@@ -1147,62 +1205,80 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
         if not outcomes:
             return "📊 Signal outcomes masih kosong."
 
-        # Group by signal_type (field di signal_outcomes.json adalah signal_type, bukan strategy)
-        stats_by_strategy = {}
-        for sig in outcomes:
-            status = sig.get("status", "")
-            if status not in ("TP_HIT", "SL_HIT") and not status.startswith("EXPIRED"):
-                continue  # Skip unresolved
+        # Hitung stats per signal_type dari subset outcome.
+        # Win/loss berdasarkan status (bukan pnl_pct yang kadang salah untuk CONFIRMED).
+        def _agg(subset):
+            stats = {}
+            for sig in subset:
+                status = sig.get("status", "")
+                if status not in ("TP_HIT", "SL_HIT") and not status.startswith("EXPIRED"):
+                    continue  # Skip unresolved / snapshot
+                strategy = sig.get("signal_type") or sig.get("strategy") or "UNKNOWN"
+                pnl = sig.get("pnl_pct", 0) or 0
+                is_win  = status in ("TP_HIT", "EXPIRED_WIN")
+                is_loss = status in ("SL_HIT", "EXPIRED_LOSS")
+                d = stats.setdefault(strategy, {
+                    "trades": 0, "wins": 0, "losses": 0,
+                    "pnls": [], "avg_pnl": 0.0, "win_rate": 0.0,
+                })
+                d["trades"] += 1
+                d["pnls"].append(pnl)
+                if is_win:
+                    d["wins"] += 1
+                elif is_loss:
+                    d["losses"] += 1
+            for d in stats.values():
+                if d["trades"] > 0:
+                    d["win_rate"] = round(d["wins"] / d["trades"] * 100, 1)
+                    d["avg_pnl"]  = round(sum(d["pnls"]) / d["trades"], 2)
+            return stats
 
-            # Pakai signal_type (field yang ada), fallback ke strategy untuk backward compat
-            strategy = sig.get("signal_type") or sig.get("strategy") or "UNKNOWN"
-            pnl = sig.get("pnl_pct", 0)
+        # Filter rolling window berdasarkan resolved_at supaya summary harian
+        # benar-benar berubah tiap hari (bukan total all-time yang statis).
+        window_h = int(os.getenv("LEARNING_SUMMARY_WINDOW_H", "24"))
+        cutoff   = datetime.now(timezone.utc) - timedelta(hours=window_h)
 
-            # Win/loss berdasarkan outcome (TP_HIT = win, SL_HIT/EXPIRED_LOSS = loss),
-            # bukan dari pnl_pct yang kadang salah untuk CONFIRMED signals.
-            is_win  = status == "TP_HIT"
-            is_loss = status in ("SL_HIT", "EXPIRED_LOSS")
+        def _resolved_dt(sig):
+            raw = sig.get("resolved_at") or sig.get("created_at")
+            if not raw:
+                return None
+            try:
+                dt = datetime.fromisoformat(raw)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
 
-            if strategy not in stats_by_strategy:
-                stats_by_strategy[strategy] = {
-                    "trades": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "pnls": [],
-                    "avg_pnl": 0.0,
-                    "win_rate": 0.0,
-                }
+        recent = [s for s in outcomes
+                  if (_resolved_dt(s) is not None and _resolved_dt(s) >= cutoff)]
+        recent_stats  = _agg(recent)
+        alltime_stats = _agg(outcomes)
 
-            stats_by_strategy[strategy]["trades"] += 1
-            stats_by_strategy[strategy]["pnls"].append(pnl)
-            if is_win:
-                stats_by_strategy[strategy]["wins"] += 1
-            elif is_loss:
-                stats_by_strategy[strategy]["losses"] += 1
+        # Fokus AI: window terbaru kalau ada, kalau kosong pakai all-time
+        focus_stats = recent_stats if recent_stats else alltime_stats
 
-        # Compute aggregates
-        for strat, data in stats_by_strategy.items():
-            if data["trades"] > 0:
-                data["win_rate"] = round(data["wins"] / data["trades"] * 100, 1)
-                data["avg_pnl"] = round(sum(data["pnls"]) / data["trades"], 2)
-
-        # Build analysis prompt
-        analysis_text = "📊 SIGNAL OUTCOMES ANALYSIS\n\n"
-        for strat, data in sorted(stats_by_strategy.items()):
+        # Build analysis prompt (untuk AI) dari focus
+        analysis_text = f"📊 SIGNAL OUTCOMES ANALYSIS (window {window_h}h)\n\n"
+        for strat, data in sorted(focus_stats.items()):
             analysis_text += f"{strat}: {data['trades']} trades | WR={data['win_rate']:.0f}% | AvgPnL={data['avg_pnl']:+.2f}%\n"
 
         # Call DeepSeek API
-        summary = _call_deepseek_analysis(analysis_text, stats_by_strategy)
+        summary = _call_deepseek_analysis(analysis_text, focus_stats)
 
-        # Format stats tabel dengan rata kanan
-        stats_lines = []
-        for strat, data in sorted(stats_by_strategy.items(), key=lambda x: -x[1]["win_rate"]):
-            wr    = data["win_rate"]
-            pnl   = data["avg_pnl"]
-            n     = data["trades"]
-            wr_em = "🟢" if wr >= 55 else "🟡" if wr >= 40 else "🔴"
-            pnl_s = f"{pnl:+.2f}%"
-            stats_lines.append(f"  {wr_em} <b>{strat}</b>: {n} trade | WR {wr:.0f}% | PnL {pnl_s}")
+        def _fmt_lines(stats):
+            out = []
+            for strat, data in sorted(stats.items(), key=lambda x: -x[1]["win_rate"]):
+                wr    = data["win_rate"]
+                pnl   = data["avg_pnl"]
+                n     = data["trades"]
+                wr_em = "🟢" if wr >= 55 else "🟡" if wr >= 40 else "🔴"
+                out.append(f"  {wr_em} <b>{strat}</b>: {n} trade | WR {wr:.0f}% | PnL {pnl:+.2f}%")
+            return out
+
+        if recent_stats:
+            recent_block = "\n".join(_fmt_lines(recent_stats))
+        else:
+            recent_block = f"  <i>Belum ada sinyal yang resolve dalam {window_h} jam terakhir.</i>"
+        alltime_block = "\n".join(_fmt_lines(alltime_stats)) or "  <i>(kosong)</i>"
 
         ts = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
         msg = (
@@ -1210,8 +1286,10 @@ def analyze_signal_outcomes_daily(send_telegram_fn=None) -> str:
             "📚 <b>DAILY LEARNING SUMMARY</b>\n"
             f"🕐 {ts}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📊 <b>Signal Outcomes:</b>\n"
-            + "\n".join(stats_lines) + "\n\n"
+            f"📊 <b>{window_h} JAM TERAKHIR:</b>\n"
+            + recent_block + "\n\n"
+            "📈 <b>ALL-TIME:</b>\n"
+            + alltime_block + "\n\n"
             "─────────────────────\n"
             "🤖 <b>AI Analysis:</b>\n"
             f"{summary}\n\n"

@@ -130,6 +130,19 @@ except ImportError:
     logging.getLogger("x_sent").warning("x_sentiment.py tidak ditemukan — fitur X/DCA dinonaktifkan")
     logging.getLogger("market_ctx").warning("market_context.py tidak ditemukan — market context dinonaktifkan")
 
+# ── Social Sentiment (Reddit + HackerNews via last30days-skill) ────────────
+try:
+    from social_sentiment import (
+        get_social_sentiment, format_social_sentiment_telegram,
+        run_social_scan, DEFAULT_SCAN_COINS,
+    )
+    SOCIAL_MODULE = True
+except ImportError:
+    SOCIAL_MODULE = False
+    logging.getLogger("social").warning("social_sentiment.py tidak tersedia")
+
+SOCIAL_SCAN_INTERVAL = int(os.getenv("SOCIAL_SCAN_INTERVAL", "30"))  # menit
+
 try:
     from risk_manager      import (calc_position_size, format_risk_block,
                                    format_risk_status, set_capital, set_risk_pct,
@@ -167,6 +180,7 @@ try:
         get_recent_trades, format_recent_trades,
         format_weekly_summary, set_initial_balance,
         get_current_balance,
+        build_trade_from_screenshot, format_shot_preview,
     )
     JOURNAL_MODULE = True
 except ImportError:
@@ -193,6 +207,7 @@ try:
     from signal_tracker import (
         on_scan_start, on_signal_sent,
         format_tracker_summary, take_lesson_snapshot,
+        get_active_pending_symbols,
     )
     TRACKER_MODULE = True
 except ImportError:
@@ -310,6 +325,9 @@ GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY          = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL            = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_VISION_MODEL     = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# Model vision cadangan kalau model utama error (mis. di-decommission Groq).
+GROQ_VISION_MODEL_FB  = os.getenv("GROQ_VISION_MODEL_FALLBACK", "meta-llama/llama-4-maverick-17b-128e-instruct")
 GROQ_API_URL          = "https://api.groq.com/openai/v1/chat/completions"
 CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
@@ -324,6 +342,8 @@ DEEPSEEK_API_KEY      = os.getenv("DEEPSEEK_API_KEY", "")
 SIGNAL_THREAD_ID        = os.getenv("SIGNAL_THREAD_ID", "")        or None
 MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
 TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
+NEWS_THREAD_ID          = os.getenv("NEWS_THREAD_ID", "")          or None  # news agent + social spikes
+WHALE_THREAD_ID         = os.getenv("WHALE_THREAD_ID", "")         or None  # whale tracker
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -948,6 +968,67 @@ def _groq_request(messages: list, max_tokens: int = 1800, temperature: float = 0
 
     log.warning("Groq: max retries reached.")
     return ""
+
+
+def _groq_vision_request(image_b64: str, prompt: str, mime: str = "image/jpeg",
+                         max_tokens: int = 700, temperature: float = 0.0,
+                         model: str = None) -> tuple:
+    """
+    Call Groq vision model (Llama 4 multimodal) dengan satu gambar inline (base64).
+    Dipakai untuk baca screenshot order-details → ekstrak field trade.
+
+    Return (content, error). Kalau sukses → (text, ""). Kalau gagal → ("", alasan).
+    """
+    if not GROQ_API_KEY:
+        return "", "GROQ_API_KEY belum diset"
+
+    model = model or GROQ_VISION_MODEL
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url",
+             "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+        ],
+    }]
+    last_err = "unknown"
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                GROQ_API_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       model,
+                    "messages":    messages,
+                    "max_tokens":  max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=40,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip(), ""
+            elif r.status_code == 429:
+                last_err = "rate limit (429)"
+                wait = 12 * (2 ** attempt)
+                log.warning(f"Groq vision 429 (attempt {attempt+1}), retry in {wait}s...")
+                time.sleep(wait)
+            elif r.status_code in (503, 502):
+                last_err = f"server {r.status_code}"
+                time.sleep(8 * (attempt + 1))
+            else:
+                body = r.text[:160].replace("\n", " ")
+                log.warning(f"Groq vision error {r.status_code} (model={model}): {body}")
+                return "", f"API {r.status_code}: {body}"
+        except Exception as e:
+            last_err = str(e)
+            log.warning(f"Groq vision exception (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(6)
+    log.warning(f"Groq vision: max retries reached (model={model}).")
+    return "", last_err
 
 
 def groq_analyze_coin(symbol: str, confluence: dict, tf_4h: dict, tf_1h: dict,
@@ -3515,6 +3596,15 @@ def scan_prepump_candidates(symbols: list = None) -> list:
             "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
             "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
         ]
+        # v13: perluas universe ke koin yang lagi punya sinyal aktif/pending,
+        # biar alt di luar major (mis. yang baru dapat SETUP) ikut dipantau pump.
+        if TRACKER_MODULE:
+            try:
+                for s in get_active_pending_symbols():
+                    if s not in symbols:
+                        symbols.append(s)
+            except Exception as e:
+                log.debug(f"prepump universe extend error: {e}")
 
     candidates = []
     log.info(f"🔍 Pre-pump scan: {len(symbols)} symbols...")
@@ -3966,6 +4056,15 @@ def scan_predump_candidates(symbols: list = None) -> list:
             "OPUSDT", "TIAUSDT", "RENDERUSDT", "FETUSDT", "PENDLEUSDT",
             "ENAUSDT", "AAVEUSDT", "ONDOUSDT", "JUPUSDT", "HYPEUSDT",
         ]
+        # v13: perluas universe ke koin yang lagi punya sinyal aktif/pending,
+        # biar alt di luar major (mis. yang baru dapat SETUP) ikut dipantau dump.
+        if TRACKER_MODULE:
+            try:
+                for s in get_active_pending_symbols():
+                    if s not in symbols:
+                        symbols.append(s)
+            except Exception as e:
+                log.debug(f"predump universe extend error: {e}")
 
     candidates = []
     log.info(f"🔍 Pre-dump scan: {len(symbols)} symbols...")
@@ -5341,8 +5440,32 @@ def send_signal(message: str, parse_mode: str = None):
 
 
 def send_market_update(message: str, parse_mode: str = None):
-    """Kirim news/market update ke topic Market Update (MARKET_UPDATE_THREAD_ID)."""
+    """Kirim rangkuman sinyal entry ke topic Market Update (MARKET_UPDATE_THREAD_ID).
+
+    Isi: bias flip BTC, market pulse, scan summary, reversal brief.
+    Bukan untuk news atau whale — gunakan send_news_update / send_whale_report.
+    """
     return send_telegram(message, thread_id=MARKET_UPDATE_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_news_update(message: str, parse_mode: str = None):
+    """Kirim news & social alerts ke topic News (NEWS_THREAD_ID).
+
+    Isi: news agent alerts, social sentiment spikes (Reddit/HN).
+    Fallback ke Market Update kalau NEWS_THREAD_ID belum diset.
+    """
+    tid = NEWS_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
+
+
+def send_whale_report(message: str, parse_mode: str = None):
+    """Kirim whale movement alerts ke topic Whale Report (WHALE_THREAD_ID).
+
+    Isi: on-chain whale moves, large transfer alerts dari whale_tracker.py.
+    Fallback ke Market Update kalau WHALE_THREAD_ID belum diset.
+    """
+    tid = WHALE_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
 
 
 def send_trade_report(message: str, parse_mode: str = None):
@@ -6896,6 +7019,24 @@ def handle_xsentiment_command(coin: str, chat_id: str):
         send_telegram(f"❌ Error fetch X sentiment: {e}", chat_id)
 
 
+def handle_social_command(coin: str, chat_id: str):
+    """Handle /social <COIN> — Reddit + HackerNews sentiment via last30days-skill."""
+    if not SOCIAL_MODULE:
+        send_telegram("❌ social_sentiment.py tidak tersedia.", chat_id)
+        return
+    sym = coin.upper().strip()
+    if not sym:
+        send_telegram("❓ Format: <code>/social BTC</code> atau <code>/social SOLUSDT</code>", chat_id, parse_mode="HTML")
+        return
+    send_telegram(f"📡 Fetching social sentiment untuk <b>{sym}</b> dari Reddit + HackerNews... ⏳", chat_id, parse_mode="HTML")
+    try:
+        data = get_social_sentiment(sym, days=30)
+        msg = format_social_sentiment_telegram(data)
+        send_telegram(msg, chat_id, parse_mode="HTML")
+    except Exception as e:
+        send_telegram(f"❌ Error fetch social sentiment: {e}", chat_id)
+
+
 # ── v9: Risk handlers ────────────────────────
 
 def handle_risk_command(chat_id: str):
@@ -7169,6 +7310,8 @@ def handle_journal_wizard_message(text: str, chat_id: str):
         return False
     if not is_in_wizard(chat_id):
         return False
+    if is_wizard_expecting_image(chat_id):
+        send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     reply, done = wizard_process(chat_id, text=text)
     send_telegram(reply, chat_id, parse_mode="HTML")
     return True
@@ -7180,6 +7323,7 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
         return False
     if not is_wizard_expecting_image(chat_id):
         return False
+    send_telegram("⏳ <i>Mencatat trade ke Google Sheets...</i>", chat_id, parse_mode="HTML")
     # Fetch file URL dari Telegram
     try:
         r = requests.get(
@@ -7196,6 +7340,245 @@ def handle_journal_wizard_image(file_id: str, chat_id: str):
     reply, done = wizard_process(chat_id, image_url=image_url)
     send_telegram(reply, chat_id, parse_mode="HTML")
     return True
+
+
+# ── Screenshot → trade (vision import) ────────
+
+_SHOT_PROMPT = (
+    "Kamu membaca screenshot detail order trading futures crypto (mis. Bitget/Binance). "
+    "Ekstrak data berikut dan balas HANYA JSON valid tanpa teks lain, tanpa markdown:\n"
+    '{"coin": "...", "direction": "LONG|SHORT", "leverage": <angka>, '
+    '"entry_price": <angka>, "exit_price": <angka>, "realized_pnl": <angka>, "roi_pct": <angka>}\n'
+    "Aturan:\n"
+    "- coin: simbol tanpa USDT (contoh HYPEUSDT -> HYPE).\n"
+    "- direction: posisi yang DITUTUP. 'Close short' -> SHORT, 'Close long' -> LONG.\n"
+    "- entry_price: angka di field 'Entry price'.\n"
+    "- exit_price: 'Avg. filled price' atau 'Filled price' atau 'Exit price'.\n"
+    "- realized_pnl: 'Realized PnL' dalam USDT (pertahankan tanda minus).\n"
+    "- roi_pct: 'Realized ROI' dalam persen (pertahankan tanda minus, tanpa simbol %).\n"
+    "- Kalau suatu field tidak ada, isi null. Jangan mengarang."
+)
+
+
+# Limit aman di bawah batas base64 Groq (4 MB). Gambar lebih besar dari ini
+# bikin request vision ditolak — penyebab umum "screenshot gagal dibaca".
+_VISION_MAX_B64_BYTES = 3_500_000
+
+
+def _prepare_image_for_vision(img_bytes: bytes, mime: str) -> tuple:
+    """
+    Kecilkan/re-compress gambar yang kelewat besar supaya muat di limit base64 Groq.
+    Aman kalau Pillow tidak terpasang — kembalikan gambar apa adanya.
+    Return (image_b64, mime).
+    """
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    if len(b64) <= _VISION_MAX_B64_BYTES:
+        return b64, mime
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(img_bytes))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        long_edge = max(im.size)
+        last_b64 = b64
+        # Turunkan dimensi & kualitas bertahap; berhenti begitu muat.
+        for max_edge, quality in ((2048, 85), (1600, 80), (1280, 75), (1024, 70)):
+            work = im
+            if long_edge > max_edge:
+                scale = max_edge / long_edge
+                work = im.resize((max(1, int(im.width * scale)),
+                                  max(1, int(im.height * scale))))
+            buf = io.BytesIO()
+            work.save(buf, format="JPEG", quality=quality)
+            last_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            if len(last_b64) <= _VISION_MAX_B64_BYTES:
+                log.info(f"Vision image dikecilkan: {len(b64)}→{len(last_b64)} "
+                         f"b64 bytes (max_edge={max_edge}, q={quality})")
+                return last_b64, "image/jpeg"
+        return last_b64, "image/jpeg"  # tetap kirim yang terkecil
+    except Exception as e:
+        log.warning(f"Image downscale gagal ({e}), kirim apa adanya")
+        return b64, mime
+
+
+def _extract_shot_json(image_b64: str, mime: str) -> tuple:
+    """
+    Panggil Groq vision, parse JSON hasilnya jadi dict mentah.
+    Return (data_dict, error_str). Sukses → (dict, ""). Gagal → ({}, alasan).
+    Kalau model utama error, otomatis coba model cadangan.
+    """
+    import json
+    raw, err = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime)
+    if not raw and GROQ_VISION_MODEL_FB and GROQ_VISION_MODEL_FB != GROQ_VISION_MODEL:
+        log.warning(f"Vision model utama gagal ({err}); coba fallback {GROQ_VISION_MODEL_FB}")
+        raw, err2 = _groq_vision_request(image_b64, _SHOT_PROMPT, mime=mime,
+                                         model=GROQ_VISION_MODEL_FB)
+        if not raw:
+            return {}, f"{err} (fallback: {err2})"
+    if not raw:
+        return {}, err or "respons vision kosong"
+
+    txt = raw.strip()
+    # buang code fence kalau model bandel
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:]
+    start, end = txt.find("{"), txt.rfind("}")
+    if start == -1 or end == -1:
+        log.warning(f"Vision shot: no JSON in response: {raw[:200]}")
+        return {}, "vision tidak mengembalikan data terstruktur"
+    try:
+        return json.loads(txt[start:end + 1]), ""
+    except Exception as e:
+        log.warning(f"Vision shot JSON parse error: {e} | raw={raw[:200]}")
+        return {}, "format data dari vision tidak valid"
+
+
+# Daftar command yang dikenal — dipakai untuk saran "maksud kamu ...?"
+# saat user salah ketik command (mis. /logshoot → /logshot).
+_KNOWN_COMMANDS = [
+    "/logshot", "/logtrade", "/logpnl", "/logoutcome", "/trades", "/trade",
+    "/close", "/weeksummary", "/refreshdashboard", "/setbalance", "/lessons",
+    "/decisions", "/evolve", "/addlesson", "/backtest", "/btall", "/btresult",
+    "/btcompare", "/btstats", "/signalbt", "/balance", "/setstake", "/compound",
+    "/liqstatus", "/marketstatus", "/signals", "/symbolmemory", "/symbolstats",
+    "/blacklist", "/unblacklist", "/ask", "/scan", "/status", "/security",
+    "/why", "/style", "/help", "/start", "/done", "/topicid",
+]
+
+
+def _suggest_command(cmd: str):
+    """Cari command terdekat dari typo (mis. /logshoot → /logshot). None kalau tidak ada."""
+    import difflib
+    m = difflib.get_close_matches(cmd.lower(), _KNOWN_COMMANDS, n=1, cutoff=0.6)
+    return m[0] if m else None
+
+
+def handle_logshot_command(chat_id: str):
+    """Handle /logshot — minta user kirim screenshot order details buat dicatat."""
+    if not JOURNAL_MODULE:
+        send_telegram("❌ Trade journal module tidak tersedia.", chat_id)
+        return
+    if not GROQ_API_KEY:
+        send_telegram("⚠️ Fitur baca screenshot butuh GROQ_API_KEY. Set dulu di .env.", chat_id)
+        return
+    _awaiting_tradeshot[chat_id] = True
+    send_telegram(
+        "📸 Kirim <b>screenshot order details</b> (Bitget/Binance/dll) yang ada "
+        "Entry, Exit, Realized PnL & ROI.\nGue baca otomatis terus konfirmasi sebelum disimpan.\n\n"
+        "💡 <b>Di grup:</b> kalau screenshot-nya nggak kebaca, <b>REPLY pesan ini</b> sambil "
+        "lampirin fotonya (atau kirim sebagai foto, bukan file).",
+        chat_id, parse_mode="HTML",
+    )
+
+
+def handle_trade_screenshot(file_id: str, chat_id: str):
+    """Jalur eksplisit (/logshot): baca screenshot order-details, tampilkan preview."""
+    if not JOURNAL_MODULE:
+        return False
+    _awaiting_tradeshot.pop(chat_id, None)
+    send_telegram("⏳ <i>Lagi baca screenshot...</i>", chat_id, parse_mode="HTML")
+    return _read_trade_screenshot(file_id, chat_id, quiet=False)
+
+
+def _read_trade_screenshot(file_id: str, chat_id: str, quiet: bool = False) -> bool:
+    """
+    Download screenshot, baca via Groq vision, kalau valid → set _pending_shot +
+    kirim preview konfirmasi (return True). Kalau bukan order-details → return False.
+    quiet=True: jangan kirim pesan error (dipakai auto-detect biar bisa fallback
+    ke analisa chart tanpa nyampah pesan).
+    """
+    if not JOURNAL_MODULE:
+        return False
+    # Fetch file URL + bytes dari Telegram
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10,
+        )
+        file_path = r.json()["result"]["file_path"]
+        img = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
+            timeout=15,
+        )
+        img_bytes = img.content
+        mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
+    except Exception as e:
+        log.warning(f"Trade screenshot fetch error: {e}")
+        if not quiet:
+            send_telegram("⚠️ Gagal ambil gambar dari Telegram. Coba kirim ulang.", chat_id)
+        return False
+
+    image_b64, mime = _prepare_image_for_vision(img_bytes, mime)
+    raw, verr = _extract_shot_json(image_b64, mime)
+    if not raw:
+        if not quiet:
+            detail = f"\n\n🔧 <i>Detail: {verr}</i>" if verr else ""
+            send_telegram(
+                "⚠️ Nggak bisa baca data dari screenshot itu. Pastikan ini halaman "
+                "<b>Order details</b> (ada Entry, Realized PnL, ROI), atau catat manual via /logtrade."
+                + detail,
+                chat_id, parse_mode="HTML",
+            )
+        return False
+
+    trade, err = build_trade_from_screenshot(raw)
+    if err:
+        if not quiet:
+            send_telegram(
+                f"⚠️ {err}\nCoba kirim screenshot yang lebih jelas, atau /logtrade buat manual.",
+                chat_id, parse_mode="HTML",
+            )
+        return False
+
+    _pending_shot[chat_id] = trade
+    send_telegram(format_shot_preview(trade), chat_id, parse_mode="HTML")
+    return True
+
+
+def _handle_photo_auto(chat_id: str, file_id: str):
+    """
+    Foto tanpa konteks eksplisit (bukan /logshot, bukan /chart): coba baca dulu
+    sebagai screenshot order-details (auto-log trade); kalau bukan → analisa chart.
+    Bikin logshot 'just work' walau user lupa ketik /logshot.
+    """
+    if JOURNAL_MODULE and _read_trade_screenshot(file_id, chat_id, quiet=True):
+        return
+    handle_chart_command(chat_id, file_id)
+
+
+def handle_shot_confirm(text: str, chat_id: str):
+    """Proses jawaban ya/batal untuk screenshot yang sudah dibaca."""
+    trade = _pending_shot.pop(chat_id, None)
+    if not trade:
+        return
+    ans = text.strip().lower()
+    if ans in ("batal", "skip", "no", "ga", "gak", "nggak", "cancel", "x"):
+        send_telegram("❌ Oke, nggak jadi disimpan.", chat_id)
+        return
+    pnl = float(trade["pnl"])
+    t = log_trade(
+        coin=trade["coin"], direction=trade["direction"],
+        entry_price=float(trade["entry"]), margin_usdt=float(trade["margin"]),
+        leverage=int(trade["leverage"]), pnl_usdt=pnl,
+        note=trade.get("note", ""),
+    )
+    msg = format_trade_logged(t)
+    if RISK_MODULE:
+        try:
+            record_trade_result(pnl)
+            new_cap = update_capital_after_trade(pnl)
+            result_emoji = "🟢" if pnl >= 0 else "🔴"
+            msg += (
+                f"\n\n{result_emoji} <b>Balance diperbarui</b>: "
+                f"<code>${new_cap:,.2f} USDT</code>  ({pnl:+.2f})\n"
+                f"Sinyal berikutnya akan pakai balance terbaru."
+            )
+        except Exception as e:
+            log.debug(f"Risk update after logshot error: {e}")
+    send_telegram(msg, chat_id, parse_mode="HTML")
 
 
 def _signal_chat_ai(prompt: str) -> str:
@@ -7370,7 +7753,9 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💎 `/dca BTC` — DCA signal: KOL activity + narrative cycle + price context\n"
         "   → Early Narrative = 💎 ACCUMULATE | Top Signal = 🚨 AVOID\n"
-        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n\n"
+        "🐦 `/xsenti SOL` — Quick X sentiment untuk 1 coin\n"
+        "📡 `/social BTC` — Reddit + HackerNews sentiment (30 hari terakhir)\n"
+        "   → Auto-scan tiap 30m: cache dipakai signal gate + spike alert otomatis\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 *CONFIRMED ENTRY* _(auto, no command needed)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -7395,6 +7780,7 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📝 `/logtrade` — Log trade baru (wizard step-by-step)\n"
         "   atau `/logtrade BTC LONG 65000 50 10 +25` (one-liner)\n"
+        "📸 `/logshot` — Kirim screenshot order details, AI baca otomatis\n"
         "📋 `/trades` — Lihat 5 trade terakhir\n"
         "📊 `/weeksummary` — Weekly summary + AI analysis\n"
         "💰 `/setbalance 500` — Set saldo awal\n"
@@ -7423,7 +7809,15 @@ def handle_help_command(chat_id: str):
         "🎚️ `/setrisk 2` — Set risk per trade (%)\n"
         "🛑 `/setdailyloss 5` — Set daily loss limit (%)\n"
         "📈 `/logpnl +50` — Catat PnL ke risk manager\n\n"
-        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n"
+        "💡 *Tips:* Kirim nama koin langsung (`BTC`, `SOL`) juga bisa!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 *TOPIC ROUTING (set di .env)*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "`SIGNAL_THREAD_ID` → 🎯 sinyal entry LONG/SHORT\n"
+        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse\n"
+        "`NEWS_THREAD_ID` → 📰 news agent + social sentiment spike\n"
+        "`WHALE_THREAD_ID` → 🐋 whale tracker on-chain alerts\n"
+        "`TRADE_REPORT_THREAD_ID` → 📋 trade journal & outcome\n"
         "⚠️ _Not financial advice. DYOR._"
     )
     send_telegram(msg, chat_id)
@@ -7431,6 +7825,26 @@ def handle_help_command(chat_id: str):
 def handle_btresult_wrapper(chat_id: str):
     """Wrapper untuk /btresult — tampilkan hasil backtest terakhir."""
     _bt_result(chat_id, send_telegram)
+
+
+def run_social_scan_scheduled():
+    """Scheduled social sentiment scan — tiap SOCIAL_SCAN_INTERVAL menit.
+
+    Fetch Reddit + HackerNews untuk semua coin default, update
+    social_intelligence.json cache, dan kirim alert ke Market Update
+    channel kalau ada spike (engagement tinggi + sentiment kuat).
+    """
+    if not SOCIAL_MODULE:
+        return
+    try:
+        coins = DEFAULT_SCAN_COINS
+        run_social_scan(
+            coins=coins,
+            send_telegram_fn=send_news_update,
+            days=7,
+        )
+    except Exception as e:
+        log.warning(f"Social scan scheduled error: {e}")
 
 
 def run_btall_scheduled():
@@ -7542,6 +7956,8 @@ def handle_btall_command(args: str, chat_id: str):
 
 last_update_id    = 0
 _awaiting_chart   = {}  # chat_id → True (user habis kirim /chart, tunggu foto)
+_awaiting_tradeshot = {}  # chat_id → True (user habis kirim /logshot, tunggu screenshot)
+_pending_shot     = {}  # chat_id → trade dict hasil baca screenshot, nunggu konfirmasi ya/batal
 
 def get_telegram_updates() -> list:
     global last_update_id
@@ -7572,6 +7988,10 @@ def process_update(update: dict):
     chat_id   = str(message.get("chat", {}).get("id", ""))
     text      = message.get("text", "").strip()
     photos    = message.get("photo", [])
+    # Gambar bisa dikirim sebagai "Photo" (compressed) ATAU "File/Document"
+    # (uncompressed). Telegram taruh di field berbeda — tangani keduanya.
+    document  = message.get("document", {}) or {}
+    doc_is_image = str(document.get("mime_type", "")).startswith("image/")
     # Extract topic thread_id (Telegram Topics / forum supergroup)
     raw_tid   = message.get("message_thread_id")
     topic_tid = str(raw_tid) if raw_tid else None
@@ -7584,7 +8004,8 @@ def process_update(update: dict):
         return  # silent drop — unauthorized user tidak dapat response apapun
     # ─────────────────────────────────────────
 
-    log.info(f"📩 [{chat_id}] tid={topic_tid} text='{text[:60]}' photos={len(photos)}")
+    log.info(f"📩 [{chat_id}] tid={topic_tid} text='{text[:60]}' "
+             f"photos={len(photos)} doc={document.get('mime_type') if document else '-'}")
 
     # Inject topic_tid into this thread so inline send_telegram calls in
     # process_update itself also reply to the correct topic.
@@ -7598,16 +8019,22 @@ def process_update(update: dict):
             fn(*args)
         return threading.Thread(target=_run, daemon=True)
 
-    # ── Handle foto chart ────────────────────────
-    if photos:
-        photo   = photos[-1]
-        file_id = photo.get("file_id")
+    # ── Handle gambar (Photo compressed ATAU File/Document) ──────────
+    if photos or doc_is_image:
+        file_id = photos[-1].get("file_id") if photos else document.get("file_id")
+        wants_chart = bool(_awaiting_chart.pop(chat_id, None))  # user ketik /chart?
         if file_id:
             if JOURNAL_MODULE and is_wizard_expecting_image(chat_id):
                 _thread(handle_journal_wizard_image, file_id, chat_id).start()
-            else:
+            elif JOURNAL_MODULE and _awaiting_tradeshot.get(chat_id):
+                _thread(handle_trade_screenshot, file_id, chat_id).start()
+            elif wants_chart:
                 _thread(handle_chart_command, chat_id, file_id).start()
-        _awaiting_chart.pop(chat_id, None)
+            else:
+                # Tanpa konteks eksplisit → auto: coba baca trade dulu, fallback chart
+                _thread(_handle_photo_auto, chat_id, file_id).start()
+        else:
+            log.warning(f"[{chat_id}] gambar diterima tapi file_id kosong")
         return
 
     if not text:
@@ -7663,6 +8090,11 @@ def process_update(update: dict):
         coin  = parts[1].strip() if len(parts) > 1 else ""
         _thread(handle_xsentiment_command, coin, chat_id).start()
 
+    elif text_lower.startswith("/social"):
+        parts = text.split(maxsplit=1)
+        coin  = parts[1].strip() if len(parts) > 1 else ""
+        _thread(handle_social_command, coin, chat_id).start()
+
     # ── v9: Risk ──────────────────────────────
     elif text_lower.startswith("/risk"):
         handle_risk_command(chat_id)
@@ -7687,6 +8119,9 @@ def process_update(update: dict):
     elif text_lower.startswith("/logtrade"):
         parts = text.split(maxsplit=1)
         _thread(handle_logtrade_command, parts[1] if len(parts)>1 else "", chat_id).start()
+
+    elif text_lower.startswith("/logshot") or text_lower.startswith("/logshoot"):
+        handle_logshot_command(chat_id)
 
     elif text_lower.startswith("/trades"):
         _thread(handle_trades_command, chat_id).start()
@@ -8035,6 +8470,29 @@ def process_update(update: dict):
     elif text_lower.startswith("/help") or text_lower.startswith("/start"):
         handle_help_command(chat_id)
 
+    elif text_lower.startswith("/topicid"):
+        # Balas dengan thread_id topic ini — berguna untuk setup .env
+        tid_display = topic_tid or "None (General / bukan topic)"
+        send_telegram(
+            f"📌 <b>Topic ID untuk topic ini:</b>\n"
+            f"<code>{tid_display}</code>\n\n"
+            f"Salin ke <code>.env</code>:\n"
+            f"<code>NEWS_THREAD_ID={tid_display}</code>\n"
+            f"atau\n"
+            f"<code>WHALE_THREAD_ID={tid_display}</code>\n\n"
+            f"<b>Topic IDs yang sudah diset:</b>\n"
+            f"SIGNAL_THREAD_ID        = <code>{SIGNAL_THREAD_ID or 'belum diset'}</code>\n"
+            f"MARKET_UPDATE_THREAD_ID = <code>{MARKET_UPDATE_THREAD_ID or 'belum diset'}</code>\n"
+            f"NEWS_THREAD_ID          = <code>{NEWS_THREAD_ID or 'belum diset'}</code>\n"
+            f"WHALE_THREAD_ID         = <code>{WHALE_THREAD_ID or 'belum diset'}</code>\n"
+            f"TRADE_REPORT_THREAD_ID  = <code>{TRADE_REPORT_THREAD_ID or 'belum diset'}</code>",
+            chat_id, parse_mode="HTML"
+        )
+
+    # Konfirmasi ya/batal untuk screenshot trade yang sudah dibaca (prioritas)
+    elif JOURNAL_MODULE and chat_id in _pending_shot:
+        _thread(handle_shot_confirm, text, chat_id).start()
+
     # v11: Journal wizard intercept (harus di atas free-form)
     elif JOURNAL_MODULE and is_in_wizard(chat_id):
         _thread(handle_journal_wizard_message, text, chat_id).start()
@@ -8063,6 +8521,17 @@ def process_update(update: dict):
     elif len(text.split()) == 1 and text.upper().replace("USDT", "") in TICKER_TO_BINANCE:
         _thread(handle_analyze_command, text.strip(), chat_id).start()
 
+    # Command tak dikenal (diawali "/") → jangan lempar ke AI, kasih saran command terdekat
+    elif text_lower.startswith("/"):
+        cmd = text_lower.split()[0]
+        suggestion = _suggest_command(cmd)
+        hint = f"\n\n💡 Maksud kamu <code>{suggestion}</code>?" if suggestion else ""
+        send_telegram(
+            f"❓ Command <code>{cmd}</code> tidak dikenal.{hint}\n\n"
+            "Ketik /help buat lihat daftar command.",
+            chat_id,
+        )
+
     # v15: Lanjutan diskusi aktif (tanpa reply, dalam window) → diskusi
     elif SIGNAL_CHAT_MODULE and signal_chat.is_discussion_active(chat_id):
         _thread(signal_chat.handle_followup, text, chat_id, _signal_chat_ai, send_telegram).start()
@@ -8088,7 +8557,12 @@ def polling_loop():
         try:
             updates = get_telegram_updates()
             for update in updates:
-                process_update(update)
+                # Isolasi per-update: satu update error tidak boleh nge-skip
+                # update lain di batch, dan errornya harus kelihatan (traceback).
+                try:
+                    process_update(update)
+                except Exception as e:
+                    log.error(f"process_update error: {e}", exc_info=True)
         except Exception as e:
             log.warning(f"Polling loop error: {e}")
             time.sleep(5)
@@ -8266,7 +8740,6 @@ def _build_gated_signal_message(
 
     entry_mode = trade.get("entry_mode", "")
     tp1_r = trade.get("tp1_r", 0)
-    tp2_r = trade.get("tp2_r", 0)
     conf_emoji = "🔥" if confidence == "HIGH" else "✅" if confidence == "MEDIUM" else "🟡"
 
     def _f(v):
@@ -8275,173 +8748,120 @@ def _build_gated_signal_message(
         elif v >= 1:  return f"${v:.4f}"
         else:         return f"${v:.6f}"
 
-    def _pct(entry, target):
-        if not entry or not target: return ""
-        return f"({abs(target-entry)/entry*100:.1f}%)"
-
     if alert_type == "SETUP":
-        header_title = "🚦 <b>SIGNAL SETUP TERDETEKSI</b>"
-        header_sub   = "<i>Semua gate lolos — setup sedang forming</i>"
+        header_title = "🚦 <b>SETUP TERDETEKSI</b>"
     else:
-        header_title = "🚨 <b>ENTRY NOW — PRICE DI ZONA!</b>"
-        header_sub   = "<i>Price masuk confirmation zone — cek candle konfirmasi</i>"
+        header_title = "🚨 <b>ENTRY NOW — PRICE DI ZONA</b>"
+
+    is_long = "LONG" in direction or "PUMP" in direction
+    _prof   = trade.get("tp_profile", "")
+    rr_val  = trade.get("rr", tp1_r) or tp1_r or 0
+    rr_ok   = "✅" if (tp1_r or 0) >= 2.0 else "⚠️"
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{conf_emoji} {header_title}",
+        f"{conf_emoji} {header_title} — {sym}",
         f"🕐 {ts}",
-        f"{header_sub}",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"💎 <b>{sym}</b>  {dir_emoji} <b>{dir_label}</b>",
-        f"💰 Harga   : <code>{_f(price)}</code>",
-        f"🎯 Score   : <b>{master_score}/100</b> — Confidence: <b>{confidence}</b>",
+        f"{dir_emoji} <b>{dir_label}</b>  |  🎯 <b>{master_score}/100</b> ({confidence})",
+        f"💰 Harga {_f(price)}  |  📐 R:R {rr_val:.1f}:1 {rr_ok}"
+        + (f"  |  🎚️ {_prof}" if _prof else ""),
         "",
-        "─── TRADE PLAN ───",
     ]
 
+    # ── ACTION: apa yang harus dilakukan (angka entry/SL/TP ada di Market Update) ──
     if entry_mode == "SNIPER_ENTRY":
-        lines.append(f"🎯 <b>SNIPER ENTRY</b> — Price di zone + candle confirmed!")
-        for ctx in trade.get("momentum_context", [])[:2]:
+        lines.append("🎯 <b>SNIPER ENTRY</b> — price di zone + candle confirmed")
+        for ctx in trade.get("momentum_context", [])[:1]:
             lines.append(f"   ↳ {ctx}")
-        lines.append(f"⚡ Entry  : <code>{_f(trade.get('entry', price))}</code> ← SEKARANG")
-        lines.append(f"   SL ketat: 1x ATR di bawah zone bottom")
     elif entry_mode == "MOMENTUM_NOW":
-        lines.append(f"🚀 <b>ENTRY NOW</b> — Momentum confirmed")
-        for ctx in trade.get("momentum_context", [])[:2]:
+        lines.append("🚀 <b>ENTRY NOW</b> — momentum confirmed")
+        for ctx in trade.get("momentum_context", [])[:1]:
             lines.append(f"   ↳ {ctx}")
-        lines.append(f"⚡ Entry  : <code>{_f(trade.get('entry', price))}</code> ← MARKET")
     else:
         cz = trade.get("confirmation_zone", {})
         if alert_type == "ENTRY_NOW":
-            lines.append(f"🎯 <b>PRICE DI ZONA!</b> {_fmt_zone(cz.get('bottom',0), cz.get('top',0))}")
-            lines.append(f"   Tunggu candle 15M close konfirmasi lalu entry")
+            lines.append("🎯 <b>PRICE DI ZONA</b> — tunggu candle 15M close konfirmasi")
         else:
-            lines.append(f"⏳ <b>TUNGGU RETEST</b> ke zona: <b>{_fmt_zone(cz.get('bottom',0), cz.get('top',0))}</b>")
-            lines.append(f"   Sumber zone: {cz.get('source','?')}")
-        lines.append(f"🎯 Entry  : <code>{_f(trade.get('entry', price))}</code> ← LIMIT")
-        # v14: tunjukkan candle pattern spesifik dari 15M kalau ada
-        # FIX: hanya pakai candle 15M sebagai konfirmasi kalau arahnya SEARAH dgn trade.
-        # Kalau setup SHORT tapi 15M malah bullish engulfing, itu BUKAN konfirmasi —
-        # tampilkan candle yang DIHARAPKAN di retest, bukan candle kontra yang misleading.
-        is_long  = "LONG" in direction or "PUMP" in direction
+            lines.append(f"⏳ <b>TUNGGU RETEST</b> — zona {cz.get('source', 'key level')}")
         want_dir = "BULLISH" if is_long else "BEARISH"
         cp15     = tf_15m.get("candle_patterns", {})
         if cp15.get("pattern") not in (None, "NONE") and cp15.get("direction") == want_dir:
-            lines.append(f"✅ Konfirmasi: {cp15['detail']} + vol ≥1.5x")
+            lines.append(f"   ✅ Konfirmasi: {cp15['detail']}")
         else:
             conf_word = "bullish engulfing/pin bar 15M" if is_long else "bearish engulfing/pin bar 15M"
-            lines.append(f"⏳ Konfirmasi (ditunggu): {conf_word} + vol ≥1.5x")
+            lines.append(f"   ⏳ Tunggu: {conf_word} + vol ≥1.5x")
 
-    lines.append(f"🔴 SL     : <code>{_f(trade.get('sl'))}</code>  {_pct(trade.get('entry', price), trade.get('sl'))}")
+    # ── ANALISA: alasan inti saja (regime, candle kunci, money flow, OI, risiko) ──
+    analysis = []
 
-    # TP bertahap (ladder) — pilih sendiri seberapa agresif exit-nya.
-    _prof = trade.get("tp_profile", "")
-    _ladder = trade.get("tps") or []
-    if _ladder:
-        _n = len(_ladder)
-        for _rg in _ladder:
-            _lvl = _rg.get("level", 0)
-            _tag = " | close 50%" if _lvl == 1 else (" | runner" if _lvl == _n else "")
-            _emoji = "🟡" if _lvl == 1 else "🟢"
-            lines.append(
-                f"{_emoji} TP{_lvl}    : <code>{_f(_rg.get('price'))}</code>  "
-                f"{_rg.get('pct', 0):+.1f}%  ({_rg.get('r', 0)}R){_tag}"
-            )
-    else:
-        lines.append(f"🟡 TP1    : <code>{_f(trade.get('tp1'))}</code>  {_pct(trade.get('entry', price), trade.get('tp1'))}  ({tp1_r}R) | close 50%")
-        lines.append(f"🟢 TP2    : <code>{_f(trade.get('tp2'))}</code>  {_pct(trade.get('entry', price), trade.get('tp2'))}  ({tp2_r}R) | runner")
-
-    lines += [
-        f"📐 R:R    : <b>{trade.get('rr', tp1_r):.1f}:1</b>  {'✅' if tp1_r >= 2.0 else '⚠️ &lt;2R'}"
-        + (f"  | 🎚️ {_prof}" if _prof else ""),
-        "",
-        "─── GATE SUMMARY ───",
-    ]
-
-    for r in gate_reasons:
-        lines.append(f"  ✅ {r}")
-
-    # ── v14: MARKET STRUCTURE SECTION ─────────────────────────
-    # Regime + Candle Pattern + Entry Zone Quality
-    _regime      = confluence.get("regime") or tf_4h.get("market_regime", {}).get("regime", "")
-    _cp15        = tf_15m.get("candle_patterns", {})
-    _cp1h        = tf_1h.get("candle_patterns", {})
-    _sb          = tf_1h.get("sudden_breakout", {}) or tf_4h.get("sudden_breakout", {})
-    _vc          = tf_1h.get("volume_coil", {})
-    _bb_sq       = tf_4h.get("bb_squeeze", {})
-    _ext         = confluence.get("entry_extended", False)
-    _near_zone   = confluence.get("nearest_zone_pct")
-    _adx         = tf_4h.get("market_regime", {}).get("adx", 0) or tf_4h.get("adx", 0)
-
+    _regime = confluence.get("regime") or tf_4h.get("market_regime", {}).get("regime", "")
+    _adx    = tf_4h.get("market_regime", {}).get("adx", 0) or tf_4h.get("adx", 0)
     _regime_emoji = {
         "BULLISH_TREND": "📈", "BEARISH_TREND": "📉",
         "BB_SQUEEZE": "🔵", "RANGING": "↔️",
         "BREAKOUT_UP": "🚀", "BREAKOUT_DOWN": "🔻",
         "VOLATILE": "⚡", "WEAK_TREND": "〰️",
-    }.get(_regime, "❓")
-
-    struct_lines = []
-
+    }.get(_regime, "")
     if _regime and _regime != "UNKNOWN":
-        adx_str = f" | ADX {_adx:.0f}" if _adx else ""
-        struct_lines.append(f"  {_regime_emoji} Regime   : <b>{_regime}</b>{adx_str}")
+        adx_str = f" (ADX {_adx:.0f})" if _adx else ""
+        analysis.append(f"  {_regime_emoji} Regime {_regime}{adx_str}")
 
-    # Candle pattern 15M
+    # Candle kunci 15M — driver timing utama
+    _cp15 = tf_15m.get("candle_patterns", {})
     if _cp15.get("pattern") not in (None, "NONE"):
-        pat_emoji = "🟢" if _cp15.get("direction") == "BULLISH" else "🔴" if _cp15.get("direction") == "BEARISH" else "⚪"
-        struct_lines.append(f"  {pat_emoji} 15M Candle: <b>{_cp15['pattern']}</b> — {_cp15['detail']}")
-    # Candle pattern 1H (secondary)
-    if _cp1h.get("pattern") not in (None, "NONE"):
-        pat_emoji1 = "🟢" if _cp1h.get("direction") == "BULLISH" else "🔴" if _cp1h.get("direction") == "BEARISH" else "⚪"
-        struct_lines.append(f"  {pat_emoji1} 1H Candle : {_cp1h['pattern']}")
+        pe = ("🟢" if _cp15.get("direction") == "BULLISH" else
+              "🔴" if _cp15.get("direction") == "BEARISH" else "⚪")
+        analysis.append(f"  {pe} 15M {_cp15['pattern']} — {_cp15['detail']}")
 
-    # BB Squeeze
-    if _bb_sq.get("squeeze"):
-        sq_bars = _bb_sq.get("squeeze_bars", 0)
-        struct_lines.append(f"  🔵 BB Squeeze: {sq_bars} bar — coiling sebelum breakout")
+    # Money flow — ringkas (maks 2 baris; konflik antar-TF kelihatan di sini)
+    for r in mf_reasons[:2]:
+        analysis.append(f"  {r}")
 
-    # Volume coil
-    if _vc.get("coiling") and _vc.get("spike_detected"):
-        struct_lines.append(f"  🌊 Vol Coil: spring release {_vc.get('vol_ratio',1):.1f}x — momentum akselerasi")
-    elif _vc.get("coiling"):
-        struct_lines.append(f"  🔍 Vol Coil: {_vc.get('compression_bars',0)} bar declining — akumulasi silent")
-
-    # Sudden breakout
-    if _sb.get("sudden_breakout"):
-        sb_dir = "🚀" if _sb.get("direction") == "UP" else "🔻"
-        struct_lines.append(f"  {sb_dir} Sudden Breakout: vol {_sb.get('vol_spike',1):.1f}x, +{_sb.get('range_break_pct',0):.1f}%")
-
-    # Entry zone quality
-    if _ext:
-        struct_lines.append(f"  ⚠️ Entry Extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
-    elif _near_zone is not None and _near_zone <= 1.0:
-        struct_lines.append(f"  🎯 Sniper Zone: {_near_zone:.1f}% dari key level — presisi tinggi")
-
-    if struct_lines:
-        lines.append("")
-        lines.append("─── MARKET STRUCTURE ───")
-        lines.extend(struct_lines)
-
-    # Money flow summary
-    if mf_reasons:
-        lines.append("")
-        lines.append("─── MONEY FLOW ───")
-        for r in mf_reasons[:3]:
-            lines.append(f"  {r}")
-
-    # OI context
-    fr  = oi_data.get("funding_rate")
+    # OI / funding / L/S — gabung 1 baris
+    fr   = oi_data.get("funding_rate")
     oi_c = oi_data.get("oi_change_pct")
     ls   = oi_data.get("ls_ratio")
-    if fr is not None or oi_c is not None:
-        lines.append("")
-        lines.append("─── MARKET CONTEXT ───")
-        if fr  is not None: lines.append(f"  Funding : {fr:+.3f}%")
-        if oi_c is not None: lines.append(f"  OI      : {oi_c:+.1f}%")
-        if ls   is not None: lines.append(f"  L/S     : {ls:.2f} ({oi_data.get('ls_bias','?')})")
+    oi_bits = []
+    if fr   is not None: oi_bits.append(f"Funding {fr:+.3f}%")
+    if oi_c is not None: oi_bits.append(f"OI {oi_c:+.1f}%")
+    if ls   is not None: oi_bits.append(f"L/S {ls:.2f}")
+    if oi_bits:
+        analysis.append("  💹 " + " | ".join(oi_bits))
 
-    # Market regime context (Fear&Greed + BTC Regime + Breadth)
+    # Risiko entry: warning kalau harga sudah jauh dari zone
+    _ext       = confluence.get("entry_extended", False)
+    _near_zone = confluence.get("nearest_zone_pct")
+    if _ext and _near_zone is not None:
+        analysis.append(f"  ⚠️ Entry extended {_near_zone:.1f}% dari zone — risiko SL lebih tinggi")
+
+    if analysis:
+        lines.append("")
+        lines.append("─── ANALISA ───")
+        lines.extend(analysis)
+
+    # Whale — 1 baris bias saja (align / berlawanan)
+    try:
+        import whale_tracker as _wt
+        _coin_ticker = symbol.replace("USDT", "").replace("UST", "")
+        wctx = _wt.get_whale_context_for_coin(_coin_ticker)
+        whale_bias = wctx.get("whale_bias", "NEUTRAL")
+        has_data = (
+            wctx.get("whale_long_vol", 0) + wctx.get("whale_short_vol", 0) > 0 or
+            wctx.get("wallet_long_count", 0) + wctx.get("wallet_short_count", 0) > 0
+        )
+        if has_data and whale_bias != "NEUTRAL":
+            against = (is_long and whale_bias == "BEARISH") or (not is_long and whale_bias == "BULLISH")
+            be  = "🟢" if whale_bias == "BULLISH" else "🔴"
+            tag = "⚠️ berlawanan" if against else "✅ align"
+            lines.append(f"  🐋 Whale {be} {whale_bias} {tag}")
+    except ImportError:
+        pass
+    except Exception as _e:
+        log.debug(f"Whale inject error: {_e}")
+
+    # Konteks market global (F&G + BTC regime + breadth) — 1 baris compact
     if MARKET_CONTEXT_MODULE:
         try:
             _ctx = get_market_context()
@@ -8450,49 +8870,7 @@ def _build_gated_signal_message(
         except Exception:
             pass
 
-    # ─── WHALE CONFLUENCE ───
-    try:
-        import whale_tracker as _wt
-        _coin_ticker = symbol.replace("USDT", "").replace("UST", "")
-        wctx      = _wt.get_whale_context_for_coin(_coin_ticker)
-        whale_bias = wctx.get("whale_bias", "NEUTRAL")
-
-        has_data = (
-            wctx.get("whale_long_vol", 0) + wctx.get("whale_short_vol", 0) > 0 or
-            wctx.get("wallet_long_count", 0) + wctx.get("wallet_short_count", 0) > 0
-        )
-
-        if has_data:
-            long_signal   = direction in ("LONG", "PUMP")
-            whale_aligns  = (long_signal and whale_bias == "BULLISH") or (not long_signal and whale_bias == "BEARISH")
-            whale_against = (long_signal and whale_bias == "BEARISH") or (not long_signal and whale_bias == "BULLISH")
-            bias_emoji    = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}.get(whale_bias, "⚪")
-
-            lines.append("")
-            lines.append("─── WHALE TRACKER ───")
-
-            if whale_aligns:
-                lines.append(f"  {bias_emoji} <b>{whale_bias}</b> ✅ — <i>align sama sinyal</i>")
-            elif whale_against:
-                lines.append(f"  {bias_emoji} <b>{whale_bias}</b> ⚠️ — <i>berlawanan, hati-hati</i>")
-            else:
-                lines.append(f"  {bias_emoji} <b>NEUTRAL</b>")
-
-            wl_vol = wctx.get("whale_long_vol", 0)
-            ws_vol = wctx.get("whale_short_vol", 0)
-            wl_cnt = wctx.get("wallet_long_count", 0)
-            ws_cnt = wctx.get("wallet_short_count", 0)
-            if wl_vol > 0 or ws_vol > 0:
-                lines.append(f"  Trades : 🟢 {_wt.fmt_usd(wl_vol)} buy  🔴 {_wt.fmt_usd(ws_vol)} sell")
-            if wl_cnt > 0 or ws_cnt > 0:
-                lines.append(f"  Wallets: {wl_cnt}L / {ws_cnt}S")
-
-    except ImportError:
-        pass
-    except Exception as _e:
-        log.debug(f"Whale inject error: {_e}")
-
-    # ─── PERSONAL TRADE PLAN (hanya muncul kalau user sudah /setbalance) ───
+    # Personal trade plan (hanya kalau user /setbalance) — position sizing/risk $
     if RISK_MODULE:
         try:
             entry_val = float(trade.get("entry") or price)
@@ -8512,6 +8890,7 @@ def _build_gated_signal_message(
             log.debug(f"Personal trade plan error: {_pe}")
 
     lines.append("")
+    lines.append("📊 <i>Entry / SL / TP lengkap → cek Market Update</i>")
     lines.append("<i>⚠️ Not financial advice. DYOR.</i>")
     return "\n".join(lines)
 
@@ -8996,6 +9375,8 @@ def run_gated_scan():
                             score           = raw_master,
                             confluence_level= conf_level,
                             reasons         = gate_reasons[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ GATED_SIGNAL sanity fail {analysis_sym}: dir={_bt_dir} entry={_entry_val} tp={_tp_val}")
@@ -9293,6 +9674,8 @@ def run_scan(manual: bool = False, chat_id: str = None):
                     score           = score,
                     confluence_level= conf_level,
                     reasons         = conf.get("reasons", [])[:3],
+                    entry_mode      = trade.get("entry_mode", ""),
+                    tps             = trade.get("tps"),
                 )
             except Exception as e:
                 log.debug(f"Signal tracker record error {coin_data.get('symbol','')}: {e}")
@@ -9364,6 +9747,8 @@ def run_prepump_auto():
                             score           = c["total_score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ PREPUMP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -9427,6 +9812,8 @@ def run_predump_auto():
                             score           = c["total_score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ PREDUMP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -9488,6 +9875,8 @@ def run_scalp_auto():
                             score           = c["score"],
                             confluence_level= c.get("label", ""),
                             reasons         = c.get("reasons", [])[:3],
+                            entry_mode      = trade.get("entry_mode", ""),
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ SCALP sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -9731,6 +10120,7 @@ def run_reversal_auto():
                         entry_price=entry_val, tp=float(tp), sl=float(sl),
                         score=c.get("score", 0), confluence_level=c.get("label", ""),
                         reasons=c.get("reasons", [])[:3], strategy="REVERSAL",
+                        entry_mode=trade.get("entry_mode", ""), tps=trade.get("tps"),
                     )
                 else:
                     log.warning(f"⚠️ REVERSAL sanity fail {c.get('symbol','')}: entry={entry_val} tp={tp}")
@@ -10016,7 +10406,11 @@ if __name__ == "__main__":
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Modules: Regime {_regime_status} | Risk {_risk_status} | "
         f"News {_news_status} | Liq {_liq_status_str} | Memory {_mem_status}\n"
-        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n\n"
+        f"⏱ Auto scan: tiap {SCAN_INTERVAL_MINUTES}m | Pre-pump/dump: tiap {PREPUMP_SCAN_INTERVAL}m\n"
+        f"📡 Social scan: tiap {SOCIAL_SCAN_INTERVAL}m → topic News\n"
+        f"📰 News agent: tiap 60m → topic News\n"
+        f"🐋 Whale tracker → topic Whale Report\n"
+        f"🎯 Market Update: hanya rangkuman signal entry\n\n"
         "Ketik /help untuk list command lengkap."
     )
     try:
@@ -10034,7 +10428,7 @@ if __name__ == "__main__":
     # Whale Tracker (opsional)
     try:
         import whale_tracker
-        whale_tracker.init(telegram_fn=send_market_update)
+        whale_tracker.init(telegram_fn=send_whale_report)
         log.info("🐳 Whale Tracker: LargeTradeMonitor + WalletMonitor RUNNING")
     except ImportError:
         log.warning("⚠️ whale_tracker.py tidak ditemukan — whale tracking disabled")
@@ -10086,26 +10480,44 @@ if __name__ == "__main__":
     if TRACKER_MODULE:
         scheduler.add_job(take_lesson_snapshot, "interval", hours=12, id="lesson_snapshot_12h")
 
+    # Social Scan: Reddit + HackerNews sentiment tiap 30 menit
+    # Update social_intelligence.json cache — dipakai oleh social gate di confirmed_signal
+    # Kirim Telegram spike alert kalau ada coin dengan engagement tinggi + sentimen kuat
+    if SOCIAL_MODULE:
+        scheduler.add_job(
+            run_social_scan_scheduled,
+            "interval", minutes=SOCIAL_SCAN_INTERVAL,
+            id="social_scan",
+            jitter=60,
+        )
+        threading.Thread(
+            target=run_social_scan_scheduled,
+            daemon=True,
+            name="social_scan_startup",
+        ).start()
+        log.info(f"📡 Social Scan aktif: Reddit+HN tiap {SOCIAL_SCAN_INTERVAL}m (+ startup)")
+
     # News Agent: hourly fetch — update news_intelligence.json setiap jam
-    # Kirim Telegram alert otomatis (high-urgency events) ke Market Update room
+    # Kirim Telegram alert otomatis (high-urgency events) ke topic News
     if NEWS_AGENT_MODULE and NEWSAPI_KEY:
         scheduler.add_job(
-            lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            lambda: run_news_fetch(send_telegram_fn=send_news_update),
             "interval", minutes=60, id="news_agent_hourly",
             jitter=120,   # ± 2 menit random offset agar tidak collision
         )
         # Jalankan sekali saat startup (background agar tidak delay bot)
         threading.Thread(
-            target=lambda: run_news_fetch(send_telegram_fn=send_market_update),
+            target=lambda: run_news_fetch(send_telegram_fn=send_news_update),
             daemon=True, name="news_agent_startup",
         ).start()
-        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit)")
+        log.info("📰 News Agent: hourly fetch aktif (startup + tiap 60 menit → topic News)")
 
     log.info(
         f"⏱️ Schedulers: Scan={SCAN_INTERVAL_MINUTES}m | "
         f"PrePump/Dump/Scalp={PREPUMP_SCAN_INTERVAL}m | "
         f"Reversal={REVERSAL_SCAN_INTERVAL if REVERSAL_SCAN_ENABLED else 'off'}m | "
         f"MarketPulse={MARKET_PULSE_INTERVAL if MARKET_PULSE_ENABLED else 'off'}m | "
+        f"Social={SOCIAL_SCAN_INTERVAL if SOCIAL_MODULE else 'off'}m | "
         f"News Agent=60m | "
         f"Risk reset=00:00 UTC | Auto-btall=01:00 UTC | "
         f"Daily-learning=23:00 UTC | Lesson-snapshot=tiap 12j"

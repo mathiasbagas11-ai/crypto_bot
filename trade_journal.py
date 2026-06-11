@@ -596,7 +596,53 @@ def _save_state(s: dict):
         json.dump(s, f, indent=2)
 
 def get_current_balance() -> float:
+    """
+    Saldo sekarang. SOURCE OF TRUTH = Google Sheet (tahan restart/redeploy),
+    karena state lokal hilang tiap container Railway di-reclaim.
+    Saldo = Σ(INITIAL BALANCE) + Σ(semua PnL di Trades) — sama dgn formula dashboard.
+    Fallback ke state lokal kalau sheet tidak tersedia.
+    """
+    sheet_bal = _compute_balance_from_sheet()
+    if sheet_bal is not None:
+        # Self-heal state lokal biar konsisten dgn sheet
+        s = _load_state()
+        if s.get("current_balance") != sheet_bal:
+            s["current_balance"] = sheet_bal
+            _save_state(s)
+        return sheet_bal
     return _load_state().get("current_balance", 0.0)
+
+
+def _compute_balance_from_sheet(sheet=None):
+    """
+    Hitung saldo dari sheet: Σ(Balance After utk row INITIAL BALANCE) + Σ(PnL Trades).
+    Return float, atau None kalau sheet tidak bisa dibaca.
+    """
+    sheet = sheet or _get_sheet()
+    if not sheet:
+        return None
+    try:
+        brows = sheet.worksheet(SHEET_BALANCE).get_all_records()
+    except Exception as e:
+        log.warning(f"compute balance: baca Balance sheet gagal: {e}")
+        return None
+    init = 0.0
+    for r in brows:
+        if r.get("Event") == "INITIAL BALANCE":
+            try:
+                init += float(r.get("Balance After (USDT)", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    pnl_sum = 0.0
+    try:
+        for r in sheet.worksheet(SHEET_TRADES).get_all_records():
+            try:
+                pnl_sum += float(r.get("PnL (USDT)", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass  # belum ada sheet Trades / kosong
+    return round(init + pnl_sum, 2)
 
 def _now() -> str:
     wib = timezone(timedelta(hours=7))
@@ -617,17 +663,22 @@ def set_initial_balance(amount: float) -> str:
     except Exception: pass
     return f"✅ Saldo awal diset: <b>${amount:,.2f} USDT</b>"
 
-def _update_balance(pnl: float, note: str = ""):
+def _update_balance(pnl: float, note: str = "", _spreadsheet=None):
+    sheet = _spreadsheet or _get_sheet()
+    # Saldo baru dari sheet (sudah termasuk trade yg baru di-append di log_trade),
+    # bukan dari state lokal yg bisa reset ke 0 setelah redeploy.
+    new_bal = _compute_balance_from_sheet(sheet)
+    if new_bal is None:
+        new_bal = round(_load_state().get("current_balance", 0.0) + pnl, 2)
     s = _load_state()
-    s["current_balance"] = round(s["current_balance"] + pnl, 2)
+    s["current_balance"] = new_bal
     s["total_trades"]    = s.get("total_trades", 0) + 1
     _save_state(s)
-    sheet = _get_sheet()
     if sheet:
         ws = _ws(sheet, SHEET_BALANCE, BALANCE_HEADERS)
-        ws.append_row([_now(), "PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note], value_input_option="RAW")
+        ws.append_row([_now(), "PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), new_bal, note], value_input_option="RAW")
     try:
-        push_balance("PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), s["current_balance"], note)
+        push_balance("PROFIT" if pnl >= 0 else "LOSS", round(pnl, 2), new_bal, note)
     except Exception: pass
 
 def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, note="", image_url="") -> dict:
@@ -646,7 +697,7 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
             sheets_ok = True
         except Exception as e:
             log.error(f"Append error: {e}")
-    _update_balance(pnl_usdt, f"{coin} {direction} {result}")
+    _update_balance(pnl_usdt, f"{coin} {direction} {result}", _spreadsheet=sheet)
     result_dict = {"ts": ts, "coin": coin.upper().replace("USDT",""), "direction": direction.upper(),
                    "entry": entry_price, "margin": margin_usdt, "leverage": leverage,
                    "position_size": pos_size, "pnl_usdt": round(pnl_usdt, 2), "pnl_pct": pnl_pct,
@@ -656,6 +707,12 @@ def log_trade(coin, direction, entry_price, margin_usdt, leverage, pnl_usdt, not
         push_trade(result_dict)
     except Exception as e:
         log.warning(f"supabase push_trade error: {e}")
+    # Auto-lesson ke learning engine tiap trade (best-effort, jangan ganggu flow)
+    try:
+        import learning_engine
+        learning_engine.record_trade_journal_lesson(result_dict)
+    except Exception as e:
+        log.warning(f"auto-lesson dari trade gagal: {e}")
     return result_dict
 
 def format_trade_logged(t: dict) -> str:
@@ -914,3 +971,103 @@ def parse_oneliner(args: str):
                 "note": parts[6] if len(parts) > 6 else ""}, ""
     except Exception as e:
         return None, f"❌ Format salah: {e}"
+
+
+# ── Screenshot import (vision AI → trade) ───────────────────────────
+
+def _num(v):
+    """Parse angka dari string/number, buang koma/persen/USDT/spasi."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", "").replace("%", "")
+    s = s.replace("USDT", "").replace("usdt", "").strip()
+    # ambil token angka pertama (boleh minus / desimal)
+    import re as _re
+    m = _re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group()) if m else None
+
+
+def build_trade_from_screenshot(raw: dict) -> tuple:
+    """
+    Ubah field mentah hasil baca AI vision dari screenshot order-details
+    jadi trade dict siap-preview untuk log_trade().
+
+    raw diharapkan punya (sebagian boleh kosong):
+      coin, direction, leverage, entry_price, exit_price,
+      realized_pnl, roi_pct
+
+    Margin dihitung dari |pnl / roi| kalau tidak diberikan langsung.
+    Return (trade_dict, error_str). Kalau error_str != "" → gagal.
+    """
+    if not isinstance(raw, dict):
+        return None, "Data screenshot tidak terbaca."
+
+    coin = str(raw.get("coin", "")).upper().replace("USDT", "").replace("/", "").strip()
+    if not coin:
+        return None, "Coin tidak terbaca dari screenshot."
+
+    d = str(raw.get("direction", "")).upper().strip()
+    if d in ("LONG", "L", "BUY", "CLOSE LONG"):
+        direction = "LONG"
+    elif d in ("SHORT", "S", "SELL", "CLOSE SHORT"):
+        direction = "SHORT"
+    else:
+        return None, f"Arah trade tidak jelas (terbaca: '{raw.get('direction','')}')."
+
+    entry = _num(raw.get("entry_price"))
+    if entry is None or entry <= 0:
+        return None, "Entry price tidak terbaca."
+
+    pnl = _num(raw.get("realized_pnl"))
+    if pnl is None:
+        return None, "Realized PnL tidak terbaca."
+
+    leverage = _num(raw.get("leverage"))
+    leverage = int(leverage) if leverage and leverage >= 1 else 1
+
+    roi = _num(raw.get("roi_pct"))
+    margin = _num(raw.get("margin"))
+    if (margin is None or margin <= 0) and roi not in (None, 0):
+        margin = abs(pnl / (roi / 100.0))
+    if margin is None or margin <= 0:
+        return None, "Margin tidak bisa dihitung (ROI/margin tidak terbaca)."
+    margin = round(margin, 2)
+
+    exit_price = _num(raw.get("exit_price"))
+    note_bits = ["dari screenshot"]
+    if exit_price:
+        note_bits.append(f"exit {exit_price:g}")
+    if roi is not None:
+        note_bits.append(f"ROI {roi:+.2f}%")
+    note = " | ".join(note_bits)
+
+    return {
+        "coin": coin, "direction": direction, "entry": entry,
+        "margin": margin, "leverage": leverage, "pnl": round(pnl, 4),
+        "roi": roi, "exit": exit_price, "note": note,
+    }, ""
+
+
+def format_shot_preview(t: dict) -> str:
+    """Preview hasil baca screenshot sebelum user konfirmasi simpan."""
+    ed = "🟢" if t["direction"] == "LONG" else "🔴"
+    s  = "+" if t["pnl"] >= 0 else ""
+    roi_line = f"  📊 ROI       : <b>{t['roi']:+.2f}%</b>\n" if t.get("roi") is not None else ""
+    exit_line = f"  🚪 Exit      : ${t['exit']:g}\n" if t.get("exit") else ""
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📸 <b>BACA SCREENSHOT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"  🪙 Coin      : <b>{t['coin']}USDT</b>\n"
+        f"  {ed} Arah     : <b>{t['direction']}</b>\n"
+        f"  💵 Entry     : ${t['entry']:g}\n"
+        f"{exit_line}"
+        f"  ⚡ Leverage  : {t['leverage']}x\n"
+        f"  💰 Margin    : ${t['margin']:,.2f} USDT  <i>(auto)</i>\n"
+        f"  {'📈' if t['pnl'] >= 0 else '📉'} PnL      : <b>{s}{t['pnl']:.2f} USDT</b>\n"
+        f"{roi_line}"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Ketik <b>ya</b> untuk simpan  •  ❌ <b>batal</b> untuk batal"
+    )
