@@ -3153,6 +3153,117 @@ def detect_rsi_divergence(candles: list, lookback: int = 25, period: int = 14) -
 # PRE-PUMP DETECTOR
 # ─────────────────────────────────────────────
 
+def _price_volume_confluence(tf_1h: dict, tf_4h: dict, tf_15m: dict, direction: str) -> tuple:
+    """
+    Confluence MURNI dari price action + volume — TANPA data futures/OI.
+
+    Krusial: banyak pump/dump terjadi di alt kecil yang spot-only (belum/tidak
+    listing futures), sehingga funding/OI/L-S ratio kosong. Di kondisi itu skor
+    detektor lama mentok ~65 dan tak pernah lewat threshold. Helper ini jadi
+    tulang punggung skor yang OI-independent.
+
+    direction: "UP" (pre-pump) | "DOWN" (pre-dump). Return (score 0..70, reasons).
+
+    Indikator high-signal (riset-backed untuk deteksi pump/dump dini):
+      1. Relative Volume (RVOL)  — lonjakan volume vs rata-rata 20 bar
+      2. Momentum burst          — ROC 3-bar dinormalisasi ATR
+      3. EMA stack alignment     — kebersihan tren (price/9/21/50)
+      4. Range expansion beruntun— candle searah > ATR
+      5. Breakout 20-bar         — tembus high/low range
+      6. CVD / money flow        — arah tekanan order
+    """
+    is_up   = direction == "UP"
+    reasons = []
+    score   = 0
+    c1 = tf_1h.get("candles", []) or []
+    if len(c1) < 20:
+        return 0, reasons
+
+    closes = [c["close"] for c in c1]
+    vols   = [c.get("volume", 0) for c in c1]
+    price  = c1[-1]["close"]
+    atr    = tf_1h.get("atr", 0) or 0
+
+    # 1. Relative Volume (candle terakhir vs avg 20 bar sebelumnya)
+    avg_vol  = float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1] or [1]))
+    rvol     = (vols[-1] / avg_vol) if avg_vol > 0 else 1.0
+    last_bull = c1[-1]["close"] >= c1[-1]["open"]
+    dir_ok   = last_bull if is_up else (not last_bull)
+    if rvol >= 3.0 and dir_ok:
+        score += 18
+        reasons.append(f"🔊 RVOL {rvol:.1f}x rata-rata + candle {'bullish' if is_up else 'bearish'} — lonjakan volume ekstrem")
+    elif rvol >= 2.0 and dir_ok:
+        score += 12
+        reasons.append(f"🔊 RVOL {rvol:.1f}x — volume di atas normal searah")
+    elif rvol >= 1.5:
+        score += 6
+        reasons.append(f"  RVOL {rvol:.1f}x — volume mulai naik")
+
+    # 2. Momentum burst: ROC 3-bar dinormalisasi ATR
+    if atr > 0 and len(closes) >= 4:
+        roc_atr = (closes[-1] - closes[-4]) / atr
+        if is_up:
+            if roc_atr >= 2.0:
+                score += 15; reasons.append(f"⚡ Momentum burst: +{roc_atr:.1f} ATR / 3 candle — akselerasi naik")
+            elif roc_atr >= 1.2:
+                score += 9;  reasons.append(f"⚡ Momentum 1H: +{roc_atr:.1f} ATR — dorongan naik")
+            elif roc_atr >= 0.7:
+                score += 4
+        else:
+            if roc_atr <= -2.0:
+                score += 15; reasons.append(f"⚡ Momentum burst turun: {roc_atr:.1f} ATR / 3 candle — akselerasi jatuh")
+            elif roc_atr <= -1.2:
+                score += 9;  reasons.append(f"⚡ Momentum 1H: {roc_atr:.1f} ATR — dorongan turun")
+            elif roc_atr <= -0.7:
+                score += 4
+
+    # 3. EMA stack alignment
+    e9, e21, e50 = tf_1h.get("ema9", 0), tf_1h.get("ema21", 0), tf_1h.get("ema50", 0)
+    if e9 and e21 and e50:
+        if is_up and price > e9 > e21 > e50:
+            score += 12; reasons.append("📈 EMA stack bullish (price>9>21>50) — uptrend bersih")
+        elif is_up and price > e21 > e50:
+            score += 7;  reasons.append("📈 Price > EMA21 > EMA50 — bias naik")
+        elif (not is_up) and price < e9 < e21 < e50:
+            score += 12; reasons.append("📉 EMA stack bearish (price<9<21<50) — downtrend bersih")
+        elif (not is_up) and price < e21 < e50:
+            score += 7;  reasons.append("📉 Price < EMA21 < EMA50 — bias turun")
+
+    # 4. Range expansion beruntun (candle searah > 1.1x ATR)
+    if atr > 0:
+        last5 = c1[-5:]
+        exp = sum(1 for c in last5
+                  if ((c["close"] >= c["open"]) == is_up) and (c["high"] - c["low"]) > atr * 1.1)
+        if exp >= 3:
+            score += 8; reasons.append(f"🕯️ {exp}/5 candle ekspansi searah >1.1x ATR — dorongan kuat")
+        elif exp >= 2:
+            score += 4
+
+    # 5. Breakout / breakdown level 20-bar
+    if len(c1) >= 21:
+        prior = c1[-21:-1]
+        hi = max(c["high"] for c in prior)
+        lo = min(c["low"]  for c in prior)
+        if is_up and price > hi:
+            score += 9; reasons.append(f"🚀 Breakout: tembus high 20-bar ({hi:.6g}) — range expansion naik")
+        elif (not is_up) and price < lo:
+            score += 9; reasons.append(f"🔻 Breakdown: jebol low 20-bar ({lo:.6g}) — range expansion turun")
+
+    # 6. CVD / money flow direction
+    mf   = tf_1h.get("money_flow", {}) or {}
+    bias = mf.get("bias", "NEUTRAL")
+    strg = mf.get("strength", "WEAK")
+    cvdp = mf.get("cvd_pct", 0)
+    if is_up and bias == "INFLOW":
+        score += 8 if strg == "STRONG" else 4
+        reasons.append(f"💚 Money flow INFLOW ({strg}, CVD {cvdp:+.1f}%) — tekanan beli")
+    elif (not is_up) and bias == "OUTFLOW":
+        score += 8 if strg == "STRONG" else 4
+        reasons.append(f"❤️ Money flow OUTFLOW ({strg}, CVD {cvdp:+.1f}%) — tekanan jual")
+
+    return min(score, 70), reasons
+
+
 def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
                    tf_15m: dict = None) -> dict:
     """
@@ -3574,8 +3685,29 @@ def detect_prepump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict,
         _macro_suppressed = True
 
     # ── TOTAL SCORE & LABEL ──────────────────────
-    total = (result["funding_score"] + result["momentum_score"] +
-             result["oi_pa_score"] + result["early_warning_score"])
+    # Price/volume confluence sebagai tulang punggung OI-independent.
+    pv_score, pv_reasons = _price_volume_confluence(tf_1h, tf_4h, tf_15m, "UP")
+    result["pv_score"] = pv_score
+    oi_available = (
+        funding_rate is not None
+        or oi_data.get("oi_change_pct") is not None
+        or oi_data.get("ls_bias", "UNKNOWN") != "UNKNOWN"
+        or oi_data.get("top_ls_bias", "UNKNOWN") != "UNKNOWN"
+    )
+    core_total = (result["funding_score"] + result["momentum_score"] +
+                  result["oi_pa_score"] + result["early_warning_score"])
+    pa_total   = (result["momentum_score"] + result["early_warning_score"] + pv_score)
+
+    if oi_available:
+        total = max(core_total, pa_total)
+    else:
+        total = pa_total
+        result["reasons"].append(
+            "ℹ️ OI/funding futures N/A (spot-only) — skor dari price action + volume"
+        )
+    if pa_total >= core_total and pv_reasons:
+        result["reasons"].extend(pv_reasons)
+
     if _macro_suppressed:
         total = int(total * 0.80)  # reduce score 20% in macro risk-off environment
     result["total_score"] = min(total, 100)
@@ -4034,8 +4166,29 @@ def detect_predump(symbol: str, tf_1h: dict, tf_4h: dict, oi_data: dict) -> dict
         _macro_amplified = True
 
     # ── TOTAL SCORE & LABEL ──────────────────────
-    total = (result["funding_score"] + result["momentum_score"] +
-             result["oi_pa_score"] + result["early_warning_score"])
+    # Price/volume confluence sebagai tulang punggung OI-independent.
+    pv_score, pv_reasons = _price_volume_confluence(tf_1h, tf_4h, {}, "DOWN")
+    result["pv_score"] = pv_score
+    oi_available = (
+        funding_rate is not None
+        or oi_data.get("oi_change_pct") is not None
+        or oi_data.get("ls_bias", "UNKNOWN") != "UNKNOWN"
+        or oi_data.get("top_ls_bias", "UNKNOWN") != "UNKNOWN"
+    )
+    core_total = (result["funding_score"] + result["momentum_score"] +
+                  result["oi_pa_score"] + result["early_warning_score"])
+    pa_total   = (result["momentum_score"] + result["early_warning_score"] + pv_score)
+
+    if oi_available:
+        total = max(core_total, pa_total)
+    else:
+        total = pa_total
+        result["reasons"].append(
+            "ℹ️ OI/funding futures N/A (spot-only) — skor dari price action + volume"
+        )
+    if pa_total >= core_total and pv_reasons:
+        result["reasons"].extend(pv_reasons)
+
     if _macro_amplified:
         total = int(total * 1.10)  # boost 10% when macro confirms dump
     result["total_score"] = min(total, 100)
