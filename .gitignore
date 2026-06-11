@@ -19,3 +19,6 @@ trading_style.json
 
 # Social sentiment runtime cache (auto-generated, overwritten every 30m)
 social_intelligence.json
+
+# Majors session report runtime state (shift-alert dedup)
+majors_state.json
