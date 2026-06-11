@@ -214,6 +214,14 @@ except ImportError:
     TRACKER_MODULE = False
     logging.getLogger("v12").warning("signal_tracker.py tidak ditemukan — auto signal tracking dinonaktifkan")
 
+# ── Session Report (BTC/ETH/SOL per sesi + shift alert) ──
+try:
+    import session_report as session_rep
+    SESSION_REPORT_MODULE = True
+except ImportError:
+    SESSION_REPORT_MODULE = False
+    logging.getLogger("v12").warning("session_report.py tidak ditemukan — laporan sesi majors dinonaktifkan")
+
 # ── Manual Trade Manager ──────────────────────
 try:
     from trade_manager import (
@@ -344,6 +352,8 @@ MARKET_UPDATE_THREAD_ID = os.getenv("MARKET_UPDATE_THREAD_ID", "") or None
 TRADE_REPORT_THREAD_ID  = os.getenv("TRADE_REPORT_THREAD_ID", "")  or None
 NEWS_THREAD_ID          = os.getenv("NEWS_THREAD_ID", "")          or None  # news agent + social spikes
 WHALE_THREAD_ID         = os.getenv("WHALE_THREAD_ID", "")         or None  # whale tracker
+NEW_SIGNAL_THREAD_ID    = os.getenv("NEW_SIGNAL_THREAD_ID", "")    or None  # deteksi sinyal baru (gated/prepump/predump/scalp/reversal)
+MAJORS_THREAD_ID        = os.getenv("MAJORS_THREAD_ID", "")        or None  # update BTC/ETH/SOL per sesi + shift alert
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -5435,8 +5445,32 @@ def send_telegram(message: str, chat_id: str = None, parse_mode: str = None,
 # ─────────────────────────────────────────────
 
 def send_signal(message: str, parse_mode: str = None):
-    """Kirim sinyal ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau thread belum diset."""
+    """Kirim sinyal ke topic Signal (SIGNAL_THREAD_ID). Fallback ke General kalau thread belum diset.
+
+    Topic ini KHUSUS eksekusi entry: ENTRY_NOW (retest kena) + heartbeat.
+    Deteksi sinyal baru → send_new_signal.
+    """
     return send_telegram(message, thread_id=SIGNAL_THREAD_ID, parse_mode=parse_mode)
+
+
+def send_new_signal(message: str, parse_mode: str = None):
+    """Kirim DETEKSI sinyal baru ke topic Sinyal Baru (NEW_SIGNAL_THREAD_ID).
+
+    Isi: SETUP TERDETEKSI (gated), prepump, predump, scalp, reversal — semua
+    saat pertama terdeteksi. Terpisah dari topic Signal (eksekusi entry) dan
+    Market Update. Fallback ke SIGNAL_THREAD_ID kalau belum diset.
+    """
+    tid = NEW_SIGNAL_THREAD_ID or SIGNAL_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
+
+
+def send_majors_update(message: str, parse_mode: str = None):
+    """Kirim update BTC/ETH/SOL per sesi + shift alert ke topic Majors (MAJORS_THREAD_ID).
+
+    Fallback ke Market Update kalau MAJORS_THREAD_ID belum diset.
+    """
+    tid = MAJORS_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
 
 
 def send_market_update(message: str, parse_mode: str = None):
@@ -7813,8 +7847,10 @@ def handle_help_command(chat_id: str):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📌 *TOPIC ROUTING (set di .env)*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "`SIGNAL_THREAD_ID` → 🎯 sinyal entry LONG/SHORT\n"
-        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse\n"
+        "`SIGNAL_THREAD_ID` → 🎯 entry execution (ENTRY_NOW retest) + heartbeat\n"
+        "`NEW_SIGNAL_THREAD_ID` → 🆕 deteksi sinyal baru (setup/prepump/predump/scalp/reversal)\n"
+        "`MAJORS_THREAD_ID` → 🌏 update BTC/ETH/SOL per sesi + shift alert\n"
+        "`MARKET_UPDATE_THREAD_ID` → 📊 rangkuman scan, bias flip, market pulse, lifecycle TP/SL\n"
         "`NEWS_THREAD_ID` → 📰 news agent + social sentiment spike\n"
         "`WHALE_THREAD_ID` → 🐋 whale tracker on-chain alerts\n"
         "`TRADE_REPORT_THREAD_ID` → 📋 trade journal & outcome\n"
@@ -8445,6 +8481,13 @@ def process_update(update: dict):
         send_telegram("📡 Manual scan dimulai... ⏳", chat_id)
         _thread(lambda: run_scan(manual=True, chat_id=chat_id)).start()
 
+    elif text_lower.startswith("/majors") or text_lower.startswith("/sesi"):
+        if SESSION_REPORT_MODULE:
+            send_telegram("🌏 Menyusun update BTC/ETH/SOL... ⏳", chat_id)
+            _thread(run_session_report).start()
+        else:
+            send_telegram("⚠️ session_report.py tidak tersedia.", chat_id)
+
     elif text_lower.startswith("/status"):
         handle_status_command(chat_id)
 
@@ -8482,6 +8525,8 @@ def process_update(update: dict):
             f"<code>WHALE_THREAD_ID={tid_display}</code>\n\n"
             f"<b>Topic IDs yang sudah diset:</b>\n"
             f"SIGNAL_THREAD_ID        = <code>{SIGNAL_THREAD_ID or 'belum diset'}</code>\n"
+            f"NEW_SIGNAL_THREAD_ID    = <code>{NEW_SIGNAL_THREAD_ID or 'belum diset'}</code>\n"
+            f"MAJORS_THREAD_ID        = <code>{MAJORS_THREAD_ID or 'belum diset'}</code>\n"
             f"MARKET_UPDATE_THREAD_ID = <code>{MARKET_UPDATE_THREAD_ID or 'belum diset'}</code>\n"
             f"NEWS_THREAD_ID          = <code>{NEWS_THREAD_ID or 'belum diset'}</code>\n"
             f"WHALE_THREAD_ID         = <code>{WHALE_THREAD_ID or 'belum diset'}</code>\n"
@@ -9311,7 +9356,7 @@ def run_gated_scan():
                 continue
             _scan_sent_syms.add(analysis_sym)
 
-            send_signal(msg)
+            send_new_signal(msg)
             _gate_mark_sent(analysis_sym, state, direction=_signal_direction)
             signals_sent += 1
             log.info(f"🚀 SIGNAL SENT: {analysis_sym} {_signal_direction} score={raw_master}")
@@ -9724,7 +9769,7 @@ def run_prepump_auto():
             log.info("Pre-pump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_prepump_message(hot)
-        send_signal(msg)
+        send_new_signal(msg)
 
         # ── v12: Track sinyal prepump ke signal tracker ──
         if TRACKER_MODULE:
@@ -9789,7 +9834,7 @@ def run_predump_auto():
             log.info("Pre-dump: semua kandidat di-SKIP oleh DeepSeek AI")
             return
         msg = build_predump_message(hot)
-        send_signal(msg)
+        send_new_signal(msg)
 
         # ── v12: Track sinyal predump ke signal tracker ──
         if TRACKER_MODULE:
@@ -9848,7 +9893,7 @@ def run_scalp_auto():
 
     if hot:
         msg = build_scalp_message(hot)
-        send_signal(msg)
+        send_new_signal(msg)
 
         # Track sinyal scalp ke signal tracker
         if TRACKER_MODULE:
@@ -10090,8 +10135,8 @@ def run_reversal_auto():
         return
     final.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Kirim DETAIL ke Signal thread + SINGKAT ke Market Update thread
-    send_signal(build_reversal_message(final))
+    # Kirim DETAIL ke topic Sinyal Baru + SINGKAT ke Market Update thread
+    send_new_signal(build_reversal_message(final))
     brief = build_reversal_mu_brief(final)
     if brief:
         send_market_update(brief)
@@ -10347,6 +10392,175 @@ def run_market_pulse():
 
 
 # ─────────────────────────────────────────────
+# SESSION REPORT — BTC / ETH / SOL (per sesi + shift alert)
+# ─────────────────────────────────────────────
+
+_MAJORS         = [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT"), ("SOL", "SOLUSDT")]
+_MAJORS_STATE_F = "majors_state.json"
+# Threshold pergerakan tajam (% over interval) per koin → trigger shift alert
+_MAJORS_MOVE_THRESH   = {"BTC": 1.5, "ETH": 2.0, "SOL": 2.5}
+_MAJORS_SHIFT_COOLDOWN_MIN = 45   # jangan spam alert koin sama < 45 menit
+
+
+def _majors_snapshot(name: str, sym: str) -> dict:
+    """Compute snapshot analisa 1 major (4H regime + 1H momentum/CVD/level)."""
+    tf_4h = analyze_timeframe(sym, "4h")
+    tf_1h = analyze_timeframe(sym, "1h")
+    if tf_1h.get("error") or tf_4h.get("error"):
+        return None
+
+    price  = tf_1h.get("price") or tf_4h.get("price") or 0
+    mr     = tf_4h.get("market_regime", {})
+    regime = mr.get("regime", "—") if isinstance(mr, dict) else "—"
+    trend  = tf_4h.get("structure", {}).get("trend", "")
+    mf     = tf_1h.get("money_flow", {}) or {}
+    bias_mf = mf.get("bias", "NEUTRAL")
+    cvd_dir = "BUY" if bias_mf == "INFLOW" else "SELL" if bias_mf == "OUTFLOW" else "FLAT"
+
+    candles = tf_1h.get("candles", []) or []
+    chg = 0.0
+    if len(candles) >= 8 and candles[-8].get("close"):
+        chg = (price - candles[-8]["close"]) / candles[-8]["close"] * 100
+    recent  = candles[-24:] if candles else []
+    key_sup = min((c["low"] for c in recent), default=None)
+    key_res = max((c["high"] for c in recent), default=None)
+
+    return {
+        "name": name, "price": price, "chg_pct": chg,
+        "trend": trend, "regime": regime,
+        "adx": tf_4h.get("adx", 0), "rsi": tf_1h.get("rsi", 50),
+        "ema21": tf_1h.get("ema21", 0), "ema50": tf_1h.get("ema50", 0),
+        "cvd_dir": cvd_dir, "cvd_pct": mf.get("cvd_pct", 0),
+        "key_sup": key_sup, "key_res": key_res,
+    }
+
+
+def _majors_news_note() -> str:
+    """Headline/event berdampak tinggi dari cache news (BTC/macro), best-effort."""
+    if not NEWS_AGENT_MODULE:
+        return ""
+    try:
+        intel = get_cached_news("BTC", max_age_seconds=7200)
+        if not intel:
+            return ""
+        events = intel.get("high_impact_events", []) or []
+        heads  = intel.get("headlines", []) or []
+        urg    = intel.get("urgency", "LOW")
+        if events:
+            return f"[{urg}] " + str(events[0])[:140]
+        if urg in ("HIGH", "CRITICAL") and heads:
+            return f"[{urg}] " + str(heads[0])[:140]
+    except Exception as e:
+        log.debug(f"majors news note error: {e}")
+    return ""
+
+
+def run_session_report(ended_session: str = None):
+    """Laporan akhir sesi BTC/ETH/SOL + outlook sesi berikutnya → topic Majors."""
+    if not SESSION_REPORT_MODULE:
+        return
+    now = datetime.now(timezone.utc)
+    ended = ended_session or session_rep.session_just_ended(now.hour) \
+            or session_rep.active_session(now.hour)
+    log.info(f"🌏 Session report triggered — tutup sesi {ended}")
+
+    coins = []
+    for name, sym in _MAJORS:
+        try:
+            snap = _majors_snapshot(name, sym)
+            if snap:
+                coins.append(snap)
+        except Exception as e:
+            log.warning(f"majors snapshot {name} error: {e}")
+    if not coins:
+        log.warning("Session report: tidak ada data majors")
+        return
+
+    note = _majors_news_note()
+    msg  = session_rep.build_session_report(ended, coins, now_utc=now, news_note=note)
+    send_majors_update(msg)
+    log.info(f"🌏 Session report terkirim: {ended} ({len(coins)} majors)")
+
+
+def run_majors_shift_check():
+    """
+    Cek shift signifikan BTC/ETH/SOL (regime/bias flip atau pergerakan tajam,
+    mis. akibat news) → kirim alert ke topic Majors. State + cooldown di
+    majors_state.json supaya tidak spam.
+    """
+    if not SESSION_REPORT_MODULE:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        state = json.loads(open(_MAJORS_STATE_F).read()) if os.path.exists(_MAJORS_STATE_F) else {}
+    except Exception:
+        state = {}
+
+    note = None  # lazy-load sekali kalau ada shift
+    changed = False
+    for name, sym in _MAJORS:
+        try:
+            snap = _majors_snapshot(name, sym)
+        except Exception as e:
+            log.debug(f"shift snapshot {name} error: {e}"); continue
+        if not snap:
+            continue
+
+        label, _ = session_rep.coin_bias(snap)
+        prev = state.get(name, {})
+        prev_label  = prev.get("bias")
+        prev_regime = prev.get("regime")
+        prev_price  = prev.get("price")
+        last_alert  = prev.get("alerted_at")
+
+        reasons = []
+        if prev_label and label != prev_label and "NETRAL" not in (label, prev_label):
+            reasons.append(f"bias flip {prev_label}→{label}")
+        if prev_regime and snap["regime"] != prev_regime and \
+           ("BULL" in (prev_regime + snap["regime"]) and "BEAR" in (prev_regime + snap["regime"])):
+            reasons.append(f"regime {prev_regime}→{snap['regime']}")
+        if prev_price:
+            mv = (snap["price"] - prev_price) / prev_price * 100
+            if abs(mv) >= _MAJORS_MOVE_THRESH.get(name, 2.0):
+                reasons.append(f"gerak tajam {mv:+.2f}%")
+
+        # Update state snapshot tiap cek
+        new_entry = {"bias": label, "regime": snap["regime"],
+                     "price": snap["price"], "alerted_at": last_alert}
+
+        if reasons:
+            cooldown_ok = True
+            if last_alert:
+                try:
+                    la = datetime.fromisoformat(last_alert)
+                    if la.tzinfo is None:
+                        la = la.replace(tzinfo=timezone.utc)
+                    cooldown_ok = (now - la).total_seconds() / 60 >= _MAJORS_SHIFT_COOLDOWN_MIN
+                except Exception:
+                    cooldown_ok = True
+            if cooldown_ok:
+                if note is None:
+                    note = _majors_news_note()
+                msg = session_rep.build_shift_alert(snap, " + ".join(reasons),
+                                                    now_utc=now, news_note=note)
+                send_majors_update(msg)
+                new_entry["alerted_at"] = now.isoformat()
+                log.info(f"⚡ Majors shift alert: {name} ({'; '.join(reasons)})")
+
+        state[name] = new_entry
+        changed = True
+
+    if changed:
+        try:
+            tmp = _MAJORS_STATE_F + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, _MAJORS_STATE_F)
+        except Exception as e:
+            log.warning(f"majors state save error: {e}")
+
+
+# ─────────────────────────────────────────────
 # STANDALONE ENTRY POINT
 # ─────────────────────────────────────────────
 
@@ -10458,6 +10672,16 @@ if __name__ == "__main__":
                           id="market_pulse", jitter=60)
         threading.Thread(target=run_market_pulse, daemon=True, name="market_pulse_startup").start()
         log.info(f"🌐 Market Pulse aktif: status semua koin tiap {MARKET_PULSE_INTERVAL}m (+ startup)")
+
+    # Session Report majors (BTC/ETH/SOL) — tutup tiap sesi (UTC) + shift check
+    if SESSION_REPORT_MODULE:
+        for _h, _sess in ((7, "ASIA"), (15, "LONDON"), (21, "NEW YORK")):
+            scheduler.add_job(run_session_report, "cron", hour=_h, minute=0,
+                              id=f"session_report_{_h}")
+        scheduler.add_job(run_majors_shift_check, "interval", minutes=15,
+                          id="majors_shift", jitter=30)
+        log.info("🌏 Session Report majors aktif: tutup sesi 07:00/15:00/21:00 UTC "
+                 "(14:00/22:00/04:00 WIB) + shift check tiap 15m → topic Majors")
 
     # Risk daily reset jam 00:00 UTC
     if RISK_MODULE:
