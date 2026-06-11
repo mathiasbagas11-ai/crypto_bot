@@ -10830,9 +10830,12 @@ if __name__ == "__main__":
     if SESSION_REPORT_MODULE:
         for _h, _sess in ((7, "ASIA"), (15, "LONDON"), (21, "NEW YORK")):
             scheduler.add_job(run_session_report, "cron", hour=_h, minute=0,
-                              id=f"session_report_{_h}")
+                              args=[_sess], id=f"session_report_{_h}")
         scheduler.add_job(run_majors_shift_check, "interval", minutes=15,
                           id="majors_shift", jitter=30)
+        # Startup: kirim konteks majors langsung saat bot start/redeploy
+        threading.Thread(target=run_session_report, daemon=True,
+                         name="session_report_startup").start()
         log.info("🌏 Session Report majors aktif: tutup sesi 07:00/15:00/21:00 UTC "
                  "(14:00/22:00/04:00 WIB) + shift check tiap 15m → topic Majors")
 
