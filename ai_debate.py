@@ -261,15 +261,15 @@ DATA TEKNIKAL & NEWS:
     # ── ROUND 3: JUDGE / HEAD TRADER (DeepSeek, JSON) ─────────
     judge_user = f"""{setup_block}
 
-═══ ARGUMEN BULL ═══
+═══ ARGUMEN PRO-TRADE ═══
 {bull_case}
 
-═══ ARGUMEN BEAR ═══
+═══ ARGUMEN KONTRA-TRADE ═══
 {bear_case}
 
 Kamu KEPALA TRADER. Timbang kedua argumen secara objektif. Putuskan apakah
-sinyal ini boleh dikirim ke trader. Kalau bear menemukan cacat fatal → SKIP.
-Kalau valid tapi ada risiko nyata → CAUTION. Kalau bull menang telak → CONFIRM.
+sinyal ini boleh dikirim ke trader. Kalau argumen kontra menemukan cacat fatal → SKIP.
+Kalau valid tapi ada risiko nyata → CAUTION. Kalau argumen pro menang telak → CONFIRM.
 Sesuaikan level harga HANYA kalau ada alasan teknikal jelas dari debat.
 
 Balas JSON murni (angka numerik, tanpa markdown):
@@ -280,15 +280,16 @@ Balas JSON murni (angka numerik, tanpa markdown):
   "sl": {sl},
   "score_adj": 0,
   "ai_verdict": "CONFIRM",
-  "winner": "BULL",
+  "winner": "PRO",
   "verdict_reason": "Satu kalimat — kenapa verdict ini (sebut argumen pemenang).",
   "insight_edge": "Satu kalimat — edge utama yang bertahan dari debat.",
   "insight_entry": "Satu kalimat — strategi entry: market/tunggu retest/level.",
-  "insight_risk": "Satu kalimat — risiko terbesar dari argumen bear.",
+  "insight_risk": "Satu kalimat — risiko terbesar dari argumen kontra-trade.",
   "insight_invalid": "Level harga SPESIFIK di mana thesis batal (angka)."
 }}
 
-winner: "BULL" | "BEAR" | "MIXED". score_adj: -10..+10 (negatif kalau bear kuat)."""
+winner: "PRO" (argumen pro-trade menang) | "KONTRA" (argumen kontra menang, curigai sinyal) | "MIXED".
+score_adj: -10..+10 (negatif kalau kontra kuat)."""
 
     judge_raw = _deepseek_call(
         messages=[
@@ -318,7 +319,7 @@ winner: "BULL" | "BEAR" | "MIXED". score_adj: -10..+10 (negatif kalau bear kuat)
         verdict = "CAUTION"
 
     winner = str(data.get("winner", "MIXED")).upper()
-    if winner not in ("BULL", "BEAR", "MIXED"):
+    if winner not in ("PRO", "KONTRA", "MIXED"):
         winner = "MIXED"
 
     try:

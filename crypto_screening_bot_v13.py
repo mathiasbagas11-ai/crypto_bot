@@ -6235,6 +6235,20 @@ def build_telegram_message(btc: dict, coins: list) -> tuple:
     return "\n".join(lines), enriched_coins
 
 
+def _debate_winner_label(raw_winner: str, direction: str) -> str:
+    """Terjemahkan winner PRO/KONTRA/MIXED ke label relatif arah trade.
+
+    Hindari label 'BULL'/'BEAR' yang membingungkan untuk sinyal SHORT.
+    """
+    w = (raw_winner or "").upper()
+    d = (direction or "").upper()
+    if w == "PRO":
+        return f"PRO {d}"
+    if w == "KONTRA":
+        return f"KONTRA {d} ⚠️"
+    return "MIXED"
+
+
 def build_prepump_message(candidates: list) -> str:
     """v13: Pre-pump message dengan EXPLICIT ENTRY MODE (MOMENTUM_NOW/RETEST_WAIT)."""
     ts = datetime.now(_WIB).strftime("%d %b %Y %H:%M WIB")
@@ -6285,12 +6299,18 @@ def build_prepump_message(candidates: list) -> str:
         else:
             lines.append("  ⚠️ Trade plan belum valid — tunggu konfirmasi entry zone")
 
-        # v15: DeepSeek AI insight
+        # v15: DeepSeek AI insight (debate atau single)
         if pp.get("ai_insight"):
-            _verdict = pp.get("ai_verdict", "CONFIRM")
-            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
-            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
-            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            _verdict  = pp.get("ai_verdict", "CONFIRM")
+            _v_emoji  = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            _pp_dir   = pp.get("direction", "LONG")
+            if pp.get("used_debate"):
+                _wlabel = _debate_winner_label(pp.get("debate_winner", "MIXED"), _pp_dir)
+                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
+            else:
+                lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
             for _line in pp["ai_insight"].split("\n"):
                 if _line.strip():
                     lines.append(f"  {_line.strip()}")
@@ -6355,10 +6375,16 @@ def build_predump_message(candidates: list) -> str:
 
         # v15: DeepSeek AI insight
         if pd_c.get("ai_insight"):
-            _verdict = pd_c.get("ai_verdict", "CONFIRM")
-            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
-            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
-            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            _verdict  = pd_c.get("ai_verdict", "CONFIRM")
+            _v_emoji  = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            _pd_dir   = pd_c.get("direction", "SHORT")
+            if pd_c.get("used_debate"):
+                _wlabel = _debate_winner_label(pd_c.get("debate_winner", "MIXED"), _pd_dir)
+                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
+            else:
+                lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
             for _line in pd_c["ai_insight"].split("\n"):
                 if _line.strip():
                     lines.append(f"  {_line.strip()}")
@@ -6457,12 +6483,18 @@ def build_reversal_message(candidates: list) -> str:
                 lines.append(f"  🚫 Invalid jika tembus: {fmt_num(rv['invalidation'])}")
             lines.append("  ⚠️ <i>EARLY — tunggu konfirmasi entry zone sebelum eksekusi</i>")
 
-        # DeepSeek AI insight (jika ada)
+        # DeepSeek AI insight (debate atau single)
         if rv.get("ai_insight"):
-            _verdict = rv.get("ai_verdict", "CONFIRM")
-            _v_emoji = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
-            lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
-            lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
+            _verdict  = rv.get("ai_verdict", "CONFIRM")
+            _v_emoji  = {"CONFIRM": "✅", "CAUTION": "⚠️"}.get(_verdict, "🤖")
+            _rv_dir   = rv.get("direction", "LONG")
+            if rv.get("used_debate"):
+                _wlabel = _debate_winner_label(rv.get("debate_winner", "MIXED"), _rv_dir)
+                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
+            else:
+                lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
+                lines.append(f"  {_v_emoji} <b>{_verdict}</b>")
             for _line in rv["ai_insight"].split("\n"):
                 if _line.strip():
                     lines.append(f"  {_line.strip()}")
@@ -9509,10 +9541,19 @@ def run_gated_scan():
                     ai_review.get("ai_verdict", "CONFIRM"), "🤖")
                 if ai_review.get("used_debate"):
                     _bear_eng = ai_review.get("bear_engine", "Groq")
-                    _winner   = ai_review.get("debate_winner", "MIXED")
+                    _raw_winner = ai_review.get("debate_winner", "MIXED")
+                    # Tampilkan winner relatif terhadap arah trade, bukan arah harga.
+                    # "PRO" = argumen mendukung trade menang, "KONTRA" = argumen
+                    # melawan trade menang. Ini hindari kebingungan "BULL" di sinyal SHORT.
+                    if _raw_winner == "PRO":
+                        _winner_label = f"PRO {_signal_direction}"
+                    elif _raw_winner == "KONTRA":
+                        _winner_label = f"KONTRA {_signal_direction} ⚠️"
+                    else:
+                        _winner_label = "MIXED"
                     _header = (f"─── 🥊 AI DEBATE (DeepSeek 🐂 vs {_bear_eng} 🐻) ───\n"
                                f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>"
-                               f"  ·  pemenang: <b>{_winner}</b>\n")
+                               f"  ·  pemenang: <b>{_winner_label}</b>\n")
                 else:
                     _header = (f"─── 🤖 DeepSeek AI ───\n"
                                f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>\n")
