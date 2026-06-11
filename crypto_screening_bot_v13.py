@@ -222,6 +222,14 @@ except ImportError:
     SESSION_REPORT_MODULE = False
     logging.getLogger("v12").warning("session_report.py tidak ditemukan — laporan sesi majors dinonaktifkan")
 
+# ── Market Radar (hot sector/narrative detection) ──
+try:
+    import market_radar as mradar
+    RADAR_MODULE = True
+except ImportError:
+    RADAR_MODULE = False
+    logging.getLogger("v12").warning("market_radar.py tidak ditemukan — market radar dinonaktifkan")
+
 # ── Manual Trade Manager ──────────────────────
 try:
     from trade_manager import (
@@ -354,6 +362,7 @@ NEWS_THREAD_ID          = os.getenv("NEWS_THREAD_ID", "")          or None  # ne
 WHALE_THREAD_ID         = os.getenv("WHALE_THREAD_ID", "")         or None  # whale tracker
 NEW_SIGNAL_THREAD_ID    = os.getenv("NEW_SIGNAL_THREAD_ID", "")    or None  # deteksi sinyal baru (gated/prepump/predump/scalp/reversal)
 MAJORS_THREAD_ID        = os.getenv("MAJORS_THREAD_ID", "")        or None  # update BTC/ETH/SOL per sesi + shift alert
+RADAR_THREAD_ID         = os.getenv("RADAR_THREAD_ID", "")         or None  # hot sector/narrative radar
 
 # AI priority: DeepSeek (signal review + analyze + ask) → Gemini (chart image) → Groq (fallback)
 
@@ -5626,6 +5635,15 @@ def send_majors_update(message: str, parse_mode: str = None):
     return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
 
 
+def send_radar_update(message: str, parse_mode: str = None):
+    """Kirim Market Radar (hot sector) ke topic Radar (RADAR_THREAD_ID).
+
+    Fallback ke Market Update kalau RADAR_THREAD_ID belum diset.
+    """
+    tid = RADAR_THREAD_ID or MARKET_UPDATE_THREAD_ID
+    return send_telegram(message, thread_id=tid, parse_mode=parse_mode)
+
+
 def send_market_update(message: str, parse_mode: str = None):
     """Kirim rangkuman sinyal entry ke topic Market Update (MARKET_UPDATE_THREAD_ID).
 
@@ -7851,7 +7869,7 @@ def handle_status_command(chat_id: str):
         f"Scan interval   : {SCAN_INTERVAL_MINUTES} menit (gated — hanya kirim kalau signal lolos 4 gate)\n"
         f"Top coins       : {TOP_COINS_COUNT}\n"
         f"Pre-pump/dump   : tiap {PREPUMP_SCAN_INTERVAL} menit\n"
-        f"Server time     : {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}\n\n"
+        f"Server time     : {datetime.now(_WIB).strftime('%d %b %Y %H:%M WIB')}\n\n"
         "📌 *Quick Commands:*\n"
         "`/analyze BTC` | `/chart` | `/scalp` | `/prepump` | `/predump`\n"
         "`/logtrade` | `/trades` | `/weeksummary` | `/setbalance`\n"
@@ -8640,6 +8658,13 @@ def process_update(update: dict):
             _thread(run_session_report).start()
         else:
             send_telegram("⚠️ session_report.py tidak tersedia.", chat_id)
+
+    elif text_lower.startswith("/radar"):
+        if RADAR_MODULE:
+            send_telegram("📡 Scanning hot sectors... ⏳", chat_id)
+            _thread(run_market_radar).start()
+        else:
+            send_telegram("⚠️ market_radar.py tidak tersedia.", chat_id)
 
     elif text_lower.startswith("/status"):
         handle_status_command(chat_id)
@@ -10571,12 +10596,18 @@ def _majors_snapshot(name: str, sym: str) -> dict:
     cvd_dir = "BUY" if bias_mf == "INFLOW" else "SELL" if bias_mf == "OUTFLOW" else "FLAT"
 
     candles = tf_1h.get("candles", []) or []
+    # 24H change (24 × 1H candles); fallback ke 8H kalau data kurang
     chg = 0.0
-    if len(candles) >= 8 and candles[-8].get("close"):
+    if len(candles) >= 24 and candles[-24].get("close"):
+        chg = (price - candles[-24]["close"]) / candles[-24]["close"] * 100
+    elif len(candles) >= 8 and candles[-8].get("close"):
         chg = (price - candles[-8]["close"]) / candles[-8]["close"] * 100
     recent  = candles[-24:] if candles else []
     key_sup = min((c["low"] for c in recent), default=None)
     key_res = max((c["high"] for c in recent), default=None)
+
+    bb      = tf_4h.get("bb_squeeze", {}) or {}
+    squeeze = bool(bb.get("squeeze", False))
 
     return {
         "name": name, "price": price, "chg_pct": chg,
@@ -10585,6 +10616,7 @@ def _majors_snapshot(name: str, sym: str) -> dict:
         "ema21": tf_1h.get("ema21", 0), "ema50": tf_1h.get("ema50", 0),
         "cvd_dir": cvd_dir, "cvd_pct": mf.get("cvd_pct", 0),
         "key_sup": key_sup, "key_res": key_res,
+        "squeeze": squeeze,
     }
 
 
@@ -10713,6 +10745,25 @@ def run_majors_shift_check():
             log.warning(f"majors state save error: {e}")
 
 
+def run_market_radar():
+    """Fetch hot sectors (CoinGecko + Binance) dan kirim ke topic Radar."""
+    if not RADAR_MODULE:
+        return
+    log.info("📡 Market Radar: fetch hot sectors...")
+    try:
+        sectors = mradar.fetch_hot_sectors(top_n=5)
+    except Exception as e:
+        log.warning(f"market radar fetch error: {e}")
+        return
+    if not sectors:
+        log.warning("Market Radar: tidak ada data sektor")
+        return
+    now = datetime.now(timezone.utc)
+    msg = mradar.build_radar_message(sectors, now_utc=now)
+    send_radar_update(msg, parse_mode="HTML")
+    log.info(f"📡 Market Radar terkirim: {len(sectors)} sektor")
+
+
 # ─────────────────────────────────────────────
 # STANDALONE ENTRY POINT
 # ─────────────────────────────────────────────
@@ -10830,11 +10881,22 @@ if __name__ == "__main__":
     if SESSION_REPORT_MODULE:
         for _h, _sess in ((7, "ASIA"), (15, "LONDON"), (21, "NEW YORK")):
             scheduler.add_job(run_session_report, "cron", hour=_h, minute=0,
-                              id=f"session_report_{_h}")
+                              args=[_sess], id=f"session_report_{_h}")
         scheduler.add_job(run_majors_shift_check, "interval", minutes=15,
                           id="majors_shift", jitter=30)
+        # Startup: kirim konteks majors langsung saat bot start/redeploy
+        threading.Thread(target=run_session_report, daemon=True,
+                         name="session_report_startup").start()
         log.info("🌏 Session Report majors aktif: tutup sesi 07:00/15:00/21:00 UTC "
                  "(14:00/22:00/04:00 WIB) + shift check tiap 15m → topic Majors")
+
+    # Market Radar — hot sector/narrative detection tiap 30 menit
+    if RADAR_MODULE:
+        scheduler.add_job(run_market_radar, "interval", minutes=30,
+                          id="market_radar", jitter=60)
+        threading.Thread(target=run_market_radar, daemon=True,
+                         name="market_radar_startup").start()
+        log.info("📡 Market Radar aktif: hot sector tiap 30m → topic Radar")
 
     # Risk daily reset jam 00:00 UTC
     if RISK_MODULE:
