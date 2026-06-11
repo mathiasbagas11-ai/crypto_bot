@@ -113,18 +113,129 @@ def _fmt(p) -> str:
     return f"{p:.8f}"
 
 
+# ── Analisa Relative Strength & Trading Recommendation ──────────────────────
+
+def relative_strength(btc: dict, eth: dict | None, sol: dict | None) -> dict:
+    """
+    Bandingkan performa ETH dan SOL vs BTC.
+    Pakai selisih chg_pct (24H) + deteksi breakout regime vs BTC.
+    Return: {name: {"label", "diff", "breakout"}}
+    """
+    btc_chg = btc.get("chg_pct") or 0
+    btc_reg = (btc.get("regime") or "").upper()
+    result  = {}
+    for name, coin in (("ETH", eth), ("SOL", sol)):
+        if not coin:
+            continue
+        diff      = (coin.get("chg_pct") or 0) - btc_chg
+        coin_reg  = (coin.get("regime") or "").upper()
+        # Breakout: coin di BREAKOUT_UP sementara BTC tidak (rotasi)
+        breakout  = "BREAKOUT_UP" in coin_reg and "BREAKOUT_UP" not in btc_reg
+        if diff >= 1.5 or breakout:
+            label = "JAUH LEBIH KUAT"
+        elif diff >= 0.5:
+            label = "LEBIH KUAT"
+        elif diff <= -1.5:
+            label = "JAUH LEBIH LEMAH"
+        elif diff <= -0.5:
+            label = "LEBIH LEMAH"
+        else:
+            label = "SETARA"
+        result[name] = {"label": label, "diff": diff, "breakout": breakout}
+    return result
+
+
+def session_quality(btc: dict) -> tuple[str, str]:
+    """
+    Kualitas kondisi trading berdasarkan BTC (ADX + regime + BB Squeeze).
+    Return (quality_label, reason_text).
+    """
+    adx     = btc.get("adx") or 0
+    regime  = (btc.get("regime") or "").upper()
+    squeeze = btc.get("squeeze", False)
+    if squeeze:
+        return "WASPADA", "BTC BB Squeeze aktif — tunggu konfirmasi arah breakout"
+    if "BREAKOUT" in regime:
+        return "EXCELLENT", f"BTC {regime} — momentum kuat, kondisi ideal"
+    if adx >= 25 and ("BULL" in regime or "BEAR" in regime):
+        return "GOOD", f"BTC trending kuat (ADX {adx:.0f}) — arah jelas"
+    if adx < 18:
+        return "POOR", f"BTC choppy/lemah (ADX {adx:.0f}) — hindari overtrading"
+    if "RANGING" in regime:
+        return "AVERAGE", f"BTC ranging (ADX {adx:.0f}) — range trade atau tunggu"
+    return "AVERAGE", f"BTC kondisi mixed (ADX {adx:.0f})"
+
+
+def build_trade_rec(coins: list[dict], rs: dict, quality: str, nxt: str) -> str:
+    """
+    Rekomendasi trading sesi berikutnya: BTC, alts (ETH/SOL), atau sidelines.
+    Berdasarkan relative strength + session quality + BTC bias.
+    """
+    btc        = next((c for c in coins if c.get("name") == "BTC"), {})
+    btc_label, _ = coin_bias(btc)
+    eth_rs     = rs.get("ETH", {})
+    sol_rs     = rs.get("SOL", {})
+    eth_str    = eth_rs.get("label", "SETARA")
+    sol_str    = sol_rs.get("label", "SETARA")
+    eth_bo     = eth_rs.get("breakout", False)
+    sol_bo     = sol_rs.get("breakout", False)
+    eth_diff   = eth_rs.get("diff", 0)
+    sol_diff   = sol_rs.get("diff", 0)
+
+    worth_map = {
+        "EXCELLENT": "✅ Worth trading: YA — kondisi ideal",
+        "GOOD":      "✅ Worth trading: YA — kondisi cukup baik",
+        "AVERAGE":   "⚠️ Worth trading: SELEKTIF — jangan overtrading",
+        "POOR":      "❌ Worth trading: TIDAK — tunggu kondisi membaik",
+        "WASPADA":   "⏳ Worth trading: TUNGGU — belum konfirmasi arah",
+    }
+    lines = [worth_map.get(quality, "⚠️ Kondisi mixed")]
+
+    if quality == "POOR":
+        lines.append("🎯 Fokus: Sidelines — jangan force entry")
+    elif quality == "WASPADA":
+        lines.append("🎯 Fokus: Monitor BTC arah breakout dulu")
+    elif eth_bo and sol_bo:
+        lines.append("🎯 Prioritas: ETH 🚀 + SOL 🚀 (keduanya breakout vs BTC)")
+        lines.append("   → Hint altcoin season — sizing alts lebih agresif")
+    elif eth_bo:
+        lines.append("🎯 Prioritas: ETH 🚀 (breakout vs BTC)")
+        lines.append("   → ETH lebih agresif dari BTC saat ini")
+    elif sol_bo:
+        lines.append("🎯 Prioritas: SOL 🚀 (breakout vs BTC)")
+        lines.append("   → SOL lebih agresif dari BTC saat ini")
+    elif "KUAT" in eth_str and "KUAT" in sol_str:
+        lines.append(f"🎯 Prioritas: Alts (ETH {eth_diff:+.1f}%, SOL {sol_diff:+.1f}% vs BTC)")
+        lines.append("   → Rotasi ke altcoin — BTC tetap valid sebagai anchor")
+    elif "KUAT" in eth_str:
+        lines.append(f"🎯 Prioritas: ETH outperform BTC ({eth_diff:+.1f}%)")
+    elif "KUAT" in sol_str:
+        lines.append(f"🎯 Prioritas: SOL outperform BTC ({sol_diff:+.1f}%)")
+    elif btc_label == "BULLISH":
+        lines.append("🎯 Prioritas: BTC (alts belum lebih kuat dari BTC)")
+    elif btc_label == "BEARISH":
+        lines.append("🎯 Prioritas: Short bias / cash — BTC bearish")
+    else:
+        lines.append("🎯 Prioritas: Tunggu sinyal lebih jelas dari BTC")
+
+    return "\n".join(lines)
+
+
+# ── Block formatters ─────────────────────────────────────────────────────────
+
 def build_coin_block(coin: dict) -> str:
     """Blok analisa 1 koin untuk laporan sesi."""
-    name   = coin.get("name", "?")
-    price  = coin.get("price", 0)
-    chg    = coin.get("chg_pct", 0) or 0
-    regime = coin.get("regime", "—")
-    adx    = coin.get("adx", 0) or 0
-    rsi    = coin.get("rsi", 50) or 50
-    cvd_d  = (coin.get("cvd_dir") or "FLAT").upper()
-    cvd_p  = coin.get("cvd_pct", 0) or 0
-    sup    = coin.get("key_sup")
-    res    = coin.get("key_res")
+    name    = coin.get("name", "?")
+    price   = coin.get("price", 0)
+    chg     = coin.get("chg_pct", 0) or 0
+    regime  = coin.get("regime", "—")
+    adx     = coin.get("adx", 0) or 0
+    rsi     = coin.get("rsi", 50) or 50
+    cvd_d   = (coin.get("cvd_dir") or "FLAT").upper()
+    cvd_p   = coin.get("cvd_pct", 0) or 0
+    sup     = coin.get("key_sup")
+    res     = coin.get("key_res")
+    squeeze = coin.get("squeeze", False)
 
     label, _ = coin_bias(coin)
     chg_emoji = "🟢" if chg > 0 else "🔴" if chg < 0 else "⚪"
@@ -135,6 +246,8 @@ def build_coin_block(coin: dict) -> str:
         f"   Bias: <b>{label}</b> | Regime: {regime} | ADX {adx:.0f} | RSI {rsi:.0f}",
         f"   {cvd_emoji} CVD {cvd_d.lower()} {cvd_p:+.1f}%",
     ]
+    if squeeze:
+        lines.append("   ⚡ BB Squeeze — koil untuk breakout besar")
     if sup is not None and res is not None:
         lines.append(f"   🎯 Sup {_fmt(sup)} | Res {_fmt(res)}")
     return "\n".join(lines)
@@ -171,9 +284,13 @@ def _aggregate_outlook(coins: list[dict], ended: str, nxt: str) -> str:
 
 def build_session_report(ended_session: str, coins: list[dict],
                          now_utc: datetime = None, news_note: str = "") -> str:
-    """Rangkai laporan akhir sesi lengkap BTC/ETH/SOL + outlook sesi berikutnya."""
+    """Rangkai laporan akhir sesi lengkap BTC/ETH/SOL + outlook + trade rec."""
     now_utc = now_utc or datetime.now(timezone.utc)
     nxt = next_session_of(ended_session)
+
+    btc = next((c for c in coins if c.get("name") == "BTC"), None)
+    eth = next((c for c in coins if c.get("name") == "ETH"), None)
+    sol = next((c for c in coins if c.get("name") == "SOL"), None)
 
     header = (
         f"🌏 <b>MAJORS — TUTUP SESI {ended_session}</b>\n"
@@ -181,9 +298,30 @@ def build_session_report(ended_session: str, coins: list[dict],
         f"━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     blocks = "\n\n".join(build_coin_block(c) for c in coins)
+
+    # ── Relative strength ETH/SOL vs BTC ──
+    rs = relative_strength(btc or {}, eth, sol)
+    rs_lines = ["📊 <b>Relative Strength vs BTC (24H)</b>"]
+    for cname, data in rs.items():
+        diff   = data["diff"]
+        label  = data["label"]
+        bo_tag = " 🚀 BREAKOUT!" if data["breakout"] else ""
+        icon   = "🟢" if "KUAT" in label else "🔴" if "LEMAH" in label else "⚪"
+        rs_lines.append(f"   {icon} {cname}: {diff:+.1f}% → <b>{label}</b>{bo_tag}")
+    rs_block = "\n".join(rs_lines)
+
+    # ── Trading recommendation ──
+    quality, q_reason = session_quality(btc or {})
+    rec = build_trade_rec(coins, rs, quality, nxt)
+    rec_block = (
+        f"🎯 <b>Trading Outlook — Sesi {nxt}</b>\n"
+        f"   Kondisi BTC: <b>{quality}</b> — {q_reason}\n"
+        f"{rec}"
+    )
+
     outlook = _aggregate_outlook(coins, ended_session, nxt)
 
-    parts = [header, blocks, "─── NEXT SESSION ───", outlook]
+    parts = [header, blocks, rs_block, rec_block, "─── MARKET BIAS ───", outlook]
     if news_note:
         parts.append(f"📰 <b>Catatan news:</b> {news_note}")
     parts.append("⚠️ <i>Not financial advice. DYOR.</i>")

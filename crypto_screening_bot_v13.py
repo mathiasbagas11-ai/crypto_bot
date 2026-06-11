@@ -10571,12 +10571,18 @@ def _majors_snapshot(name: str, sym: str) -> dict:
     cvd_dir = "BUY" if bias_mf == "INFLOW" else "SELL" if bias_mf == "OUTFLOW" else "FLAT"
 
     candles = tf_1h.get("candles", []) or []
+    # 24H change (24 × 1H candles); fallback ke 8H kalau data kurang
     chg = 0.0
-    if len(candles) >= 8 and candles[-8].get("close"):
+    if len(candles) >= 24 and candles[-24].get("close"):
+        chg = (price - candles[-24]["close"]) / candles[-24]["close"] * 100
+    elif len(candles) >= 8 and candles[-8].get("close"):
         chg = (price - candles[-8]["close"]) / candles[-8]["close"] * 100
     recent  = candles[-24:] if candles else []
     key_sup = min((c["low"] for c in recent), default=None)
     key_res = max((c["high"] for c in recent), default=None)
+
+    bb      = tf_4h.get("bb_squeeze", {}) or {}
+    squeeze = bool(bb.get("squeeze", False))
 
     return {
         "name": name, "price": price, "chg_pct": chg,
@@ -10585,6 +10591,7 @@ def _majors_snapshot(name: str, sym: str) -> dict:
         "ema21": tf_1h.get("ema21", 0), "ema50": tf_1h.get("ema50", 0),
         "cvd_dir": cvd_dir, "cvd_pct": mf.get("cvd_pct", 0),
         "key_sup": key_sup, "key_res": key_res,
+        "squeeze": squeeze,
     }
 
 
