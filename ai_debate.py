@@ -267,9 +267,16 @@ DATA TEKNIKAL & NEWS:
 ═══ ARGUMEN KONTRA-TRADE ═══
 {bear_case}
 
-Kamu KEPALA TRADER. Timbang kedua argumen secara objektif. Putuskan apakah
-sinyal ini boleh dikirim ke trader. Kalau argumen kontra menemukan cacat fatal → SKIP.
-Kalau valid tapi ada risiko nyata → CAUTION. Kalau argumen pro menang telak → CONFIRM.
+Kamu KEPALA TRADER. Timbang kedua argumen secara objektif.
+
+PENTING — SKIP sangat jarang: hanya gunakan kalau ada cacat FATAL seperti
+fundamental collapse, unlock besar besok, atau struktur market total kontra.
+Sinyal sudah lolos 7-layer gate teknikal — debat bertugas menambah konteks,
+bukan memblokir. Kalau ragu antara SKIP dan CAUTION, pilih CAUTION.
+- CONFIRM : argumen pro kuat, risiko terkelola
+- CAUTION : ada risiko nyata tapi sinyal masih layak (kirim dengan warning)
+- SKIP    : cacat FATAL — risiko melebihi potensi secara signifikan
+
 Sesuaikan level harga HANYA kalau ada alasan teknikal jelas dari debat.
 
 Balas JSON murni (angka numerik, tanpa markdown):
