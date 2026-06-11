@@ -221,6 +221,90 @@ def deepseek_signal_review(
     tp1_r = round((tp1 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
     tp2_r = round((tp2 - entry) / abs(entry - sl), 2) if sl and entry and sl != entry else 0
 
+    # Blok konteks teknikal+news ringkas — dipakai juga oleh AI debate.
+    context_text = (
+        f"Alasan: {reasons_str}\n"
+        f"Structure: 4H {s4.get('trend','?')} CVD{mf4.get('cvd_pct',0):+.1f}% | "
+        f"1H {s1.get('trend','?')} CVD{mf1.get('cvd_pct',0):+.1f}% | "
+        f"15M {s15.get('trend','?')}\n"
+        f"Candle: 1H {cp1.get('pattern','NONE')} | 15M {cp15.get('pattern','NONE')}\n"
+        f"OB: 4H={len(ob4)} 1H={len(ob1)} | FVG 4H={len(fvg4)}\n"
+        f"Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})\n"
+        f"News: {news_block if news_block else 'tidak ada'}"
+    )
+    # ── AUTO-FEED DATA OUTCOME MASA LALU ──────────────────────────
+    # Pastikan SETIAP sinyal (jalur apapun) kebawa pelajaran + win-rate
+    # per-coin dari sinyal yang sudah closed. Kalau caller belum kasih
+    # learning_context, ambil sendiri di sini supaya debat tidak "buta".
+    if learning_context is None:
+        try:
+            from learning_engine import build_ai_context_block
+            learning_context = build_ai_context_block("SCREENER") or None
+        except Exception:
+            learning_context = None
+
+    if learning_context:
+        context_text += f"\nPelajaran dari sinyal lalu:\n{learning_context}"
+
+    # Win-rate & lessons spesifik coin ini dari signal yang sudah closed.
+    try:
+        from symbol_memory import get_symbol_memory
+        _mem = get_symbol_memory(symbol)
+        if _mem and _mem.get("total_trades", 0) > 0:
+            _mem_line = (
+                f"Histori {coin}: {_mem.get('total_trades',0)} trade, "
+                f"WR {_mem.get('win_rate',0):.0f}%, SL-rate {_mem.get('sl_rate',0):.0f}%, "
+                f"avg PnL {_mem.get('avg_pnl',0):+.1f}%, best signal: {_mem.get('best_signal_type','?')}"
+            )
+            if _mem.get("blacklisted"):
+                _mem_line += " | ⚠️ COIN INI LAGI DI-BLACKLIST (banyak SL beruntun)"
+            _mem_lessons = _mem.get("lessons", [])
+            if _mem_lessons:
+                _mem_line += "\n" + "\n".join(f"  - {l}" for l in _mem_lessons[:3])
+            context_text += f"\nHistori coin (dari sinyal closed):\n{_mem_line}"
+    except Exception:
+        pass
+
+    # Valuasi on-chain / fundamental — dimensi non-teknikal untuk debat.
+    try:
+        from onchain_valuation import build_valuation_brief_for_ai
+        _val_brief = build_valuation_brief_for_ai(symbol, direction)
+        if _val_brief:
+            context_text += f"\n{_val_brief}"
+    except Exception:
+        pass
+
+    # ── TWO-AI DEBATE (Bull vs Bear) — validasi sinyal dari dua sisi ──
+    # Setiap sinyal divalidasi lewat debat DeepSeek↔Groq sebelum lolos.
+    # Kalau debat tidak tersedia, fallback ke single-AI review di bawah.
+    try:
+        import ai_debate
+        if ai_debate.is_available():
+            sector_brief = ""
+            try:
+                import market_radar
+                sector_brief = market_radar.build_sector_brief_for_ai()
+            except Exception:
+                sector_brief = ""
+
+            debate = ai_debate.run_signal_debate(
+                context_text = context_text,
+                coin         = coin,
+                direction    = direction,
+                master_score = master_score,
+                entry        = entry, tp1 = tp1, tp2 = tp2, sl = sl,
+                is_long      = is_long,
+                signal_type  = signal_type,
+                sector_brief = sector_brief,
+            )
+            if debate:
+                return _finalize_review(
+                    debate, entry, tp1, tp2, sl, is_long, symbol,
+                    debate_mode=True,
+                )
+    except Exception as _dbt_e:
+        log.warning(f"AI debate gagal ({symbol}), fallback single-AI: {_dbt_e}")
+
     user_msg = f"""Review sinyal {signal_type} — {coin} {direction} (score {master_score}/100)
 
 Entry: {entry} | TP1: {tp1} ({tp1_r}R) | TP2: {tp2} ({tp2_r}R) | SL: {sl}
@@ -434,6 +518,14 @@ def deepseek_analyze_coin(
             + "\n".join(f"- {l}" for l in lessons[:3])
         )
 
+    # Valuasi on-chain / fundamental (keyless)
+    val_block = ""
+    try:
+        from onchain_valuation import build_valuation_brief_for_ai
+        val_block = build_valuation_brief_for_ai(symbol, conf_dir)
+    except Exception:
+        val_block = ""
+
     user_msg = f"""Data trading untuk {coin} (harga sekarang: {price}).
 
 CONFLUENCE: {conf_dir} | {conf_level} | Score {conf_score}/100
@@ -448,6 +540,8 @@ Liq: {liq}
 Funding: {funding}% | OI: {oi_chg}% | L/S: {ls_ratio} ({ls_bias})
 
 NEWS: {news_block}
+
+FUNDAMENTAL: {val_block if val_block else "Tidak ada data valuasi."}
 
 HISTORI: {mem_block if mem_block else "Belum ada histori."}
 
@@ -562,6 +656,75 @@ def deepseek_macro_analysis(news_context: dict = None) -> str:
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+
+def _finalize_review(raw: dict, entry: float, tp1: float, tp2: float, sl: float,
+                     is_long: bool, symbol: str, debate_mode: bool = False) -> dict:
+    """Terapkan clamp harga + sanity arah ke hasil AI (debate atau single).
+
+    Memastikan AI tidak menggeser level di luar MAX_PRICE_ADJUST_PCT dan
+    TP/SL tetap di sisi yang benar. Mengembalikan dict siap-pakai dengan
+    shape kompatibel deepseek_signal_review (plus field debat bila ada).
+    """
+    adj_entry = _safe_float(raw.get("entry"), entry)
+    adj_tp1   = _safe_float(raw.get("tp1"),   tp1)
+    adj_tp2   = _safe_float(raw.get("tp2"),   tp2)
+    adj_sl    = _safe_float(raw.get("sl"),     sl)
+
+    try:
+        score_adj = int(raw.get("score_adj", 0) or 0)
+    except (TypeError, ValueError):
+        score_adj = 0
+    score_adj = max(-MAX_SCORE_ADJUST, min(MAX_SCORE_ADJUST, score_adj))
+
+    verdict = str(raw.get("ai_verdict", "CONFIRM")).upper()
+    if verdict not in ("CONFIRM", "CAUTION", "SKIP"):
+        verdict = "CONFIRM"
+
+    # Clamp harga dalam batas aman
+    adj_entry = _clamp_price(adj_entry, entry, MAX_PRICE_ADJUST_PCT)
+    adj_tp1   = _clamp_price(adj_tp1,   tp1,   MAX_PRICE_ADJUST_PCT)
+    adj_tp2   = _clamp_price(adj_tp2,   tp2,   MAX_PRICE_ADJUST_PCT)
+    adj_sl    = _clamp_price(adj_sl,    sl,     MAX_PRICE_ADJUST_PCT)
+
+    # Sanity arah
+    if is_long:
+        if adj_tp1 <= adj_entry: adj_tp1 = tp1
+        if adj_tp2 <= adj_tp1:   adj_tp2 = tp2
+        if adj_sl  >= adj_entry: adj_sl  = sl
+    else:
+        if adj_tp1 >= adj_entry: adj_tp1 = tp1
+        if adj_tp2 >= adj_tp1:   adj_tp2 = tp2
+        if adj_sl  <= adj_entry: adj_sl  = sl
+
+    was_adjusted = (
+        abs(adj_entry - entry) > 0.0001 or abs(adj_tp1 - tp1) > 0.0001 or
+        abs(adj_tp2 - tp2) > 0.0001 or abs(adj_sl - sl) > 0.0001
+    )
+
+    result = {
+        "entry":        adj_entry,
+        "tp1":          adj_tp1,
+        "tp2":          adj_tp2,
+        "sl":           adj_sl,
+        "score_adj":    score_adj,
+        "insight":      str(raw.get("insight", "")).strip(),
+        "was_adjusted": was_adjusted,
+        "ai_verdict":   verdict,
+        "error":        "",
+    }
+    if debate_mode:
+        result["used_debate"]   = True
+        result["debate_winner"] = raw.get("debate_winner", "MIXED")
+        result["debate_bull"]   = raw.get("debate_bull", "")
+        result["debate_bear"]   = raw.get("debate_bear", "")
+        result["bear_engine"]   = raw.get("bear_engine", "")
+
+    log.info(
+        f"AI review {symbol}: mode={'DEBATE' if debate_mode else 'SINGLE'} "
+        f"verdict={verdict} adj={was_adjusted} score_adj={score_adj:+d}"
+    )
+    return result
+
 
 def _passthrough(trade: dict, reason: str) -> dict:
     """Return sinyal tanpa perubahan kalau AI tidak tersedia."""
