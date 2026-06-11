@@ -154,6 +154,24 @@ def record_pending_signal(
     - RETEST_WAIT (default): aktif hanya setelah harga menyentuh zona entry.
       Kalau entry tak pernah tersentuh sampai timeout → INVALIDATED (setup batal).
     """
+    # ── SANITY GUARD: TP & SL harus di sisi yang benar relatif entry ──
+    # Mencegah record cacat (mis. LONG dengan TP di bawah entry) yang bikin
+    # outcome langsung ke-mark "TP_HIT" padahal sebetulnya rugi.
+    try:
+        e = float(entry_price); t = float(tp); s = float(sl)
+    except (TypeError, ValueError):
+        log.warning(f"⚠️ Reject signal {symbol} {direction}: harga non-numerik (entry={entry_price} tp={tp} sl={sl})")
+        return
+    if e <= 0 or t <= 0 or s <= 0:
+        log.warning(f"⚠️ Reject signal {symbol} {direction}: harga <= 0 (entry={e} tp={t} sl={s})")
+        return
+    if direction == "LONG" and not (t > e > s):
+        log.warning(f"⚠️ Reject signal {symbol} LONG: TP/SL sisi salah (tp={t} entry={e} sl={s}) — harus tp>entry>sl")
+        return
+    if direction == "SHORT" and not (t < e < s):
+        log.warning(f"⚠️ Reject signal {symbol} SHORT: TP/SL sisi salah (tp={t} entry={e} sl={s}) — harus tp<entry<sl")
+        return
+
     ladder = _normalize_ladder(tps, tp, sl, entry_price, direction)
     is_momentum = (entry_mode or "").upper() == "MOMENTUM_NOW"
     now_iso = datetime.now(timezone.utc).isoformat()
