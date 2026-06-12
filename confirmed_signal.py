@@ -124,10 +124,10 @@ def _persistence_adjustment(symbol: str, direction: str, current_score: int) -> 
     Professional systems hanya kirim sinyal yang muncul 2+ scan berturut-turut.
 
     Return: adjustment integer
-      +5  → sinyal persisten (juga kuat di scan sebelumnya)
-      0   → scan pertama atau netral
+      +5  → sinyal persisten kuat (≥70) di scan sebelumnya
+      0   → scan pertama atau konsisten moderat
       -12 → sinyal tiba-tiba spike dari skor rendah (suspicious noise)
-      -5  → arah berubah dibanding scan sebelumnya
+      -15 → arah BERUBAH dibanding scan sebelumnya (bias flip — kuat dihukum)
     """
     prev = _prev_scores.get(symbol)
     if not prev:
@@ -148,7 +148,8 @@ def _persistence_adjustment(symbol: str, direction: str, current_score: int) -> 
         else:
             return -12  # Tiba-tiba muncul dari score rendah → suspicious spike
     else:
-        return -5       # Arah flip → ketidakpastian
+        # Arah flip antar scan — sinyal tidak stabil, hukum lebih berat
+        return -15
 
 
 def _is_in_cooldown(symbol: str) -> bool:
