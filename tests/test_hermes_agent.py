@@ -101,6 +101,7 @@ def test_final_arbiter_heuristic_passes_clean_setup(monkeypatch):
 
 def test_final_arbiter_inactive_returns_none(monkeypatch):
     monkeypatch.setattr(h, "HERMES_API_KEY", "")
+    monkeypatch.setattr(h, "HERMES_ENDPOINT_SET", False)
     monkeypatch.setattr(h, "HERMES_ENABLED", False)
     monkeypatch.setattr(h, "HERMES_EXITLIQ_VETO", False)
     out = h.final_arbiter(
@@ -109,3 +110,44 @@ def test_final_arbiter_inactive_returns_none(monkeypatch):
         coin="X", direction="LONG", is_long=True, risk_signals={},
     )
     assert out is None
+
+
+# ── self-host: endpoint lokal tanpa API key tetap "available" ───
+
+def test_available_with_local_endpoint_no_key(monkeypatch):
+    # Mode self-host: URL di-override, key kosong → tetap bisa dipanggil.
+    monkeypatch.setattr(h, "HERMES_API_KEY", "")
+    monkeypatch.setattr(h, "HERMES_ENDPOINT_SET", True)
+    monkeypatch.setattr(h, "HERMES_ENABLED", True)
+    assert h.is_available() is True
+    assert h.is_active() is True
+
+
+def test_hermes_call_omits_auth_header_when_no_key(monkeypatch):
+    # Tanpa key, panggilan tidak boleh kirim header Authorization.
+    monkeypatch.setattr(h, "HERMES_API_KEY", "")
+    monkeypatch.setattr(h, "HERMES_ENDPOINT_SET", True)
+    monkeypatch.setattr(h, "HERMES_API_URL", "http://localhost:8080/v1/chat/completions")
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["headers"] = headers
+        captured["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(h.requests, "post", _fake_post)
+    out = h._hermes_call([{"role": "user", "content": "hi"}])
+    assert out == "ok"
+    assert "Authorization" not in captured["headers"]
+    assert captured["url"].startswith("http://localhost")
+
+
+def test_hermes_call_returns_empty_when_endpoint_unset(monkeypatch):
+    monkeypatch.setattr(h, "HERMES_ENDPOINT_SET", False)
+    assert h._hermes_call([{"role": "user", "content": "hi"}]) == ""

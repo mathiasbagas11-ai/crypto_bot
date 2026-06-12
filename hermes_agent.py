@@ -31,12 +31,25 @@ Kalau HERMES_API_KEY kosong / API mati, fungsi tetap mengembalikan keputusan
 deterministik dari heuristik exit-liquidity (defense in depth), sehingga
 proteksi exit-liquidity TETAP jalan tanpa key.
 
-Requires .env (semua opsional kecuali key untuk pakai LLM):
-  HERMES_API_KEY=...                 (Nous Portal / OpenRouter / custom)
-  HERMES_MODEL=Hermes-4-405B         (opsional)
-  HERMES_API_URL=https://inference-api.nousresearch.com/v1/chat/completions
-  HERMES_AGENT_ENABLED=1             (opsional, 0 untuk matikan)
-  HERMES_EXITLIQ_VETO=1              (opsional, 0 untuk matikan veto deterministik)
+DUA MODE PENYAMBUNGAN (hermes-agent itu provider-agnostic, ga wajib API key):
+  A. SELF-HOST / LOKAL (tanpa key) — RECOMMENDED untuk bot headless.
+     Jalankan hermes-agent sebagai service yang ekspos endpoint
+     OpenAI-compatible, lalu arahkan bot ke situ:
+       HERMES_API_URL=http://localhost:8080/v1/chat/completions
+     Key TIDAK diperlukan (header Authorization tidak dikirim).
+  B. CLOUD (pakai key) — Nous Portal / OpenRouter / provider lain:
+       HERMES_API_KEY=...
+       HERMES_API_URL=https://inference-api.nousresearch.com/v1/chat/completions
+
+Config .env (semua opsional):
+  HERMES_API_KEY=...           (HANYA untuk mode cloud; kosongkan untuk self-host)
+  HERMES_MODEL=Hermes-4-405B   (opsional)
+  HERMES_API_URL=...           (set ke endpoint lokal untuk mode self-host)
+  HERMES_AGENT_ENABLED=1       (opsional, 0 untuk matikan)
+  HERMES_EXITLIQ_VETO=1        (opsional, 0 untuk matikan veto deterministik)
+
+Kalau endpoint Hermes sama sekali tidak diset, veto exit-liquidity tetap
+jalan deterministik (tanpa LLM) — proteksi inti tidak pernah mati.
 """
 
 import os
@@ -51,10 +64,17 @@ log = logging.getLogger("hermes_agent")
 
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 HERMES_MODEL   = os.getenv("HERMES_MODEL", "Hermes-4-405B")
-HERMES_API_URL = os.getenv(
-    "HERMES_API_URL",
-    "https://inference-api.nousresearch.com/v1/chat/completions",
-)
+
+# Default = Nous inference API (butuh key). Tapi hermes-agent (framework
+# NousResearch) provider-agnostic: bisa di-self-host dan ekspos endpoint
+# OpenAI-compatible LOKAL tanpa API key. Set HERMES_API_URL ke endpoint itu
+# (mis. http://localhost:8080/v1/chat/completions) → jalan tanpa key.
+_DEFAULT_HERMES_URL = "https://inference-api.nousresearch.com/v1/chat/completions"
+HERMES_API_URL = os.getenv("HERMES_API_URL", _DEFAULT_HERMES_URL)
+
+# Endpoint dianggap "terkonfigurasi" kalau ada key (mode cloud) ATAU URL
+# di-override dari default (mode self-host/lokal hermes-agent tanpa key).
+HERMES_ENDPOINT_SET = bool(HERMES_API_KEY) or (HERMES_API_URL != _DEFAULT_HERMES_URL)
 
 HERMES_ENABLED = os.getenv("HERMES_AGENT_ENABLED", "1") not in ("0", "false", "False")
 # Veto deterministik jalan walau LLM mati (proteksi exit-liquidity inti).
@@ -71,8 +91,12 @@ EXITLIQ_SKIP    = 70    # ≥ → veto SKIP (kita kemungkinan besar jadi exit li
 
 def _hermes_call(messages: list, max_tokens: int = 500,
                  temperature: float = 0.25, json_mode: bool = False) -> str:
-    """Call Hermes (OpenAI-compatible chat completions). Return content str / ''."""
-    if not HERMES_API_KEY:
+    """Call Hermes (OpenAI-compatible chat completions). Return content str / ''.
+
+    API key OPSIONAL: kalau hermes-agent di-self-host (endpoint lokal), header
+    Authorization tidak dikirim. Key hanya dipakai untuk endpoint cloud Nous.
+    """
+    if not HERMES_ENDPOINT_SET:
         return ""
     payload = {
         "model":       HERMES_MODEL,
@@ -83,14 +107,15 @@ def _hermes_call(messages: list, max_tokens: int = 500,
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
+    headers = {"Content-Type": "application/json"}
+    if HERMES_API_KEY:
+        headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+
     for attempt in range(3):
         try:
             r = requests.post(
                 HERMES_API_URL,
-                headers={
-                    "Authorization": f"Bearer {HERMES_API_KEY}",
-                    "Content-Type":  "application/json",
-                },
+                headers=headers,
                 json=payload,
                 timeout=45,
             )
@@ -111,13 +136,14 @@ def _hermes_call(messages: list, max_tokens: int = 500,
 
 
 def is_available() -> bool:
-    """True kalau Hermes LLM bisa dipanggil (key ada + enabled)."""
-    return bool(HERMES_ENABLED and HERMES_API_KEY)
+    """True kalau Hermes LLM bisa dipanggil — endpoint terkonfigurasi (key
+    cloud ATAU URL self-host lokal) + enabled. Tidak wajib pakai API key."""
+    return bool(HERMES_ENABLED and HERMES_ENDPOINT_SET)
 
 
 def is_active() -> bool:
     """True kalau Hermes punya peran apapun (LLM ATAU veto deterministik)."""
-    return bool(HERMES_ENABLED and (HERMES_API_KEY or HERMES_EXITLIQ_VETO))
+    return bool(HERMES_ENABLED and (HERMES_ENDPOINT_SET or HERMES_EXITLIQ_VETO))
 
 
 # ─────────────────────────────────────────────
