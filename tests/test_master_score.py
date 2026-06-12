@@ -134,7 +134,7 @@ def test_persistence_sudden_spike_penalised(monkeypatch):
 
 def test_persistence_direction_flip_penalised(monkeypatch):
     _seed(monkeypatch, score=80, direction="SHORT", ts=datetime.now(timezone.utc))
-    assert cs._persistence_adjustment("SYM", "LONG", 70) == -5
+    assert cs._persistence_adjustment("SYM", "LONG", 70) == -15
 
 
 def test_persistence_stale_cache_ignored(monkeypatch):

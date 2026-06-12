@@ -9,11 +9,20 @@ untuk memvalidasi sinyal dari DUA SISI:
   2. BEAR ANALYST  (Groq)     — membaca argumen bull, lalu mencari SEMUA
                                 celah, risiko tersembunyi, dan alasan gagal.
   3. HEAD TRADER   (DeepSeek) — membaca kedua argumen, menimbang, dan
-                                mengeluarkan VERDICT final + level harga
-                                yang sudah disesuaikan.
+                                mengeluarkan VERDICT + level harga yang sudah
+                                disesuaikan.
+  4. FINAL ARBITER (Hermes/NousResearch) — berperan seperti MANUSIA pengambil
+                                keputusan final. Membaca seluruh debat + verdict
+                                head trader, lalu mengetuk palu GO/NO-GO dengan
+                                mandat utama: JANGAN biarkan user jadi EXIT
+                                LIQUIDITY (lihat hermes_agent.py). Bisa menurunkan
+                                verdict tapi tidak menaikkannya. Opsional — kalau
+                                HERMES_API_KEY kosong, veto exit-liquidity tetap
+                                jalan secara deterministik.
 
 Tujuan: tidak ada sinyal yang lolos hanya dari analisa satu sisi. Setiap
-sinyal harus bertahan melawan bantahan sebelum sampai ke user.
+sinyal harus bertahan melawan bantahan DAN lolos cek exit-liquidity sebelum
+sampai ke user.
 
 Output `run_signal_debate()` adalah dict yang KOMPATIBEL dengan output
 `deepseek_signal_review()` (drop-in), plus field tambahan transcript debat:
@@ -171,6 +180,7 @@ def run_signal_debate(
     is_long: bool,
     signal_type: str = "SIGNAL",
     sector_brief: str = "",
+    risk_signals: dict = None,
 ) -> dict | None:
     """
     Jalankan debat Bull vs Bear lalu sintesa verdict final.
@@ -365,11 +375,55 @@ score_adj: -10..+10 (negatif kalau kontra kuat)."""
     if entry_t: parts.append(f"📍 ENTRY — {entry_t}")
     if risk:    parts.append(f"⚠️ RISIKO (bear) — {risk}")
     if invalid: parts.append(f"🚫 INVALID JIKA — {invalid}")
+
+    # ── ROUND 4: HERMES — FINAL ARBITER (the "human" decision) ────────
+    # Hermes membaca seluruh debat + verdict head trader, lalu mengetuk palu
+    # final dengan mandat utama: jangan biarkan user jadi EXIT LIQUIDITY.
+    hermes_used = False
+    exit_liquidity = False
+    exitliq_score = 0
+    exitliq_level = "NONE"
+    hermes_source = ""
+    try:
+        import hermes_agent
+        if hermes_agent.is_active():
+            arb = hermes_agent.final_arbiter(
+                setup_block   = setup_block,
+                bull_case     = bull_case,
+                bear_case     = bear_case,
+                judge_verdict = verdict,
+                judge_reason  = vr,
+                coin          = coin,
+                direction     = direction,
+                is_long       = is_long,
+                risk_signals  = risk_signals,
+            )
+            if arb:
+                hermes_used    = True
+                hermes_source  = arb.get("source", "")
+                exit_liquidity = bool(arb.get("exit_liquidity"))
+                exitliq_score  = int(arb.get("exitliq_score", 0) or 0)
+                exitliq_level  = arb.get("exitliq_level", "NONE")
+                # Verdict final Hermes berlaku (tidak pernah lebih agresif dari judge).
+                verdict = str(arb.get("verdict", verdict)).upper()
+                dl   = arb.get("decision_line", "")
+                note = arb.get("note", "")
+                if exit_liquidity:
+                    parts.append(
+                        f"🩸 EXIT-LIQUIDITY — risiko jadi exit liquidity "
+                        f"({exitliq_score}/100, {exitliq_level}). Smart money mungkin distribusi ke kita."
+                    )
+                if dl:   parts.append(f"🧠 HERMES — {dl}")
+                if note: parts.append(f"🎯 EKSEKUSI — {note}")
+    except Exception as _h_e:
+        log.warning(f"Hermes arbiter gagal ({coin}), pakai verdict head trader: {_h_e}")
+
     insight = "\n".join(parts)
 
     log.info(
         f"🥊 Debate {coin} {direction}: verdict={verdict} winner={winner} "
-        f"score_adj={score_adj:+d} bear={bear_engine} adjusted={was_adjusted}"
+        f"score_adj={score_adj:+d} bear={bear_engine} adjusted={was_adjusted} "
+        f"hermes={hermes_source or 'off'} exitliq={exitliq_score}"
     )
 
     return {
@@ -386,5 +440,10 @@ score_adj: -10..+10 (negatif kalau kontra kuat)."""
         "debate_winner": winner,
         "bear_engine":  bear_engine,
         "used_debate":  True,
+        "hermes_used":  hermes_used,
+        "hermes_source": hermes_source,
+        "exit_liquidity": exit_liquidity,
+        "exitliq_score": exitliq_score,
+        "exitliq_level": exitliq_level,
         "error":        "",
     }
