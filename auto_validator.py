@@ -79,13 +79,13 @@ VALIDATION_SOFT_BLOCK_MIN  = 40   # 40-59 → SOFT_BLOCK (score penalty ke confi
 # ── Layer weights (total 100) ───────────────
 LAYER_WEIGHTS = {
     "htf_trend":      20,   # Daily/Weekly alignment
-    "btc_alignment":  20,   # BTC macro support
-    "cb_premium":     20,   # Coinbase Premium (institutional bias)
+    "btc_alignment":  18,   # BTC macro support
+    "cb_premium":     16,   # Coinbase Premium (institutional bias)
     "ecosystem":      12,   # Season fit
     "oi_sanity":      12,   # OI/Funding divergence
     "mtf_depth":      10,   # Multi-TF confluence depth
-    "liquidity":       3,   # SMC liquidity context
-    "volatility":      3,   # ATR regime
+    "liquidity":      10,   # SMC liquidity context + volume at zone (dinaikkan)
+    "volatility":      2,   # ATR regime
 }
 
 # ── Sensitivity config (auto-evolves) ───────
@@ -685,28 +685,38 @@ def _check_mtf_depth(direction: str, tf_4h: dict, tf_1h: dict, tf_15m: dict, sen
 
 def _check_liquidity_context(direction: str, price: float,
                               tf_4h: dict, tf_1h: dict, tf_15m: dict) -> dict:
+    """Layer 6: SMC zone quality + volume at zone + sweep trend alignment.
+
+    Tiga sub-check:
+      A) Apakah entry di OB/FVG yang valid (FRESH/TESTED, bukan MITIGATED)?
+      B) Apakah ada volume anomaly di zona itu? (konfirmasi minat)
+      C) Apakah liquidity sweep (equal highs/lows) searah dengan HTF trend?
+         Sweep counter-trend = trap — dikena penalti.
+    """
     score = 50
     notes = []
     blocking = False
 
     def _has_valid_ob(tf: dict, direc: str) -> bool:
+        """OB valid: FRESH atau TESTED (max 2x disentuh), dalam 2% dari price."""
         ob = (tf or {}).get("order_blocks", {}) or {}
         if direc == "LONG":
             bull_ob = ob.get("bullish_ob")
             if bull_ob and isinstance(bull_ob, dict):
-                ob_high = bull_ob.get("high", 0)
-                ob_low  = bull_ob.get("low", 0)
-                status  = bull_ob.get("status", "")
-                # Entry near OB (within 2% above OB high)
-                if ob_low <= price <= ob_high * 1.02 and status in ("FRESH", "TESTED"):
+                ob_high  = bull_ob.get("high", 0)
+                ob_low   = bull_ob.get("low", 0)
+                status   = bull_ob.get("status", "")
+                touches  = bull_ob.get("touches", 0)
+                if ob_low <= price <= ob_high * 1.02 and status in ("FRESH", "TESTED") and touches <= 2:
                     return True
         else:
             bear_ob = ob.get("bearish_ob")
             if bear_ob and isinstance(bear_ob, dict):
-                ob_high = bear_ob.get("high", 0)
-                ob_low  = bear_ob.get("low", 0)
-                status  = bear_ob.get("status", "")
-                if ob_low * 0.98 <= price <= ob_high and status in ("FRESH", "TESTED"):
+                ob_high  = bear_ob.get("high", 0)
+                ob_low   = bear_ob.get("low", 0)
+                status   = bear_ob.get("status", "")
+                touches  = bear_ob.get("touches", 0)
+                if ob_low * 0.98 <= price <= ob_high and status in ("FRESH", "TESTED") and touches <= 2:
                     return True
         return False
 
@@ -725,15 +735,35 @@ def _check_liquidity_context(direction: str, price: float,
         if direc == "SHORT" and sw_dir == "DOWN":  return True
         return False
 
-    # Check across TFs
-    ob_1h  = _has_valid_ob(tf_1h, direction)
-    ob_15m = _has_valid_ob(tf_15m, direction)
-    ob_4h  = _has_valid_ob(tf_4h, direction)
-    fvg_15m = _has_fvg(tf_15m, direction)
-    fvg_1h  = _has_fvg(tf_1h, direction)
-    sweep_1h  = _has_sweep(tf_1h, direction)
-    sweep_15m = _has_sweep(tf_15m, direction)
+    def _has_volume_at_zone(tf: dict) -> bool:
+        """Volume anomaly (≥1.5x MA) di TF ini — konfirmasi ada minat di zona."""
+        vol = (tf or {}).get("volume_anomaly") or (tf or {}).get("volume", {})
+        if isinstance(vol, dict):
+            if vol.get("is_anomaly") and vol.get("multiplier", 1) >= 1.5:
+                return True
+        # Fallback: cek langsung di money_flow
+        mf = (tf or {}).get("money_flow", {})
+        if mf.get("vol_anomaly") or mf.get("volume_spike"):
+            return True
+        return False
 
+    def _has_counter_sweep(tf: dict, direc: str) -> bool:
+        """Sweep yang berlawanan dengan arah trade — tanda potential trap."""
+        sweep = (tf or {}).get("sweep", {}) or {}
+        if not sweep.get("swept"): return False
+        sw_dir = sweep.get("direction", "")
+        if direc == "LONG"  and sw_dir == "DOWN": return True
+        if direc == "SHORT" and sw_dir == "UP":   return True
+        return False
+
+    # ── A) Zone quality check ────────────────────────────────────
+    ob_1h  = _has_valid_ob(tf_1h,  direction)
+    ob_15m = _has_valid_ob(tf_15m, direction)
+    ob_4h  = _has_valid_ob(tf_4h,  direction)
+    fvg_15m = _has_fvg(tf_15m, direction)
+    fvg_1h  = _has_fvg(tf_1h,  direction)
+    sweep_1h  = _has_sweep(tf_1h,  direction)
+    sweep_15m = _has_sweep(tf_15m, direction)
     quality_zones = sum([ob_1h, ob_15m, ob_4h, fvg_15m, fvg_1h, sweep_1h, sweep_15m])
 
     if quality_zones >= 3:
@@ -749,10 +779,43 @@ def _check_liquidity_context(direction: str, price: float,
         score = 20
         notes.append(f"❌ Entry tidak di zona SMC yang jelas — 'middle of nowhere'")
 
+    # ── B) Volume at zone — reward kalau ada, penalti kalau sunyi ────
+    vol_1h  = _has_volume_at_zone(tf_1h)
+    vol_15m = _has_volume_at_zone(tf_15m)
+    if vol_1h or vol_15m:
+        score = min(100, score + 10)
+        notes.append(f"✅ Volume anomaly di zona ({'1H' if vol_1h else '15M'}) — ada minat beli/jual")
+    elif quality_zones >= 2:
+        # Di zona bagus tapi volume sepi — kurangi kepercayaan
+        score = max(20, score - 15)
+        notes.append(f"⚠️ Entry di zona SMC tapi volume sepi — konfirmasi lemah")
+
+    # ── C) Counter-trend sweep penalty ──────────────────────────────
+    # Equal highs/lows hunting yang berlawanan HTF trend = risiko trap.
+    # Contoh: sinyal LONG tapi sweep DOWN masih ada di 1H (sell-side liquidity
+    # baru diambil) = kemungkinan harga masih mau lanjut turun sebentar.
+    ctr_sweep_1h  = _has_counter_sweep(tf_1h,  direction)
+    ctr_sweep_15m = _has_counter_sweep(tf_15m, direction)
+    # HTF trend dari 4H structure
+    htf_trend = ((tf_4h or {}).get("structure", {}) or {}).get("trend", "NEUTRAL")
+    htf_aligns = (
+        (direction == "LONG"  and htf_trend in ("BULLISH", "HH_HL")) or
+        (direction == "SHORT" and htf_trend in ("BEARISH", "LH_LL"))
+    )
+    if ctr_sweep_1h and not htf_aligns:
+        score = max(15, score - 20)
+        notes.append(f"🚨 Sweep counter-trend di 1H + HTF tidak align — risiko trap tinggi")
+    elif ctr_sweep_15m and not htf_aligns:
+        score = max(20, score - 10)
+        notes.append(f"⚠️ Sweep counter-trend di 15M + HTF tidak align — hati-hati fakeout")
+
     return {"layer": "liquidity", "score": round(score), "blocking": blocking,
             "notes": notes,
             "detail": {"ob_count": sum([ob_1h, ob_15m, ob_4h]),
-                       "fvg": fvg_15m or fvg_1h, "sweep": sweep_1h or sweep_15m}}
+                       "fvg": fvg_15m or fvg_1h,
+                       "sweep": sweep_1h or sweep_15m,
+                       "vol_at_zone": vol_1h or vol_15m,
+                       "counter_sweep": ctr_sweep_1h or ctr_sweep_15m}}
 
 
 # ─────────────────────────────────────────────
