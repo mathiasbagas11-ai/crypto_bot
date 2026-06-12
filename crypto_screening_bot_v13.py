@@ -6306,7 +6306,8 @@ def build_prepump_message(candidates: list) -> str:
             _pp_dir   = pp.get("direction", "LONG")
             if pp.get("used_debate"):
                 _wlabel = _debate_winner_label(pp.get("debate_winner", "MIXED"), _pp_dir)
-                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                _htag = " + Hermes 🧠" if pp.get("hermes_used") else ""
+                lines.append(f"\n  ─── 🥊 AI DEBATE{_htag} ───")
                 lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
             else:
                 lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
@@ -6380,7 +6381,8 @@ def build_predump_message(candidates: list) -> str:
             _pd_dir   = pd_c.get("direction", "SHORT")
             if pd_c.get("used_debate"):
                 _wlabel = _debate_winner_label(pd_c.get("debate_winner", "MIXED"), _pd_dir)
-                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                _htag = " + Hermes 🧠" if pd_c.get("hermes_used") else ""
+                lines.append(f"\n  ─── 🥊 AI DEBATE{_htag} ───")
                 lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
             else:
                 lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
@@ -6490,7 +6492,8 @@ def build_reversal_message(candidates: list) -> str:
             _rv_dir   = rv.get("direction", "LONG")
             if rv.get("used_debate"):
                 _wlabel = _debate_winner_label(rv.get("debate_winner", "MIXED"), _rv_dir)
-                lines.append(f"\n  ─── 🥊 AI DEBATE ───")
+                _htag = " + Hermes 🧠" if rv.get("hermes_used") else ""
+                lines.append(f"\n  ─── 🥊 AI DEBATE{_htag} ───")
                 lines.append(f"  {_v_emoji} <b>{_verdict}</b>  ·  pemenang: <b>{_wlabel}</b>")
             else:
                 lines.append(f"\n  ─── 🤖 DeepSeek AI ───")
@@ -6854,9 +6857,14 @@ def _deepseek_enrich_candidates(candidates: list, direction: str) -> list:
                 cand["trade"]["sl"]    = review["sl"]
 
             if review.get("insight"):
-                cand["ai_insight"]  = review["insight"]
-                cand["ai_verdict"]  = review.get("ai_verdict", "CONFIRM")
-                cand["ai_adjusted"] = review.get("was_adjusted", False)
+                cand["ai_insight"]    = review["insight"]
+                cand["ai_verdict"]    = review.get("ai_verdict", "CONFIRM")
+                cand["ai_adjusted"]   = review.get("was_adjusted", False)
+                # Bawa metadata debat + Hermes agar header (🥊 AI DEBATE + Hermes 🧠)
+                # tampil benar di pesan prepump/predump/reversal.
+                cand["used_debate"]   = review.get("used_debate", False)
+                cand["debate_winner"] = review.get("debate_winner", "MIXED")
+                cand["hermes_used"]   = review.get("hermes_used", False)
 
         except Exception as e:
             log.warning(f"DeepSeek enrich error {sym}: {e}")
@@ -9551,7 +9559,8 @@ def run_gated_scan():
                         _winner_label = f"KONTRA {_signal_direction} ⚠️"
                     else:
                         _winner_label = "MIXED"
-                    _header = (f"─── 🥊 AI DEBATE (DeepSeek 🐂 vs {_bear_eng} 🐻) ───\n"
+                    _htag = " + Hermes 🧠" if ai_review.get("hermes_used") else ""
+                    _header = (f"─── 🥊 AI DEBATE (DeepSeek 🐂 vs {_bear_eng} 🐻){_htag} ───\n"
                                f"{_verdict_emoji} <b>{ai_review.get('ai_verdict','CONFIRM')}</b>"
                                f"  ·  pemenang: <b>{_winner_label}</b>\n")
                 else:

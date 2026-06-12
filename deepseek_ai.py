@@ -287,6 +287,18 @@ def deepseek_signal_review(
             except Exception:
                 sector_brief = ""
 
+            # Sinyal pasar terstruktur untuk audit exit-liquidity Hermes
+            # (jangan sampai user jadi exit liquidity smart money).
+            risk_signals = {
+                "funding":        funding,
+                "oi_change_pct":  oi_chg,
+                "ls_ratio":       ls_ratio,
+                "ls_bias":        ls_bias,
+                "cvd_4h":         mf4.get("cvd_pct"),
+                "cvd_1h":         mf1.get("cvd_pct"),
+                "euphoria":       bool(news_context.get("x_euphoria")) if news_context else False,
+            }
+
             debate = ai_debate.run_signal_debate(
                 context_text = context_text,
                 coin         = coin,
@@ -296,6 +308,7 @@ def deepseek_signal_review(
                 is_long      = is_long,
                 signal_type  = signal_type,
                 sector_brief = sector_brief,
+                risk_signals = risk_signals,
             )
             if debate:
                 return _finalize_review(
@@ -713,11 +726,17 @@ def _finalize_review(raw: dict, entry: float, tp1: float, tp2: float, sl: float,
         "error":        "",
     }
     if debate_mode:
-        result["used_debate"]   = True
-        result["debate_winner"] = raw.get("debate_winner", "MIXED")
-        result["debate_bull"]   = raw.get("debate_bull", "")
-        result["debate_bear"]   = raw.get("debate_bear", "")
-        result["bear_engine"]   = raw.get("bear_engine", "")
+        result["used_debate"]    = True
+        result["debate_winner"]  = raw.get("debate_winner", "MIXED")
+        result["debate_bull"]    = raw.get("debate_bull", "")
+        result["debate_bear"]    = raw.get("debate_bear", "")
+        result["bear_engine"]    = raw.get("bear_engine", "")
+        # Hermes final arbiter (proteksi exit-liquidity)
+        result["hermes_used"]    = raw.get("hermes_used", False)
+        result["hermes_source"]  = raw.get("hermes_source", "")
+        result["exit_liquidity"] = raw.get("exit_liquidity", False)
+        result["exitliq_score"]  = raw.get("exitliq_score", 0)
+        result["exitliq_level"]  = raw.get("exitliq_level", "NONE")
 
     log.info(
         f"AI review {symbol}: mode={'DEBATE' if debate_mode else 'SINGLE'} "
