@@ -84,7 +84,12 @@ except ImportError:
 CONFIRMED_SIGNAL_FILE = "confirmed_signals_history.json"
 
 # ── Threshold ──────────────────────────────
-MASTER_SCORE_CONFIRMED  = 75   # kirim ke Telegram
+# Ambang kirim CONFIRMED ke Telegram. Diturunkan 75→72 supaya setup "tinggi
+# tapi bukan paling tinggi" (band 72-74) ikut lolos — tetap di atas zona WATCH
+# dan masih dijaring debat + veto exit-liquidity Hermes. Bisa di-override via
+# env (MASTER_SCORE_CONFIRMED) untuk fine-tune dari Railway, di-clamp 68..85
+# biar tak bisa diset terlalu longgar / terlalu ketat tak sengaja.
+MASTER_SCORE_CONFIRMED  = max(68, min(85, int(os.getenv("MASTER_SCORE_CONFIRMED", "72"))))
 MASTER_SCORE_WATCH      = 60   # log tapi tidak kirim
 BT_MIN_PROFIT_FACTOR    = 1.0  # backtest harus >= break even
 BT_DAYS                 = 7    # quick backtest 7 hari
