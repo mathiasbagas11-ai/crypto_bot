@@ -378,12 +378,20 @@ def check_pending_signals(send_telegram_fn=None) -> list:
         sig.setdefault("activated", False)
         sig.setdefault("tps_hit", [])
 
-        # Fetch candles dari waktu signal dibuat
-        candles = _get_price_history(symbol, hours_back=max(age_hours + 1, 4))
-        created_ts = int(created_at.timestamp() * 1000)
-        future_candles = [c for c in candles if c["time"] > created_ts]
-
-        st = _evaluate_signal(sig, future_candles, created_at, now)
+        # Fetch candles + evaluasi lifecycle. Dibungkus per-sinyal: kalau SATU
+        # sinyal gagal (candle error, symbol delisted, data korup), jangan
+        # gagalkan SELURUH batch — sinyal lain tetap diproses & state tetap
+        # ke-save di akhir. Tanpa ini, satu sinyal rusak bisa bikin semua
+        # sinyal nyangkut PENDING selamanya (tak ada notif TP/SL/invalid).
+        try:
+            candles = _get_price_history(symbol, hours_back=max(age_hours + 1, 4))
+            created_ts = int(created_at.timestamp() * 1000)
+            future_candles = [c for c in candles if c["time"] > created_ts]
+            st = _evaluate_signal(sig, future_candles, created_at, now)
+        except Exception as e:
+            log.warning(f"signal_tracker: gagal evaluasi {symbol}: {e} — biarkan pending")
+            still_pending.append(sig)
+            continue
 
         prev_activated = bool(sig.get("activated"))
         prev_tps       = set(sig.get("tps_hit", []))
@@ -711,14 +719,17 @@ def _check_autobacktest_trigger(resolved: list, send_telegram_fn=None):
         if len(recent) < 3:
             continue
 
-        wins  = sum(1 for o in recent if o["status"] in ("TP_HIT", "EXPIRED_WIN"))
+        # Win-rate & loss streak dihitung dari PnL REALISASI, bukan label status —
+        # label bisa keliru (mis. TP_HIT tapi pnl negatif dari record cacat lama),
+        # konsisten dengan symbol_memory & learning_engine.
+        wins  = sum(1 for o in recent if o.get("pnl_pct", 0) > 0)
         total = len(recent)
         wr    = wins / total * 100
 
         # Cek consecutive losses (dari yang terbaru)
         consec_loss = 0
         for o in reversed(recent):
-            if o["status"] in ("SL_HIT", "EXPIRED_LOSS"):
+            if o.get("pnl_pct", 0) < 0:
                 consec_loss += 1
             else:
                 break
@@ -971,16 +982,17 @@ def get_tracker_stats() -> dict:
         if st == "INVALIDATED":
             continue
 
-        by_type.setdefault(s, {"tp": 0, "sl": 0, "exp": 0, "pnl": []})
-        by_symbol.setdefault(sym, {"tp": 0, "sl": 0, "exp": 0, "pnl": [], "recent": []})
+        by_type.setdefault(s, {"tp": 0, "sl": 0, "exp": 0, "win": 0, "pnl": []})
+        by_symbol.setdefault(sym, {"tp": 0, "sl": 0, "exp": 0, "win": 0, "pnl": [], "recent": []})
 
         for bucket in (by_type[s], by_symbol[sym]):
             if st == "TP_HIT":   bucket["tp"] += 1
             elif st == "SL_HIT": bucket["sl"] += 1
             else:                bucket["exp"] += 1
+            if pnl > 0:          bucket["win"] += 1   # win = PnL realisasi positif (anti label-bug)
             if pnl != 0:         bucket["pnl"].append(pnl)
 
-        by_symbol[sym]["recent"].append(st)
+        by_symbol[sym]["recent"].append(pnl)
 
     stats = {
         "total":      len(outcomes),
@@ -991,7 +1003,7 @@ def get_tracker_stats() -> dict:
 
     for stype, data in by_type.items():
         total_s = data["tp"] + data["sl"] + data["exp"]
-        wr      = data["tp"] / total_s * 100 if total_s > 0 else 0
+        wr      = data["win"] / total_s * 100 if total_s > 0 else 0
         avg_pnl = np.mean(data["pnl"]) if data["pnl"] else 0
         stats["by_type"][stype] = {
             "total": total_s,
@@ -1002,10 +1014,10 @@ def get_tracker_stats() -> dict:
 
     for sym, data in by_symbol.items():
         total_s  = data["tp"] + data["sl"] + data["exp"]
-        wr       = data["tp"] / total_s * 100 if total_s > 0 else 0
+        wr       = data["win"] / total_s * 100 if total_s > 0 else 0
         avg_pnl  = np.mean(data["pnl"]) if data["pnl"] else 0
         recent5  = data["recent"][-5:]
-        recent_wr = sum(1 for s in recent5 if s == "TP_HIT") / len(recent5) * 100 if recent5 else 0
+        recent_wr = sum(1 for p in recent5 if p > 0) / len(recent5) * 100 if recent5 else 0
         stats["by_symbol"][sym] = {
             "total": total_s,
             "tp": data["tp"], "sl": data["sl"],

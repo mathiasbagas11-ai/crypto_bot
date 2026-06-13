@@ -1309,6 +1309,15 @@ def run_confirmed_signal_scan(
                     _sane   = (_dir == "LONG"  and _tp_val > _entry) or \
                               (_dir == "SHORT" and _tp_val < _entry)
                     if _sane and _tp_val and _sl_val:
+                        # Teruskan entry_mode + tps ke tracker (samakan dgn jalur
+                        # GATED/PREPUMP/dst). Tanpa ini, CONFIRMED tercatat sbg
+                        # RETEST_WAIT → entry market dianggap nunggu pullback →
+                        # tak pernah aktif → cuma resolve sbg INVALIDATED telat,
+                        # notif TP/SL tak pernah muncul.
+                        _emode = trade.get("entry_mode") or ""
+                        if _emode in ("", "NONE"):
+                            # CONFIRMED = entry market (lihat entry_type=MARKET) → masuk sekarang
+                            _emode = "MOMENTUM_NOW"
                         tracker_on_signal_sent(
                             symbol          = symbol,
                             signal_type     = "CONFIRMED",
@@ -1319,6 +1328,8 @@ def run_confirmed_signal_scan(
                             score           = signal["master_score"],
                             confluence_level= signal["confidence"],
                             reasons         = signal.get("reasons", [])[:3],
+                            entry_mode      = _emode,
+                            tps             = trade.get("tps"),
                         )
                     else:
                         log.warning(f"⚠️ CONFIRMED sanity fail {symbol}: dir={_dir} entry={_entry} tp={_tp_val}")
