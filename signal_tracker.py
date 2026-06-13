@@ -378,12 +378,20 @@ def check_pending_signals(send_telegram_fn=None) -> list:
         sig.setdefault("activated", False)
         sig.setdefault("tps_hit", [])
 
-        # Fetch candles dari waktu signal dibuat
-        candles = _get_price_history(symbol, hours_back=max(age_hours + 1, 4))
-        created_ts = int(created_at.timestamp() * 1000)
-        future_candles = [c for c in candles if c["time"] > created_ts]
-
-        st = _evaluate_signal(sig, future_candles, created_at, now)
+        # Fetch candles + evaluasi lifecycle. Dibungkus per-sinyal: kalau SATU
+        # sinyal gagal (candle error, symbol delisted, data korup), jangan
+        # gagalkan SELURUH batch — sinyal lain tetap diproses & state tetap
+        # ke-save di akhir. Tanpa ini, satu sinyal rusak bisa bikin semua
+        # sinyal nyangkut PENDING selamanya (tak ada notif TP/SL/invalid).
+        try:
+            candles = _get_price_history(symbol, hours_back=max(age_hours + 1, 4))
+            created_ts = int(created_at.timestamp() * 1000)
+            future_candles = [c for c in candles if c["time"] > created_ts]
+            st = _evaluate_signal(sig, future_candles, created_at, now)
+        except Exception as e:
+            log.warning(f"signal_tracker: gagal evaluasi {symbol}: {e} — biarkan pending")
+            still_pending.append(sig)
+            continue
 
         prev_activated = bool(sig.get("activated"))
         prev_tps       = set(sig.get("tps_hit", []))
