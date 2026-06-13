@@ -8007,7 +8007,7 @@ def handle_help_command(chat_id: str):
         "Bot otomatis gabungkan:\n"
         "  confluence + prepump + predump + scalp + swing\n"
         "Divalidasi backtest 7 hari → kalau bagus, langsung kirim.\n"
-        "Threshold: master score >= 75 + backtest profit factor >= 1.0\n\n"
+        "Threshold: master score >= 72 + backtest profit factor >= 1.0\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💬 *DISKUSI SINYAL & GAYA TRADING* _(v15 baru!)_\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
