@@ -403,7 +403,7 @@ def _check_ecosystem(symbol: str, direction: str) -> dict:
         )
 
         if not _cache_is_fresh():
-            return {"layer": "ecosystem", "score": 50, "blocking": False,
+            return {"layer": "ecosystem", "score": 50, "blocking": False, "no_data": True,
                     "notes": ["⚪ Season cache stale — skip ecosystem check"], "detail": {}}
 
         ticker  = symbol.replace("USDT", "").lower()
@@ -412,7 +412,7 @@ def _check_ecosystem(symbol: str, direction: str) -> dict:
         actives = get_active_seasons(top_n=5)
 
         if not eco:
-            return {"layer": "ecosystem", "score": 50, "blocking": False,
+            return {"layer": "ecosystem", "score": 50, "blocking": False, "no_data": True,
                     "notes": ["⚪ Ecosystem tidak dikenal — neutral"], "detail": {}}
 
         scores = _season_cache.get("scores", {})
@@ -470,11 +470,11 @@ def _check_ecosystem(symbol: str, direction: str) -> dict:
                 notes.append(f"✅ Bear market — SHORT aligned dengan macro")
 
     except ImportError:
-        return {"layer": "ecosystem", "score": 50, "blocking": False,
+        return {"layer": "ecosystem", "score": 50, "blocking": False, "no_data": True,
                 "notes": ["⚪ ecosystem_detector tidak tersedia"], "detail": {}}
     except Exception as e:
         log.debug(f"Ecosystem check error: {e}")
-        return {"layer": "ecosystem", "score": 50, "blocking": False, "notes": [], "detail": {}}
+        return {"layer": "ecosystem", "score": 50, "blocking": False, "no_data": True, "notes": [], "detail": {}}
 
     return {"layer": "ecosystem", "score": round(score), "blocking": blocking,
             "notes": notes, "detail": {"eco": eco, "phase": phase}}
@@ -580,6 +580,9 @@ def _check_cb_premium(direction: str) -> dict:
             "layer":    "cb_premium",
             "score":    result["score"],
             "blocking": result["blocking"],
+            # signal UNKNOWN = premium tak tersedia (bukan koin Coinbase / fetch
+            # gagal) → tandai no_data supaya tak menghukum sinyal di gate.
+            "no_data":  result.get("signal") == "UNKNOWN",
             "notes":    result["notes"],
             "detail":   {
                 "premium_pct": result.get("premium_pct"),
@@ -589,11 +592,11 @@ def _check_cb_premium(direction: str) -> dict:
             },
         }
     except ImportError:
-        return {"layer": "cb_premium", "score": 50, "blocking": False,
+        return {"layer": "cb_premium", "score": 50, "blocking": False, "no_data": True,
                 "notes": ["⚪ coinbase_premium.py tidak tersedia — skip"], "detail": {}}
     except Exception as e:
         log.debug(f"CB premium layer error: {e}")
-        return {"layer": "cb_premium", "score": 50, "blocking": False,
+        return {"layer": "cb_premium", "score": 50, "blocking": False, "no_data": True,
                 "notes": [f"⚪ CB Premium error: {str(e)[:50]}"], "detail": {}}
 
 # ─────────────────────────────────────────────
@@ -856,6 +859,72 @@ def _check_volatility(price: float, tf_1h: dict, tf_4h: dict, sens: dict) -> dic
 
 
 # ─────────────────────────────────────────────
+# GATE AGGREGATION (dipisah agar bisa diuji)
+# ─────────────────────────────────────────────
+
+# Minimal bobot layer yang HARUS punya data sebelum re-normalisasi dipakai.
+# Kalau cakupan data < ini, pakai denominator penuh (100) supaya sinyal tidak
+# bisa lolos hanya dari sedikit layer.
+GATE_MIN_COVERAGE = 60
+
+
+def _aggregate_gate(results: dict) -> dict:
+    """
+    Hitung skor gate + keputusan dari hasil semua layer.
+
+    Layer yang menandai `no_data` (mis. ecosystem cache stale, cb_premium bukan
+    koin Coinbase / fetch gagal) DIKECUALIKAN dari rata-rata berbobot — data yang
+    absen tidak boleh menghukum sinyal. Skor di-re-normalisasi atas bobot layer
+    yang benar-benar punya data. Guard cakupan mencegah lolos dari data tipis.
+    """
+    weighted = 0.0
+    avail_w  = 0.0
+    for layer_id, weight in LAYER_WEIGHTS.items():
+        r = results.get(layer_id, {})
+        if r.get("no_data"):
+            continue
+        weighted += r.get("score", 50) * weight
+        avail_w  += weight
+
+    denom = avail_w if avail_w >= GATE_MIN_COVERAGE else 100
+    total_score = round(weighted / denom) if denom else 0
+
+    hard_blocked = [lid for lid, r in results.items() if r.get("blocking")]
+    if hard_blocked:
+        gate = "HARD_BLOCK"
+    elif total_score >= VALIDATION_PASS_SCORE:
+        gate = "PASS"
+    elif total_score >= VALIDATION_SOFT_BLOCK_MIN:
+        gate = "SOFT_BLOCK"
+    else:
+        gate = "HARD_BLOCK"
+
+    # Layer no_data tidak dihitung sebagai pass maupun fail (tak ada data).
+    passed = [lid for lid, r in results.items()
+              if r.get("score", 0) >= 60 and not r.get("no_data")]
+    failed = [lid for lid, r in results.items()
+              if r.get("score", 0) < 60 and not r.get("no_data")]
+
+    adjustment = 0
+    if gate == "PASS":
+        if total_score >= 80:
+            adjustment = +10
+        elif total_score >= 70:
+            adjustment = +5
+    elif gate == "SOFT_BLOCK":
+        adjustment = -15
+
+    return {
+        "total_score":  total_score,
+        "gate":         gate,
+        "passed":       passed,
+        "failed":       failed,
+        "hard_blocked": hard_blocked,
+        "adjustment":   adjustment,
+    }
+
+
+# ─────────────────────────────────────────────
 # MAIN VALIDATOR
 # ─────────────────────────────────────────────
 
@@ -904,41 +973,13 @@ def run_auto_validation(
     results["liquidity"]    = _check_liquidity_context(direction, price, tf_4h, tf_1h, tf_15m)
     results["volatility"]   = _check_volatility(price, tf_1h, tf_4h, sens)
 
-    # Weighted total score
-    total_score = 0.0
-    for layer_id, weight in LAYER_WEIGHTS.items():
-        layer_result = results.get(layer_id, {})
-        layer_score  = layer_result.get("score", 50)
-        total_score += layer_score * (weight / 100)
-
-    total_score = round(total_score)
-
-    # Hard blocks
-    hard_blocked = [lid for lid, r in results.items() if r.get("blocking")]
-
-    # Gate decision
-    if hard_blocked:
-        gate = "HARD_BLOCK"
-    elif total_score >= VALIDATION_PASS_SCORE:
-        gate = "PASS"
-    elif total_score >= VALIDATION_SOFT_BLOCK_MIN:
-        gate = "SOFT_BLOCK"
-    else:
-        gate = "HARD_BLOCK"
-
-    passed  = [lid for lid, r in results.items() if r.get("score", 0) >= 60]
-    failed  = [lid for lid, r in results.items() if r.get("score", 0) < 60]
-
-    # Score adjustment for confirmed_signal master_score
-    adjustment = 0
-    if gate == "PASS":
-        if total_score >= 80:
-            adjustment = +10   # Boost kalau semua layer bagus
-        elif total_score >= 70:
-            adjustment = +5
-    elif gate == "SOFT_BLOCK":
-        adjustment = -15       # Penalty kalau banyak layer fail
-    # HARD_BLOCK → signal tidak sampai sini
+    agg = _aggregate_gate(results)
+    total_score  = agg["total_score"]
+    gate         = agg["gate"]
+    passed       = agg["passed"]
+    failed       = agg["failed"]
+    hard_blocked = agg["hard_blocked"]
+    adjustment   = agg["adjustment"]
 
     result = {
         "symbol":        symbol,
